@@ -19,10 +19,13 @@ const upsertSec = db.prepare(
    ON CONFLICT(code) DO UPDATE SET name = excluded.name, board = excluded.board`
 );
 
-// 断点续拉：已有 N 只则从第 floor(N/100)+1 页继续
+// 断点续拉：已有 N 只则从第 floor(N/100)+1 页继续。
+// --full 强制从第 1 页重来（改了排序或市场过滤器后必须用，旧页码语义已失效）。
+const full = process.argv.includes("--full");
 const already = (db.prepare("SELECT COUNT(*) n FROM security").get() as any).n as number;
-const startPage = Math.floor(already / PAGE_SIZE) + 1;
-if (already > 0) console.log(`resuming: ${already} securities already stored, start at page ${startPage}`);
+const startPage = full ? 1 : Math.floor(already / PAGE_SIZE) + 1;
+if (full) console.log("full refetch requested, starting at page 1");
+else if (already > 0) console.log(`resuming: ${already} stored, start at page ${startPage}`);
 
 let securitiesOk = true;
 try {

@@ -13,6 +13,14 @@ export const EM_PUSH2_HOSTS = [
   "19.push2", "23.push2", "29.push2", "33.push2", "40.push2",
 ];
 
+/**
+ * 全市场过滤器。前四段是沪深（total 5545），最后一段是北交所（total 343）。
+ * 漏掉北交所那段的话 security 表里北交所票数为 0——实测踩过。
+ * 合并后 total 5888。
+ */
+export const EM_MARKET_FILTER =
+  "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
+
 export type Board = "主板" | "创业板" | "科创板" | "北交所";
 
 export function boardOf(code: string): Board {
@@ -113,8 +121,11 @@ export async function fetchAllSecurities(
   for (let pn = o.startPage ?? 1; ; pn++) {
     const r = await getWithHostRotation(
       client,
+      // 必须按代码(f12)升序分页，不能按涨幅(f3)。盘中价格在变，
+      // 按涨幅排序会让行在翻页间漂移——实测 36 页里重复 229 条，
+      // 有重复就必然有遗漏（那次少了 333 只）。
       host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}` +
-        `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14`,
+        `&po=0&np=1&fltt=2&invt=2&fid=f12&fs=${EM_MARKET_FILTER}&fields=f12,f14`,
       `clist page ${pn}`,
       { rounds: o.rounds, backoffMs: o.backoffMs }
     );

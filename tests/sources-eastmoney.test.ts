@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchZtPool, fetchAllSecurities, fetchLhb, boardOf, EM_PUSH2_HOSTS }
+import { fetchZtPool, fetchAllSecurities, fetchLhb, boardOf, EM_PUSH2_HOSTS, EM_MARKET_FILTER }
   from "@/lib/data/sources/eastmoney";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -136,6 +136,37 @@ describe("fetchAllSecurities", () => {
     expect(seen.length).toBe(1);
     expect(seen[0].page).toBe(1);
     expect(seen[0].n).toBe(100);
+  });
+
+  it("按代码升序分页，不按涨幅——否则盘中排序漂移会漏票", async () => {
+    let url = "";
+    const client = {
+      source: "eastmoney",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get(u: string) {
+        url = u;
+        return { ok: true as const, text: read("em-clist.json"), status: 200, latencyMs: 1 };
+      },
+    };
+    await fetchAllSecurities(client as any, { rounds: 1 });
+    expect(url).toContain("fid=f12");
+    expect(url).toContain("po=0");
+    expect(url).not.toContain("fid=f3");
+  });
+
+  it("市场过滤器包含北交所，否则北交所票会全部缺失", async () => {
+    let url = "";
+    const client = {
+      source: "eastmoney",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get(u: string) {
+        url = u;
+        return { ok: true as const, text: read("em-clist.json"), status: 200, latencyMs: 1 };
+      },
+    };
+    await fetchAllSecurities(client as any, { rounds: 1 });
+    expect(EM_MARKET_FILTER).toContain("m:0+t:81+s:2048");
+    expect(decodeURIComponent(url)).toContain("m:0+t:81+s:2048");
   });
 
   it("startPage 支持断点续拉", async () => {
