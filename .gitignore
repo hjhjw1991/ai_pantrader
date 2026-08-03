@@ -1,0 +1,9 @@
+node_modules/
+.next/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.ptbak
+tmp/
+.DS_Store
