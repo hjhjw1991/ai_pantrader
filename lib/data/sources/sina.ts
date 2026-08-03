@@ -15,10 +15,22 @@ export function sinaSymbol(code: string): string {
 export async function fetchSinaKline(
   client: SourceClient, code: string, scale: SinaScale, datalen: number
 ): Promise<Bar[]> {
+  return fetchSinaKlineBySymbol(client, sinaSymbol(code), scale, datalen);
+}
+
+/**
+ * 按新浪 symbol 直接取 K 线。指数必须走这里——指数代码不遵循
+ * 「6 开头即沪市」的规则（上证指数是 sh000001，而 sinaSymbol("000001")
+ * 会算成 sz000001，那是平安银行）。
+ */
+export async function fetchSinaKlineBySymbol(
+  client: SourceClient, symbol: string, scale: SinaScale, datalen: number
+): Promise<Bar[]> {
+  const code = symbol;
   const len = Math.min(datalen, MAX_DATALEN);
   const url =
     "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData" +
-    `?symbol=${sinaSymbol(code)}&scale=${scale}&ma=no&datalen=${len}`;
+    `?symbol=${symbol}&scale=${scale}&ma=no&datalen=${len}`;
 
   const r = await client.get(url, { referer: SINA_REFERER });
   if (!r.ok) throw new Error(`sina kline failed for ${code}@${scale}: ${r.error}`);
