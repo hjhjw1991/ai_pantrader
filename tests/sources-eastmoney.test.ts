@@ -103,6 +103,55 @@ describe("fetchAllSecurities", () => {
       .rejects.toThrow(/all .* hosts after 2 rounds/i);
   });
 
+  /** 满页（100 条）payload，使分页逻辑继续翻下一页 */
+  const fullPage = (total = 5545) => JSON.stringify({
+    data: {
+      total,
+      diff: Array.from({ length: 100 }, (_, i) => ({
+        f12: String(600000 + i).padStart(6, "0"), f14: `票${i}`,
+      })),
+    },
+  });
+
+  it("onPage 逐页交出本页数据，中途失败也保住已拉的页", async () => {
+    const seen: Array<{ page: number; n: number }> = [];
+    let calls = 0;
+    const client = {
+      source: "eastmoney",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get() {
+        calls++;
+        // 第一页成功，之后全失败
+        return calls === 1
+          ? { ok: true as const, text: fullPage(), status: 200, latencyMs: 1 }
+          : { ok: false as const, error: "empty response body", latencyMs: 1 };
+      },
+    };
+    await expect(fetchAllSecurities(client as any, {
+      rounds: 1,
+      onPage: (page, rows) => seen.push({ page, n: rows.length }),
+    })).rejects.toThrow();
+
+    // 关键：第一页的数据已经通过 onPage 交出去了
+    expect(seen.length).toBe(1);
+    expect(seen[0].page).toBe(1);
+    expect(seen[0].n).toBe(100);
+  });
+
+  it("startPage 支持断点续拉", async () => {
+    const pages: number[] = [];
+    const client = {
+      source: "eastmoney",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get(url: string) {
+        pages.push(Number(new URL(url).searchParams.get("pn")));
+        return { ok: true as const, text: read("em-clist.json"), status: 200, latencyMs: 1 };
+      },
+    };
+    await fetchAllSecurities(client as any, { startPage: 28, rounds: 1 });
+    expect(pages[0]).toBe(28);
+  });
+
   it("全主机失败后会退避重来，不是一轮就放弃", async () => {
     const tried: string[] = [];
     const client = {

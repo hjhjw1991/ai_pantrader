@@ -95,8 +95,14 @@ export async function fetchZtPool(client: SourceClient, date: string): Promise<Z
 export interface SecurityEntry { code: string; name: string; board: Board }
 
 export interface FetchSecuritiesOpts extends RotationOpts {
-  /** 每页拉完后回调，便于长任务打印进度 */
-  onPage?: (page: number, got: number, total: number) => void;
+  /**
+   * 每页拉完立即回调，带本页数据。
+   * 调用方应当在这里落库——拉满 5545 只要 56 页，全靠内存攒到最后再写，
+   * 任何一页失败就前功尽弃（实测第 28 页挂掉，前 27 页 2700 只全丢）。
+   */
+  onPage?: (page: number, rows: SecurityEntry[], got: number, total: number) => void;
+  /** 从第几页开始，用于断点续拉 */
+  startPage?: number;
 }
 
 export async function fetchAllSecurities(
@@ -104,7 +110,7 @@ export async function fetchAllSecurities(
 ): Promise<SecurityEntry[]> {
   const out: SecurityEntry[] = [];
   const pz = 100;
-  for (let pn = 1; ; pn++) {
+  for (let pn = o.startPage ?? 1; ; pn++) {
     const r = await getWithHostRotation(
       client,
       host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}` +
@@ -117,13 +123,17 @@ export async function fetchAllSecurities(
     const diff = j?.data?.diff;
     if (!Array.isArray(diff) || diff.length === 0) break;
 
-    for (const x of diff) {
+    const pageRows: SecurityEntry[] = diff.map((x: any) => {
       const code = String(x.f12);
-      out.push({ code, name: String(x.f14), board: boardOf(code) });
-    }
+      return { code, name: String(x.f14), board: boardOf(code) };
+    });
+    out.push(...pageRows);
+
     const total = Number(j?.data?.total ?? 0);
-    o.onPage?.(pn, out.length, total);
-    if (out.length >= total || diff.length < pz) break;
+    o.onPage?.(pn, pageRows, out.length, total);
+
+    const fetchedSoFar = (o.startPage ?? 1) - 1 + Math.ceil(out.length / pz);
+    if (fetchedSoFar * pz >= total || diff.length < pz) break;
   }
   return out;
 }

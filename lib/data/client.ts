@@ -17,15 +17,25 @@ function hostOf(url: string): string {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
-export function createClient(
-  source: string,
-  o: { minIntervalMs?: number; db?: Db } = {}
-): SourceClient {
+export interface ClientOpts {
+  minIntervalMs?: number;
+  db?: Db;
+  /** 单主机连续失败多少次后熔断 */
+  breakerThreshold?: number;
+  /**
+   * 熔断冷却时长。默认 5 分钟——定时 job 每 5 分钟一轮，跳过一轮无所谓；
+   * 但一次性长任务（bootstrap 拉 56 页）需要更短，否则主机熔断后
+   * 任务在自己的退避窗口内永远等不到恢复。
+   */
+  cooldownMs?: number;
+}
+
+export function createClient(source: string, o: ClientOpts = {}): SourceClient {
   const existing = registry.get(source);
   if (existing) return existing;
 
   const bucket = new TokenBucket(o.minIntervalMs ?? 300);
-  const breakers = new BreakerPool(3, 60 * 60 * 1000);
+  const breakers = new BreakerPool(o.breakerThreshold ?? 3, o.cooldownMs ?? 5 * 60 * 1000);
 
   const client: SourceClient = {
     source,
