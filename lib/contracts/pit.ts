@@ -72,6 +72,9 @@ export interface LhbSeatRow {
   buyerTimes3d: number | null;
 }
 
+/** 外围市场：A50 / 费半 / 金油等。上线起攒，没有历史。 */
+export interface MacroRow { ts: string; symbol: string; price: number; pct: number }
+
 export type Board = "主板" | "创业板" | "科创板" | "北交所";
 
 export interface SecurityRow {
@@ -97,6 +100,8 @@ export interface PointInTimeView {
   sectorRank(date: string): SectorRankRow[];
   lhb(date: string): LhbRow[];
   lhbSeats(date: string): LhbSeatRow[];
+  /** 外围市场最近 n 条。上线前无数据，因子要能接受空数组并降 confidence */
+  macro(symbol: string, n: number): MacroRow[];
 
   /**
    * 当日在市标的池。必须按 listDate/delistDate 过滤 —— spec §10.2：
