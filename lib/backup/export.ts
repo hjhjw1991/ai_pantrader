@@ -20,6 +20,11 @@ export const BAK_TABLES = [
   "kline_daily", "kline_min", "quote_snapshot", "zt_pool", "dt_pool",
   "sector_rank", "lhb", "lhb_seat", "macro", "security", "trading_calendar",
   "data_gap", "source_health",
+  // 策略与台账。预测/成交/持仓是不可再生的历史资产，必须跟数据一起搬。
+  // strategy 另有 .ptstrat 单独导出（spec §9.2），但 .ptbak 也带一份，
+  // 否则换机后台账里的 strategy_id 会指向不存在的策略。
+  "strategy", "watchpool", "prediction", "outcome", "advisor_output",
+  "account", "position", "trade", "ord",
 ];
 
 function sha256File(p: string): string {

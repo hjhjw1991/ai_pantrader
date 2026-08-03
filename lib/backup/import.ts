@@ -45,6 +45,15 @@ const TABLES: TableSpec[] = [
   { name: "trading_calendar", pk: ["date"] },
   { name: "data_gap",         pk: ["date", "source", "kind"] },
   { name: "source_health",    pk: ["source", "ts"] },
+  { name: "strategy",         pk: ["id", "version"] },
+  { name: "watchpool",        pk: ["code"] },
+  { name: "prediction",       pk: ["id"] },
+  { name: "outcome",          pk: ["pred_id"] },
+  { name: "advisor_output",   pk: ["ts", "code", "slot"] },
+  { name: "account",          pk: ["id"] },
+  { name: "position",         pk: ["account_id", "code"] },
+  { name: "trade",            pk: ["id"] },
+  { name: "ord",              pk: ["id"] },
 ];
 
 function unpack(bakPath: string): { stage: string; dbFile: string; meta: BakMeta } {
