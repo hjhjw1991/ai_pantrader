@@ -7,3 +7,4 @@ node_modules/
 *.ptbak
 tmp/
 .DS_Store
+*.tsbuildinfo
