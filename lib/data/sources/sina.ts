@@ -1,0 +1,39 @@
+import type { SourceClient } from "@/lib/data/client";
+
+export interface Bar {
+  ts: string; o: number; h: number; l: number; c: number; vol: number;
+}
+
+export type SinaScale = 1 | 5 | 15 | 30 | 60 | 240;
+const SINA_REFERER = "https://finance.sina.com.cn";
+const MAX_DATALEN = 1023;
+
+export function sinaSymbol(code: string): string {
+  return code.startsWith("6") ? `sh${code}` : `sz${code}`;
+}
+
+export async function fetchSinaKline(
+  client: SourceClient, code: string, scale: SinaScale, datalen: number
+): Promise<Bar[]> {
+  const len = Math.min(datalen, MAX_DATALEN);
+  const url =
+    "https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData" +
+    `?symbol=${sinaSymbol(code)}&scale=${scale}&ma=no&datalen=${len}`;
+
+  const r = await client.get(url, { referer: SINA_REFERER });
+  if (!r.ok) throw new Error(`sina kline failed for ${code}@${scale}: ${r.error}`);
+
+  let raw: unknown;
+  try { raw = JSON.parse(r.text); }
+  catch { throw new Error(`sina kline unexpected payload for ${code}: ${r.text.slice(0, 80)}`); }
+
+  if (!Array.isArray(raw)) {
+    throw new Error(`sina kline unexpected payload for ${code}: not an array`);
+  }
+
+  return raw.map((x: any) => ({
+    ts: String(x.day),
+    o: Number(x.open), h: Number(x.high),
+    l: Number(x.low), c: Number(x.close), vol: Number(x.volume),
+  }));
+}
