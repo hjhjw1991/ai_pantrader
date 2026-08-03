@@ -218,3 +218,47 @@ describe("collectLhb", () => {
     expect(g.recoverable).toBe(1);
   });
 });
+
+describe("collectDaily 的无序列处理", () => {
+  const nullClient = {
+    source: "sina",
+    async get() { return { ok: true as const, text: "null", status: 200, latencyMs: 1 }; },
+  };
+
+  it("无序列的代码不记缺口 —— 记了就永远回补不掉", async () => {
+    const r = await collectDaily(db, nullClient as any, ["001232"], 10);
+    expect(r.noData).toEqual(["001232"]);
+    expect(r.failed).toEqual([]);
+    const g = db.prepare("SELECT COUNT(*) n FROM data_gap").get() as any;
+    expect(g.n).toBe(0);
+  });
+
+  it("无序列占比过高时反而要告警 —— 大面积无数据更可能是限频", async () => {
+    const codes = Array.from({ length: 120 }, (_, i) => String(600000 + i));
+    const r = await collectDaily(db, nullClient as any, codes, 10);
+    expect(r.noData.length).toBe(120);
+    const g = db.prepare(
+      "SELECT * FROM data_gap WHERE kind = 'kline_daily:no_data_spike'").get() as any;
+    expect(g).toBeDefined();
+    expect(g.reason).toMatch(/限频/);
+  });
+
+  it("正常水位（14/5888 量级）不触发告警", async () => {
+    // 前 2 只无序列，其余正常 —— 2/120 远低于 5% 阈值
+    let i = 0;
+    const mixed = {
+      source: "sina",
+      async get() {
+        const text = i++ < 2 ? "null" : JSON.stringify(
+          [{ day: "2026-08-03", open: 1, high: 2, low: 1, close: 2, volume: 100 }]);
+        return { ok: true as const, text, status: 200, latencyMs: 1 };
+      },
+    };
+    const codes = Array.from({ length: 120 }, (_, k) => String(600000 + k));
+    const r = await collectDaily(db, mixed as any, codes, 10);
+    expect(r.noData.length).toBe(2);
+    const g = db.prepare(
+      "SELECT COUNT(*) n FROM data_gap WHERE kind = 'kline_daily:no_data_spike'").get() as any;
+    expect(g.n).toBe(0);
+  });
+});

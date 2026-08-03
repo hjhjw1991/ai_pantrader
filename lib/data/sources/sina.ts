@@ -4,6 +4,27 @@ export interface Bar {
   ts: string; o: number; h: number; l: number; c: number; vol: number;
 }
 
+/**
+ * 「这只票在这个源上没有序列」≠「采集失败」。
+ *
+ * 实测 2026-08-03：5888 只里有 14 只新浪返回字面量 `null`，
+ * 全是刚注册的新股与北交所定向转让代码（嘉立创/绿控传动/优机定转…），
+ * 数小时后无负载重试仍是 null —— 是这些代码本来就没有 K 线，不是被限频。
+ *
+ * 把它记成缺口会让 data_gap 永远挂着 14 条不可能被回补的记录，
+ * M0 的出口标准「连续 5 个交易日零缺口」就永远达不到，
+ * 而真正的采集事故会被这 14 条常驻噪音淹掉。
+ *
+ * 注意与空响应体区分：空响应体是限频，必须当失败（见 http.ts）。
+ * 这里只认「合法 JSON 的 null」。
+ */
+export class SourceNoData extends Error {
+  constructor(public readonly symbol: string) {
+    super(`sina has no series for ${symbol}`);
+    this.name = "SourceNoData";
+  }
+}
+
 export type SinaScale = 1 | 5 | 15 | 30 | 60 | 240;
 const SINA_REFERER = "https://finance.sina.com.cn";
 const MAX_DATALEN = 1023;
@@ -51,6 +72,8 @@ export async function fetchSinaKlineBySymbol(
   try { raw = JSON.parse(r.text); }
   catch { throw new Error(`sina kline unexpected payload for ${code}: ${r.text.slice(0, 80)}`); }
 
+  // 字面量 null = 该 symbol 无序列；其它非数组才是真的payload异常
+  if (raw === null) throw new SourceNoData(symbol);
   if (!Array.isArray(raw)) {
     throw new Error(`sina kline unexpected payload for ${code}: not an array`);
   }

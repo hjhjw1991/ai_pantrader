@@ -139,6 +139,8 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       const daily = await collectDaily(db, clients.sina, allCodes(db), 1023);
       stats.dailyWritten = daily.written;
       stats.dailyFailed = daily.failed.length;
+      // 源上无 K 线序列的代码（新股/定向转让），不是缺口但要能看见数量变化
+      stats.dailyNoData = daily.noData.length;
 
       // 重拉历史龙虎榜，把随时间回填的 D1..D30 标签取回来
       let refreshed = 0, refreshFailed = 0;
