@@ -6,7 +6,7 @@ const mode = (process.argv[3] ?? "dry-run") as ImportMode;
 const prefer = (process.argv[4] ?? "incoming") as Prefer;
 
 if (!bak) {
-  console.error("usage: pnpm import <file.ptbak> [replace|merge|dry-run] [newer|local|incoming]");
+  console.error("usage: pnpm db:import <file.ptbak> [replace|merge|dry-run] [newer|local|incoming]");
   process.exit(2);
 }
 

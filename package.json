@@ -7,11 +7,13 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "PANTRADER_LIVE=1 vitest run --dir tests/live",
+    "test:live": "PANTRADER_LIVE=1 vitest run --config vitest.live.config.ts",
     "job": "tsx scripts/job.ts",
-    "export": "tsx scripts/export.ts",
-    "import": "tsx scripts/import.ts",
-    "migrate": "tsx scripts/migrate-cli.ts"
+    "bootstrap": "tsx scripts/bootstrap.ts",
+    "install-launchd": "tsx scripts/install-launchd.ts",
+    "migrate": "tsx scripts/migrate-cli.ts",
+    "db:export": "tsx scripts/export.ts",
+    "db:import": "tsx scripts/import.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0"

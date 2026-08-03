@@ -15,9 +15,9 @@ A股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 
 ```bash
 pnpm install
-pnpm tsx scripts/bootstrap.ts     # 首次：灌证券清单 + 交易日历（可中断，重跑自动续拉）
+pnpm bootstrap     # 首次：灌证券清单 + 交易日历（可中断，重跑自动续拉）
 pnpm job selfcheck                # 缺口与覆盖率自检
-pnpm tsx scripts/install-launchd.ts   # 安装 6 个定时任务
+pnpm install-launchd   # 安装 6 个定时任务
 ```
 
 ## 数据位置
@@ -32,8 +32,8 @@ pnpm tsx scripts/install-launchd.ts   # 安装 6 个定时任务
 | 命令 | 用途 |
 |---|---|
 | `pnpm job <name>` | 手动跑 job：`selfcheck` / `preopen` / `intraday` / `close` / `post` / `night` |
-| `pnpm export [out.ptbak]` | 导出数据库（VACUUM 一致性快照 + meta + sha256） |
-| `pnpm import <f.ptbak> [replace\|merge\|dry-run] [newer\|local\|incoming]` | 导入 |
+| `pnpm db:export [out.ptbak]` | 导出数据库（VACUUM 一致性快照 + meta + sha256） |
+| `pnpm db:import <f.ptbak> [replace\|merge\|dry-run] [newer\|local\|incoming]` | 导入 |
 | `pnpm test` | 单元测试（不打网络） |
 | `pnpm test:live` | 打真实接口的 smoke 测试 |
 
@@ -76,6 +76,16 @@ rm ~/Library/LaunchAgents/com.pantrader.*.plist
 5. **分页要按代码排序** —— 按涨幅 `fid=f3` 分页，盘中价格变动导致行漂移，实测 36 页重复 229 条，有重复就有遗漏。
 6. **日历要用 `sh000001`** —— `sinaSymbol("000001")` 会算成 `sz000001`（平安银行），个股停牌会让日历漏交易日。
 7. **不可回补的数据缺一天永久缺一天** —— 分钟线、涨停池、板块榜的采集失败必须告警，不能静默重试了事。
+8. **北交所要用 `bj` 前缀** —— `sz832317` / `sh832317` 都返回 `v_pv_none_match`，只有 `bj832317` 有数据。少了这条，全市场快照会静静地少 343 条还报成功。
+9. **交易日历不能只靠日线** —— 当日日线要收盘后才有，盘中查表会判成非交易日，所有盘中 job 全部跳过。用实时行情时间戳兜底（`ensureTradingDay`）。
+10. **`pnpm import` / `pnpm export` 是 pnpm 内置命令** —— 会劫持同名 script。所以用 `db:import` / `db:export`。
+11. **live 测试需要独立 config** —— 主 config 把 `tests/live` 放进 `exclude`，`--dir` 不覆盖 exclude。
+
+## 已知残留
+
+- 4 只证券取不到实时快照（1 主板 + 3 北交所），覆盖率 5884/5888 = 99.93%，推测长期停牌
+- launchd plist 里的 node 路径是安装时的 `process.execPath`（当前指向 nvm）。切换 node 版本后需重跑 `pnpm install-launchd`
+- 复权因子未实现（spec R1）：新浪日线不复权，腾讯 qfq 只回溯到 2023-12，2022-05~2023-12 无复权参照
 
 ## 架构约束
 
