@@ -133,19 +133,82 @@ describe("collectDaily", () => {
 });
 
 describe("collectLhb", () => {
+  /**
+   * collectLhb 依次请求 明细 / 买方席位 / 卖方席位，所以桩要按调用顺序回不同的 payload。
+   */
+  function seqClient(payloads: string[]) {
+    let i = 0;
+    return {
+      source: "eastmoney",
+      async get() {
+        const text = payloads[Math.min(i++, payloads.length - 1)];
+        return { ok: true as const, text, status: 200, latencyMs: 1 };
+      },
+    };
+  }
+
+  const detail = (rows: any[]) => JSON.stringify({ result: { pages: 1, data: rows } });
+  const noSeats = detail([]);
+
   it("落库龙虎榜并解决既有 gap", async () => {
-    const payload = JSON.stringify({
-      result: { pages: 1, data: [{
-        SECURITY_CODE: "601012", SECURITY_NAME_ABBR: "隆基绿能",
-        BILLBOARD_NET_AMT: 100, BILLBOARD_BUY_AMT: 200, BILLBOARD_SELL_AMT: 100,
-        EXPLAIN: "机构专用", D1_CLOSE_ADJCHRATE: 1.2,
-        D5_CLOSE_ADJCHRATE: null, D10_CLOSE_ADJCHRATE: null }] },
-    });
-    const n = await collectLhb(db, clientReturning(payload) as any, "2026-07-31");
-    expect(n).toBe(1);
+    const payload = detail([{
+      SECURITY_CODE: "601012", SECURITY_NAME_ABBR: "隆基绿能", CHANGE_TYPE: "137001001",
+      TRADE_ID: 1, BILLBOARD_NET_AMT: 100, BILLBOARD_BUY_AMT: 200, BILLBOARD_SELL_AMT: 100,
+      EXPLANATION: "日振幅值达到15%的前5只证券", EXPLAIN: "3家机构买入，成功率38%",
+      TURNOVERRATE: 12.3, D1_CLOSE_ADJCHRATE: 1.2,
+      D5_CLOSE_ADJCHRATE: null, D10_CLOSE_ADJCHRATE: null,
+    }]);
+    const r = await collectLhb(db, seqClient([payload, noSeats, noSeats]) as any, "2026-07-31");
+    expect(r.fetched).toBe(1);
+    expect(r.stored).toBe(1);
     const row = db.prepare("SELECT * FROM lhb").get() as any;
     expect(row.d1_chg).toBe(1.2);
     expect(row.d10_chg).toBe(null);
+    expect(row.explanation).toBe("日振幅值达到15%的前5只证券");
+    expect(row.explain_stat).toBe("3家机构买入，成功率38%");
+  });
+
+  it("同票多条上榜原因全部落库，不折叠", async () => {
+    const mk = (ct: string, net: number) => ({
+      SECURITY_CODE: "002131", SECURITY_NAME_ABBR: "利欧股份", CHANGE_TYPE: ct,
+      BILLBOARD_NET_AMT: net, BILLBOARD_BUY_AMT: net, BILLBOARD_SELL_AMT: 0,
+      EXPLANATION: `原因${ct}`, EXPLAIN: "stat",
+    });
+    const payload = detail([mk("137001004001", 1), mk("137001002001001", 2), mk("137001002001002", 3)]);
+    const r = await collectLhb(db, seqClient([payload, noSeats, noSeats]) as any, "2026-07-31");
+    expect(r.stored).toBe(3);
+    const n = db.prepare("SELECT COUNT(*) n FROM lhb WHERE code='002131'").get() as any;
+    expect(n.n).toBe(3);
+  });
+
+  it("落库行数少于抓取行数就抛错 —— 这是防主键折叠静默丢数据的断言", async () => {
+    // 同一 (date, code, change_type) 出现两次：主键会折叠，stored 必然小于 fetched
+    const same = {
+      SECURITY_CODE: "002131", CHANGE_TYPE: "137001001",
+      BILLBOARD_NET_AMT: 1, BILLBOARD_BUY_AMT: 1, BILLBOARD_SELL_AMT: 0,
+      EXPLANATION: "x", EXPLAIN: "y",
+    };
+    const payload = detail([same, { ...same, BILLBOARD_NET_AMT: 2 }]);
+    await expect(
+      collectLhb(db, seqClient([payload, noSeats, noSeats]) as any, "2026-07-31")
+    ).rejects.toThrow(/row loss/i);
+    const g = db.prepare("SELECT * FROM data_gap").get() as any;
+    expect(g.recoverable).toBe(1);
+  });
+
+  it("席位明细落库，重复采集同一天不翻倍", async () => {
+    const seat = (dept: string, net: number) => ({
+      SECURITY_CODE: "002131", CHANGE_TYPE: "137001001",
+      OPERATEDEPT_CODE: "0", OPERATEDEPT_NAME: dept,
+      BUY: 10, SELL: 1, NET: net, RISE_PROBABILITY_3DAY: 38.4,
+    });
+    // 两条都是 dept_code=0（机构专用），业务键做主键会丢一条
+    const buy = detail([seat("机构专用", 9), seat("机构专用", 8)]);
+    const payloads = [detail([]), buy, detail([])];
+    const r1 = await collectLhb(db, seqClient(payloads) as any, "2026-07-31");
+    expect(r1.seatsStored).toBe(2);
+    const r2 = await collectLhb(db, seqClient(payloads) as any, "2026-07-31");
+    expect(r2.seatsStored).toBe(2);
   });
 
   it("龙虎榜失败记的是可回补 gap", async () => {

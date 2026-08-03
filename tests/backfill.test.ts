@@ -51,7 +51,7 @@ describe("backfillRecoverable", () => {
   });
 
   it("已有数据的日期不重复回补", async () => {
-    db.prepare("INSERT INTO lhb (date, code) VALUES ('2026-07-30', '000001')").run();
+    db.prepare("INSERT INTO lhb (date, code, change_type) VALUES ('2026-07-30', '000001', '137001001')").run();
     const r = await backfillRecoverable(db, okClient as any, "2026-07-29", "2026-07-31");
     expect(r.attempted).toEqual(["2026-07-29", "2026-07-31"]);
   });

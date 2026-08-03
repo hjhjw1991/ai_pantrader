@@ -149,44 +149,131 @@ export async function fetchAllSecurities(
   return out;
 }
 
+/**
+ * 龙虎榜一行 = 一只票的一个上榜原因。同一只票同一天可以有多行。
+ * `changeType` 是行身份的一部分（实测四天上 (date, code, changeType) 唯一），
+ * 不是可丢的附属字段 —— 早期版本用 (date, code) 做主键，2026-08-03 抓 58 行只存下 30 行。
+ */
 export interface LhbEntry {
-  date: string; code: string; name: string;
-  netAmt: number; buyAmt: number; sellAmt: number; explanation: string;
-  d1Chg: number | null; d5Chg: number | null; d10Chg: number | null;
+  date: string; code: string; changeType: string; tradeId: number | null;
+  name: string;
+  /** 真正的上榜原因，如"日换手率达到20%的前5只证券" */
+  explanation: string;
+  /** EXPLAIN 字段：机构家数 + 3 日成功率统计，不是上榜原因 */
+  explainStat: string;
+  netAmt: number; buyAmt: number; sellAmt: number;
+  billboardDealAmt: number | null; dealAmountRatio: number | null; dealNetRatio: number | null;
+  buySeatRaw: string; sellSeatRaw: string;
+  buyRatio: number | null; sellRatio: number | null;
+  closePrice: number | null; changeRate: number | null; turnoverRate: number | null;
+  accumAmount: number | null; freeMarketCap: number | null;
+  tradeMarket: string;
+  // 上榜当日全为 null，随后逐日回填 → night job 必须滚动重拉才拿得到监督标签
+  d1Chg: number | null; d2Chg: number | null; d5Chg: number | null;
+  d10Chg: number | null; d20Chg: number | null; d30Chg: number | null;
+}
+
+/** 营业部席位明细。无稳定业务主键（机构专用共用 dept_code='0'），落库靠先删后插。 */
+export interface LhbSeat {
+  date: string; code: string; changeType: string;
+  side: "buy" | "sell";
+  deptCode: string; deptName: string;
+  buyAmt: number; sellAmt: number; netAmt: number;
+  buyRatio: number | null; sellRatio: number | null;
+  riseProb3d: number | null; buyerTimes3d: number | null;
 }
 
 const orNull = (v: unknown): number | null =>
-  v === null || v === undefined ? null : Number(v);
+  v === null || v === undefined || v === "" ? null : Number(v);
 
-export async function fetchLhb(client: SourceClient, date: string): Promise<LhbEntry[]> {
-  const out: LhbEntry[] = [];
+const LHB_PAGE_SIZE = 500;
+
+/** datacenter 通用分页取数。`result.data` 为空或 `result` 缺失即停。 */
+async function fetchDatacenter(
+  client: SourceClient, label: string, reportName: string, date: string,
+  extraFilter = ""
+): Promise<any[]> {
+  const out: any[] = [];
   for (let page = 1; ; page++) {
     const url = "https://datacenter-web.eastmoney.com/api/data/v1/get" +
-      `?reportName=RPT_DAILYBILLBOARD_DETAILSNEW&columns=ALL&pageNumber=${page}` +
-      `&pageSize=100&filter=(TRADE_DATE%3D%27${date}%27)`;
+      `?reportName=${reportName}&columns=ALL&pageNumber=${page}` +
+      `&pageSize=${LHB_PAGE_SIZE}&filter=(TRADE_DATE%3D%27${date}%27)${extraFilter}`;
     const r = await client.get(url, { referer: EM_REFERER });
-    if (!r.ok) throw new Error(`eastmoney lhb failed for ${date} page ${page}: ${r.error}`);
+    if (!r.ok) throw new Error(`eastmoney ${label} failed for ${date} page ${page}: ${r.error}`);
 
     const j = JSON.parse(r.text);
     const rows = j?.result?.data;
     if (!Array.isArray(rows) || rows.length === 0) break;
+    out.push(...rows);
 
-    for (const x of rows) {
-      out.push({
-        date,
-        code: String(x.SECURITY_CODE),
-        name: String(x.SECURITY_NAME_ABBR ?? ""),
-        netAmt: Number(x.BILLBOARD_NET_AMT ?? 0),
-        buyAmt: Number(x.BILLBOARD_BUY_AMT ?? 0),
-        sellAmt: Number(x.BILLBOARD_SELL_AMT ?? 0),
-        explanation: String(x.EXPLAIN ?? ""),
-        d1Chg: orNull(x.D1_CLOSE_ADJCHRATE),
-        d5Chg: orNull(x.D5_CLOSE_ADJCHRATE),
-        d10Chg: orNull(x.D10_CLOSE_ADJCHRATE),
-      });
-    }
     const pages = Number(j?.result?.pages ?? 1);
     if (page >= pages) break;
   }
   return out;
+}
+
+export async function fetchLhb(client: SourceClient, date: string): Promise<LhbEntry[]> {
+  const rows = await fetchDatacenter(
+    client, "lhb", "RPT_DAILYBILLBOARD_DETAILSNEW", date
+  );
+  return rows.map(x => ({
+    date,
+    code: String(x.SECURITY_CODE),
+    changeType: String(x.CHANGE_TYPE ?? ""),
+    tradeId: orNull(x.TRADE_ID),
+    name: String(x.SECURITY_NAME_ABBR ?? ""),
+    explanation: String(x.EXPLANATION ?? ""),
+    explainStat: String(x.EXPLAIN ?? ""),
+    netAmt: Number(x.BILLBOARD_NET_AMT ?? 0),
+    buyAmt: Number(x.BILLBOARD_BUY_AMT ?? 0),
+    sellAmt: Number(x.BILLBOARD_SELL_AMT ?? 0),
+    billboardDealAmt: orNull(x.BILLBOARD_DEAL_AMT),
+    dealAmountRatio: orNull(x.DEAL_AMOUNT_RATIO),
+    dealNetRatio: orNull(x.DEAL_NET_RATIO),
+    buySeatRaw: String(x.BUY_SEAT_NEW ?? x.BUY_SEAT ?? ""),
+    sellSeatRaw: String(x.SELL_SEAT_NEW ?? x.SELL_SEAT ?? ""),
+    buyRatio: orNull(x.BUY_RATIO),
+    sellRatio: orNull(x.SELL_RATIO),
+    closePrice: orNull(x.CLOSE_PRICE),
+    changeRate: orNull(x.CHANGE_RATE),
+    turnoverRate: orNull(x.TURNOVERRATE),
+    accumAmount: orNull(x.ACCUM_AMOUNT),
+    freeMarketCap: orNull(x.FREE_MARKET_CAP),
+    tradeMarket: String(x.TRADE_MARKET ?? ""),
+    d1Chg: orNull(x.D1_CLOSE_ADJCHRATE),
+    d2Chg: orNull(x.D2_CLOSE_ADJCHRATE),
+    d5Chg: orNull(x.D5_CLOSE_ADJCHRATE),
+    d10Chg: orNull(x.D10_CLOSE_ADJCHRATE),
+    d20Chg: orNull(x.D20_CLOSE_ADJCHRATE),
+    d30Chg: orNull(x.D30_CLOSE_ADJCHRATE),
+  }));
+}
+
+const SEAT_REPORT = {
+  buy: "RPT_BILLBOARD_DAILYDETAILSBUY",
+  sell: "RPT_BILLBOARD_DAILYDETAILSSELL",
+} as const;
+
+/** 整日席位明细，一个 side 一次请求拉完（实测买方榜 290 行 / 1 页）。 */
+export async function fetchLhbSeats(
+  client: SourceClient, date: string, side: "buy" | "sell"
+): Promise<LhbSeat[]> {
+  const rows = await fetchDatacenter(
+    client, `lhb-seat-${side}`, SEAT_REPORT[side], date
+  );
+  return rows.map(x => ({
+    date,
+    code: String(x.SECURITY_CODE),
+    changeType: String(x.CHANGE_TYPE ?? ""),
+    side,
+    deptCode: String(x.OPERATEDEPT_CODE ?? ""),
+    deptName: String(x.OPERATEDEPT_NAME ?? ""),
+    buyAmt: Number(x.BUY ?? 0),
+    sellAmt: Number(x.SELL ?? 0),
+    netAmt: Number(x.NET ?? 0),
+    buyRatio: orNull(x.TOTAL_BUYRIO),
+    sellRatio: orNull(x.TOTAL_SELLRIO),
+    riseProb3d: orNull(x.RISE_PROBABILITY_3DAY),
+    buyerTimes3d: orNull(x.TOTAL_BUYER_SALESTIMES_3DAY),
+  }));
 }

@@ -142,7 +142,7 @@ describe("importBak", () => {
     runMigrations(src);
     src.prepare("INSERT INTO security (code, name, board) VALUES ('601012','隆基','主板')").run();
     src.prepare("INSERT INTO zt_pool (date, code, lbc) VALUES ('2026-07-31','000593',1)").run();
-    src.prepare("INSERT INTO lhb (date, code) VALUES ('2026-07-31','601012')").run();
+    src.prepare("INSERT INTO lhb (date, code, change_type) VALUES ('2026-07-31','601012','137001001')").run();
     const bak = path.join(dir, "multi.ptbak");
     await exportBak(src, srcPath, bak);
     src.close();

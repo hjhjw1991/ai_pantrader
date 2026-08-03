@@ -80,7 +80,9 @@ export const JOB_SCHEDULE: Array<{ label: string; job: string; calendar: CalEntr
   { label: "com.pantrader.preopen",   job: "preopen",   calendar: { Hour: 9, Minute: 0 } },
   { label: "com.pantrader.intraday",  job: "intraday",  calendar: intradaySlots() },
   { label: "com.pantrader.close",     job: "close",     calendar: { Hour: 15, Minute: 5 } },
-  { label: "com.pantrader.post",      job: "post",      calendar: { Hour: 17, Minute: 0 } },
+  // 17:00 太早：龙虎榜逐步发布，实测当日 17:00 只有 35 行、18:50 已 58 行。
+  // night job 22:00 会再重拉当日收尾（见 LHB_LABEL_OFFSETS 含 0）。
+  { label: "com.pantrader.post",      job: "post",      calendar: { Hour: 18, Minute: 40 } },
   { label: "com.pantrader.night",     job: "night",     calendar: { Hour: 22, Minute: 0 } },
 ];
 

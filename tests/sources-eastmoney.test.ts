@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchZtPool, fetchAllSecurities, fetchLhb, boardOf, EM_PUSH2_HOSTS, EM_MARKET_FILTER }
+import { fetchZtPool, fetchAllSecurities, fetchLhb, fetchLhbSeats, boardOf, EM_PUSH2_HOSTS, EM_MARKET_FILTER }
   from "@/lib/data/sources/eastmoney";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -204,17 +204,69 @@ describe("fetchAllSecurities", () => {
 });
 
 describe("fetchLhb", () => {
-  it("解析龙虎榜并带 D1/D5/D10 后续涨跌", async () => {
-    const rows = await fetchLhb(stubClient(read("em-lhb.json")) as any, "2025-07-15");
+  const load = () => fetchLhb(stubClient(read("em-lhb.json")) as any, "2026-08-03");
+
+  it("解析龙虎榜并带 D1..D30 后续涨跌", async () => {
+    const rows = await load();
     expect(rows.length).toBeGreaterThan(0);
-    expect(rows[0].date).toBe("2025-07-15");
+    expect(rows[0].date).toBe("2026-08-03");
     expect(rows[0].code).toMatch(/^\d{6}$/);
-    expect("d1Chg" in rows[0]).toBe(true);
+    for (const k of ["d1Chg", "d2Chg", "d5Chg", "d10Chg", "d20Chg", "d30Chg"]) {
+      expect(k in rows[0]).toBe(true);
+    }
   });
 
   it("null 的后续涨跌保持 null，不转成 0", async () => {
-    const rows = await fetchLhb(stubClient(read("em-lhb.json")) as any, "2025-07-15");
-    const withNull = rows.find(r => r.d10Chg === null);
-    expect(withNull).toBeDefined();
+    const rows = await load();
+    expect(rows.find(r => r.d10Chg === null)).toBeDefined();
+  });
+
+  it("同一只票同一天的多条上榜原因全部保留 —— 折叠就是丢数据", async () => {
+    const rows = await load();
+    const dup = rows.filter(r => r.code === "002131");
+    expect(dup.length).toBeGreaterThan(1);
+    // 每条的 changeType 必须不同，否则 (date, code, change_type) 这个主键选择就是错的
+    expect(new Set(dup.map(r => r.changeType)).size).toBe(dup.length);
+  });
+
+  it("explanation 是上榜原因，explainStat 才是机构/成功率统计", async () => {
+    const rows = await load();
+    const r = rows.find(x => x.code === "002131")!;
+    // 早期版本把 EXPLAIN 当成了上榜原因，资金因子按它聚类会得到无意义的簇
+    expect(r.explanation).toMatch(/证券|偏离|换手|振幅/);
+    expect(r.explainStat).toMatch(/成功率|机构|营业部/);
+    expect(r.explanation).not.toBe(r.explainStat);
+  });
+
+  it("带出席位/换手/成交占比等游资识别要用的字段", async () => {
+    const rows = await load();
+    const r = rows[0];
+    expect(typeof r.turnoverRate).toBe("number");
+    expect(typeof r.dealAmountRatio).toBe("number");
+    expect(typeof r.accumAmount).toBe("number");
+  });
+});
+
+describe("fetchLhbSeats", () => {
+  it("解析买方营业部明细", async () => {
+    const rows = await fetchLhbSeats(
+      stubClient(read("em-lhb-seat-buy.json")) as any, "2026-08-03", "buy");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].side).toBe("buy");
+    expect(rows[0].deptName.length).toBeGreaterThan(0);
+    expect(typeof rows[0].netAmt).toBe("number");
+  });
+
+  it("卖方榜标成 sell", async () => {
+    const rows = await fetchLhbSeats(
+      stubClient(read("em-lhb-seat-sell.json")) as any, "2026-08-03", "sell");
+    expect(rows.every(r => r.side === "sell")).toBe(true);
+  });
+
+  it("机构专用席位共用 dept_code=0 —— 业务键做主键必然丢行", async () => {
+    const rows = await fetchLhbSeats(
+      stubClient(read("em-lhb-seat-buy.json")) as any, "2026-08-03", "buy");
+    const key = new Set(rows.map(r => `${r.code}|${r.changeType}|${r.deptCode}`));
+    expect(key.size).toBeLessThan(rows.length);
   });
 });

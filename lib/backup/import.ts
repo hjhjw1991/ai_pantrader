@@ -17,14 +17,29 @@ export interface ImportReport {
   applied: boolean;
 }
 
-const TABLES: Array<{ name: string; pk: string[] }> = [
+interface TableSpec {
+  name: string;
+  /** 行身份。必须与建表主键完全一致，少一列就会在 merge 时把不同的行合成一行。 */
+  pk: string[];
+  /**
+   * batch-replace：表没有可跨库比对的行主键（lhb_seat 用的是自增 id，
+   * 两个库的 id 互相冲突），只能按批次整体替换。pk 在此语义下是批次键。
+   */
+  strategy?: "batch-replace";
+  /** batch-replace 时不搬运的列（自增主键由目标库自己生成） */
+  omitCols?: string[];
+}
+
+const TABLES: TableSpec[] = [
   { name: "kline_daily",      pk: ["code", "date"] },
   { name: "kline_min",        pk: ["code", "ts", "period"] },
   { name: "quote_snapshot",   pk: ["ts", "code"] },
   { name: "zt_pool",          pk: ["date", "code"] },
   { name: "dt_pool",          pk: ["date", "code"] },
   { name: "sector_rank",      pk: ["date", "ts", "sector"] },
-  { name: "lhb",              pk: ["date", "code"] },
+  // change_type 是行身份的一部分：少了它，同一只票同一天的多条上榜原因会被合成一条
+  { name: "lhb",              pk: ["date", "code", "change_type"] },
+  { name: "lhb_seat",         pk: ["date", "side"], strategy: "batch-replace", omitCols: ["id"] },
   { name: "macro",            pk: ["ts", "symbol"] },
   { name: "security",         pk: ["code"] },
   { name: "trading_calendar", pk: ["date"] },
@@ -90,10 +105,50 @@ export async function importBak(
 
     try {
       for (const t of TABLES) {
-        const cols = db.prepare(`PRAGMA table_info(${t.name})`)
+        const allCols = db.prepare(`PRAGMA table_info(${t.name})`)
           .all().map((r: any) => r.name as string);
+        const cols = allCols.filter(c => !(t.omitCols ?? []).includes(c));
         const colList = cols.join(", ");
         const on = t.pk.map(k => `main.${t.name}.${k} = inc.${t.name}.${k}`).join(" AND ");
+
+        if (t.strategy === "batch-replace") {
+          const batches = db.prepare(
+            `SELECT DISTINCT ${t.pk.join(", ")} FROM inc.${t.name}`
+          ).all() as any[];
+          const where = t.pk.map(k => `${k} = ?`).join(" AND ");
+          const vals = (b: any) => t.pk.map(k => b[k]);
+
+          let incoming = 0, clobbered = 0;
+          for (const b of batches) {
+            const inc = db.prepare(
+              `SELECT COUNT(*) n FROM inc.${t.name} WHERE ${where}`).get(...vals(b)) as any;
+            const loc = db.prepare(
+              `SELECT COUNT(*) n FROM main.${t.name} WHERE ${where}`).get(...vals(b)) as any;
+            incoming += inc.n;
+            clobbered += loc.n;
+          }
+          // 批次已存在时：prefer=local 整批不动，否则整批替换
+          const keepLocal = prefer === "local";
+          changes[t.name] = {
+            inserted: keepLocal ? incoming - clobbered : incoming,
+            updated: keepLocal ? 0 : clobbered,
+            skipped: keepLocal ? clobbered : 0,
+          };
+
+          if (o.mode === "merge") {
+            for (const b of batches) {
+              const has = (db.prepare(
+                `SELECT COUNT(*) n FROM main.${t.name} WHERE ${where}`).get(...vals(b)) as any).n;
+              if (has && keepLocal) continue;
+              db.prepare(`DELETE FROM main.${t.name} WHERE ${where}`).run(...vals(b));
+              db.prepare(
+                `INSERT INTO main.${t.name} (${colList})
+                 SELECT ${colList} FROM inc.${t.name} WHERE ${where}`
+              ).run(...vals(b));
+            }
+          }
+          continue;
+        }
 
         const ins = db.prepare(
           `SELECT COUNT(*) n FROM inc.${t.name}

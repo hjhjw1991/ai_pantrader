@@ -18,7 +18,7 @@ export interface BakMeta {
 
 export const BAK_TABLES = [
   "kline_daily", "kline_min", "quote_snapshot", "zt_pool", "dt_pool",
-  "sector_rank", "lhb", "macro", "security", "trading_calendar",
+  "sector_rank", "lhb", "lhb_seat", "macro", "security", "trading_calendar",
   "data_gap", "source_health",
 ];
 

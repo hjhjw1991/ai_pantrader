@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
-import { runJob } from "@/lib/data/jobs";
+import { runJob, lhbRefreshDates, LHB_LABEL_OFFSETS } from "@/lib/data/jobs";
 
 let dir: string, db: any;
 beforeEach(() => {
@@ -64,5 +64,51 @@ describe("runJob", () => {
     const r = await runJob("intraday", { db, clients: clients(), now: new Date("2026-07-31T03:00:00Z") });
     expect(r.skipped).toBe(false);
     expect(r.stats.snapshotWritten).toBe(0);
+  });
+});
+
+describe("lhbRefreshDates", () => {
+  // 龙虎榜的 D1..D30 标签随时间回填，必须回头重拉。
+  // 但"滚动重拉 30 天"= 90 次请求，东财十几次就限流，所以只在标签落地的偏移量上重拉。
+  function calendar(days: string[]) {
+    const ins = db.prepare(
+      "INSERT OR REPLACE INTO trading_calendar (date, is_open, source) VALUES (?, 1, 't')");
+    for (const d of days) ins.run(d);
+  }
+  const seq = (n: number) => Array.from({ length: n }, (_, i) =>
+    new Date(Date.parse("2026-08-03T00:00:00Z") - (n - 1 - i) * 86400_000)
+      .toISOString().slice(0, 10));
+
+  it("只重拉标签落地的偏移量，不是整段区间", async () => {
+    const days = seq(40);
+    calendar(days);
+    const got = lhbRefreshDates(db, days[0], "2026-08-03");
+    // 偏移 0/1/5/10/20/30 —— 六个日期，不是 40 个
+    expect(got.length).toBe(LHB_LABEL_OFFSETS.length);
+    for (const off of LHB_LABEL_OFFSETS) {
+      expect(got).toContain(days[days.length - 1 - off]);
+    }
+  });
+
+  it("含偏移 0：当日要重拉，龙虎榜是逐步发布的", async () => {
+    const days = seq(40);
+    calendar(days);
+    expect(LHB_LABEL_OFFSETS).toContain(0);
+    expect(lhbRefreshDates(db, days[0], "2026-08-03")).toContain("2026-08-03");
+  });
+
+  it("历史不够长时只给存在的日期，不造不存在的交易日", async () => {
+    const days = seq(3);   // 只有 3 个交易日，偏移 5/10/20/30 都越界
+    calendar(days);
+    const got = lhbRefreshDates(db, days[0], "2026-08-03");
+    expect(got).toEqual([days[1], days[2]]);   // 只剩偏移 1 和 0
+    expect(got.every(d => days.includes(d))).toBe(true);
+  });
+
+  it("日历为空时返回空，不抛错", () => {
+    const empty = openDb(path.join(dir, "empty.db"));
+    runMigrations(empty);
+    expect(lhbRefreshDates(empty, "2026-01-01", "2026-08-03")).toEqual([]);
+    empty.close();
   });
 });
