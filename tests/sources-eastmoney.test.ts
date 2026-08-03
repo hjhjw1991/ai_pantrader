@@ -82,7 +82,7 @@ describe("fetchZtPool", () => {
 describe("fetchAllSecurities", () => {
   it("解析证券清单并附板块", async () => {
     const { client } = hostAwareClient(EM_PUSH2_HOSTS[0], read("em-clist.json"));
-    const rows = await fetchAllSecurities(client as any);
+    const rows = await fetchAllSecurities(client as any, { rounds: 1 });
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0].code).toMatch(/^\d{6}$/);
     expect(["主板", "创业板", "科创板", "北交所"]).toContain(rows[0].board);
@@ -91,15 +91,35 @@ describe("fetchAllSecurities", () => {
   it("首个主机失败时自动轮换到下一个", async () => {
     const okHost = EM_PUSH2_HOSTS[2];
     const { tried, client } = hostAwareClient(okHost, read("em-clist.json"));
-    const rows = await fetchAllSecurities(client as any);
+    const rows = await fetchAllSecurities(client as any, { rounds: 1 });
     expect(rows.length).toBeGreaterThan(0);
     expect(tried.length).toBeGreaterThanOrEqual(3);
     expect(tried[0]).toContain(EM_PUSH2_HOSTS[0]);
   });
 
-  it("所有主机都失败时抛错", async () => {
+  it("所有主机、所有轮次都失败时才抛错", async () => {
     const { client } = hostAwareClient("nonexistent-host", "");
-    await expect(fetchAllSecurities(client as any)).rejects.toThrow(/all .* hosts/i);
+    await expect(fetchAllSecurities(client as any, { rounds: 2, backoffMs: 1 }))
+      .rejects.toThrow(/all .* hosts after 2 rounds/i);
+  });
+
+  it("全主机失败后会退避重来，不是一轮就放弃", async () => {
+    const tried: string[] = [];
+    const client = {
+      source: "eastmoney",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get(url: string) {
+        tried.push(new URL(url).hostname);
+        // 第一轮（前 10 次）全失败，第二轮起放行
+        const ok = tried.length > EM_PUSH2_HOSTS.length;
+        return ok
+          ? { ok: true as const, text: read("em-clist.json"), status: 200, latencyMs: 1 }
+          : { ok: false as const, error: "empty response body", latencyMs: 1 };
+      },
+    };
+    const rows = await fetchAllSecurities(client as any, { rounds: 3, backoffMs: 1 });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(tried.length).toBeGreaterThan(EM_PUSH2_HOSTS.length);
   });
 });
 

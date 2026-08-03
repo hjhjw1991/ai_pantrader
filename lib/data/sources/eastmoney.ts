@@ -22,18 +22,43 @@ export function boardOf(code: string): Board {
   return "主板";
 }
 
-/** 依次尝试各分片主机，首个成功即返回；全失败抛错 */
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+export interface RotationOpts {
+  /** 全部主机失败后重来的轮数 */
+  rounds?: number;
+  /** 轮间退避基数，第 n 轮等待 backoffMs * n */
+  backoffMs?: number;
+}
+
+/**
+ * 依次尝试各分片主机，首个成功即返回。
+ *
+ * 全部主机失败不等于没救——东财是整体限流一小段时间，退避后往往就恢复。
+ * 实测：10 个主机第一轮全空，静置 15s 后 82.push2 立刻成功。
+ * 所以这里做「轮换 + 轮间退避」，而不是一轮打完就放弃。
+ */
 async function getWithHostRotation(
-  client: SourceClient, buildUrl: (host: string) => string, what: string
+  client: SourceClient, buildUrl: (host: string) => string, what: string,
+  o: RotationOpts = {}
 ): Promise<HttpResult & { ok: true }> {
-  const errors: string[] = [];
-  for (const host of EM_PUSH2_HOSTS) {
-    const r = await client.get(buildUrl(host), { referer: EM_REFERER });
-    if (r.ok) return r;
-    errors.push(`${host}: ${r.error}`);
+  const rounds = o.rounds ?? 3;
+  const backoffMs = o.backoffMs ?? 15_000;
+  let errors: string[] = [];
+
+  for (let round = 1; round <= rounds; round++) {
+    errors = [];
+    for (const host of EM_PUSH2_HOSTS) {
+      const r = await client.get(buildUrl(host), { referer: EM_REFERER });
+      if (r.ok) return r;
+      errors.push(`${host}: ${r.error}`);
+    }
+    if (round < rounds) await sleep(backoffMs * round);
   }
+
   throw new Error(
-    `eastmoney ${what} failed on all ${EM_PUSH2_HOSTS.length} hosts — ${errors.join("; ")}`
+    `eastmoney ${what} failed on all ${EM_PUSH2_HOSTS.length} hosts ` +
+    `after ${rounds} rounds — ${errors.join("; ")}`
   );
 }
 
@@ -69,7 +94,14 @@ export async function fetchZtPool(client: SourceClient, date: string): Promise<Z
 
 export interface SecurityEntry { code: string; name: string; board: Board }
 
-export async function fetchAllSecurities(client: SourceClient): Promise<SecurityEntry[]> {
+export interface FetchSecuritiesOpts extends RotationOpts {
+  /** 每页拉完后回调，便于长任务打印进度 */
+  onPage?: (page: number, got: number, total: number) => void;
+}
+
+export async function fetchAllSecurities(
+  client: SourceClient, o: FetchSecuritiesOpts = {}
+): Promise<SecurityEntry[]> {
   const out: SecurityEntry[] = [];
   const pz = 100;
   for (let pn = 1; ; pn++) {
@@ -77,7 +109,8 @@ export async function fetchAllSecurities(client: SourceClient): Promise<Security
       client,
       host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}` +
         `&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14`,
-      `clist page ${pn}`
+      `clist page ${pn}`,
+      { rounds: o.rounds, backoffMs: o.backoffMs }
     );
 
     const j = JSON.parse(r.text);
@@ -89,6 +122,7 @@ export async function fetchAllSecurities(client: SourceClient): Promise<Security
       out.push({ code, name: String(x.f14), board: boardOf(code) });
     }
     const total = Number(j?.data?.total ?? 0);
+    o.onPage?.(pn, out.length, total);
     if (out.length >= total || diff.length < pz) break;
   }
   return out;
