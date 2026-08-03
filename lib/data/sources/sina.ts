@@ -8,14 +8,26 @@ export type SinaScale = 1 | 5 | 15 | 30 | 60 | 240;
 const SINA_REFERER = "https://finance.sina.com.cn";
 const MAX_DATALEN = 1023;
 
-export function sinaSymbol(code: string): string {
-  return code.startsWith("6") ? `sh${code}` : `sz${code}`;
+/**
+ * 代码 → 带市场前缀的 symbol（新浪与腾讯 gtimg 通用）。
+ *
+ * 北交所必须用 bj 前缀：实测 sz832317 / sh832317 都返回 v_pv_none_match，
+ * 只有 bj832317 有数据。漏掉这条规则会让全部 343 只北交所票取不到行情
+ * （一次全市场快照少 343 条，且不会报错，只是静静地少）。
+ */
+export function marketSymbol(code: string): string {
+  if (code.startsWith("6")) return `sh${code}`;
+  if (code.startsWith("8") || code.startsWith("43") || code.startsWith("92")) return `bj${code}`;
+  return `sz${code}`;
 }
+
+/** @deprecated 用 marketSymbol；保留别名避免调用点漏改 */
+export const sinaSymbol = marketSymbol;
 
 export async function fetchSinaKline(
   client: SourceClient, code: string, scale: SinaScale, datalen: number
 ): Promise<Bar[]> {
-  return fetchSinaKlineBySymbol(client, sinaSymbol(code), scale, datalen);
+  return fetchSinaKlineBySymbol(client, marketSymbol(code), scale, datalen);
 }
 
 /**

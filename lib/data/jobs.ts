@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
-import { isTradingDay, syncCalendar } from "@/lib/data/calendar";
+import { ensureTradingDay, syncCalendar } from "@/lib/data/calendar";
 import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
 import { collectZtPool } from "@/lib/data/collectors/cross-section";
@@ -8,6 +8,7 @@ import { collectDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
+import { systemStartDate } from "@/lib/data/meta";
 
 export type JobName = "selfcheck" | "preopen" | "intraday" | "close" | "post" | "night";
 
@@ -18,7 +19,10 @@ export interface JobDeps {
 }
 
 export interface JobResult {
-  name: string; skipped: boolean; reason?: string; stats: Record<string, number>;
+  name: string; skipped: boolean; reason?: string;
+  stats: Record<string, number>;
+  /** 缺口统计的起算日（系统起始日） */
+  since?: string;
 }
 
 const KNOWN: JobName[] = ["selfcheck", "preopen", "intraday", "close", "post", "night"];
@@ -53,16 +57,21 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
 
+  // 缺口一律从系统起始日算起，不把上线前的历史算成缺口
+  const since = systemStartDate(db, date);
+
   if (name === "selfcheck") {
-    Object.assign(stats, coverageReport(db, "1970-01-01", date));
-    const gaps = detectGaps(db, "1970-01-01", date);
+    Object.assign(stats, coverageReport(db, since, date));
+    const gaps = detectGaps(db, since, date);
     stats.missingDailyDays = gaps.missingDaily.length;
     stats.missingZtPoolDays = gaps.missingZtPool.length;
     stats.missingLhbDays = gaps.missingLhb.length;
-    return { name, skipped: false, stats };
+    return { name, skipped: false, stats, since };
   }
 
-  if (!isTradingDay(db, date)) {
+  // 日历缺当日记录时用实时行情兜底（当日日线收盘后才有）
+  const isToday = date === shanghaiDate(new Date());
+  if (!await ensureTradingDay(db, clients.tencent, date, isToday)) {
     return { name, skipped: true, reason: `${date} is not a trading day`, stats };
   }
 
@@ -99,7 +108,7 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.dailyFailed = daily.failed.length;
 
       // 回补可回补的缺口（龙虎榜）；限量避免一次打爆限频
-      const bf = await backfillRecoverable(db, clients.eastmoney, "1970-01-01", date, { maxDays: 10 });
+      const bf = await backfillRecoverable(db, clients.eastmoney, since, date, { maxDays: 10 });
       stats.backfillAttempted = bf.attempted.length;
       stats.backfillRecovered = bf.recovered.length;
       stats.backfillFailed = bf.failed.length;
