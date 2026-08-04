@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPlist, JOB_SCHEDULE } from "@/scripts/install-launchd";
+import { buildPlist, JOB_SCHEDULE, KEEPAWAKE_SCHEDULE } from "@/scripts/install-launchd";
 
 describe("buildPlist", () => {
   const plist = buildPlist({
@@ -84,5 +84,43 @@ describe("JOB_SCHEDULE", () => {
   it("每个 label 唯一", () => {
     const labels = JOB_SCHEDULE.map(j => j.label);
     expect(new Set(labels).size).toBe(labels.length);
+  });
+});
+
+describe("保持唤醒 agent", () => {
+  it("覆盖盘中全时段 —— 起点不晚于第一个 intraday，终点不早于 close", () => {
+    const s = KEEPAWAKE_SCHEDULE.find(k => k.label.endsWith("session"))!;
+    const start = (s.calendar.Hour ?? 0) * 60 + s.calendar.Minute;
+    const end = start + s.seconds / 60;
+    expect(start).toBeLessThanOrEqual(9 * 60 + 35);   // 第一个 intraday
+    expect(end).toBeGreaterThanOrEqual(15 * 60 + 5);  // close
+  });
+
+  it("覆盖 post 与 night", () => {
+    for (const [name, jobHM] of [["post", 18 * 60 + 40], ["night", 22 * 60]] as const) {
+      const k = KEEPAWAKE_SCHEDULE.find(x => x.label.endsWith(name))!;
+      const start = (k.calendar.Hour ?? 0) * 60 + k.calendar.Minute;
+      expect(start).toBeLessThanOrEqual(jobHM);
+      expect(start + k.seconds / 60).toBeGreaterThan(jobHM);
+    }
+  });
+
+  it("用 -t 限时，不会一直吊着不让机器睡", () => {
+    for (const k of KEEPAWAKE_SCHEDULE) {
+      const xml = buildPlist({
+        label: k.label, script: "", jobArgs: [], calendar: k.calendar,
+        workdir: "/w", logDir: "/l", nodeBin: "/n",
+        argv: ["/usr/bin/caffeinate", "-is", "-t", String(k.seconds)],
+      });
+      expect(xml).toContain("<string>-t</string>");
+      expect(xml).toContain(`<string>${k.seconds}</string>`);
+      // 不能是无限期 caffeinate
+      expect(k.seconds).toBeLessThan(9 * 3600);
+    }
+  });
+
+  it("night 的时长要盖住全量日线（实测约 30 分钟）", () => {
+    const k = KEEPAWAKE_SCHEDULE.find(x => x.label.endsWith("night"))!;
+    expect(k.seconds).toBeGreaterThanOrEqual(35 * 60);
   });
 });
