@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/*
+ * 终端风格暗色主题。09:15 用的工具，不是落地页：
+ * 信息密度优先，色彩只承载语义（涨跌 / 告警 / 不可用），不做装饰。
+ *
+ * 涨跌色用中国市场惯例：红涨绿跌。这与欧美相反，写死在 token 里，
+ * 别在组件里各自判断，否则总有一处会写反 —— 写反的代价是拿真钱下反向单。
+ */
+@theme {
+  --color-bg: #0a0c10;
+  --color-panel: #10141b;
+  --color-panel-2: #161c25;
+  --color-line: #232b38;
+  --color-line-2: #2e3846;
+  --color-ink: #d8dee9;
+  --color-ink-2: #97a3b6;
+  --color-ink-3: #67717f;
+
+  /* 红涨绿跌 */
+  --color-up: #f45b5b;
+  --color-down: #3fb27f;
+  --color-flat: #97a3b6;
+
+  /* 环境档位 */
+  --color-gear-attack: #f45b5b;
+  --color-gear-neutral: #e0b341;
+  --color-gear-defend: #3fb27f;
+
+  --color-warn: #e0b341;
+  --color-danger: #ff4d4f;
+  --color-info: #4aa8d8;
+
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+html,
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字一律等宽 + 表格数字对齐，否则同一列的小数点会跳动，扫一眼就看错行 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 键盘导航必须看得见焦点：这个界面预期能全程不摸鼠标 */
+:focus-visible {
+  outline: 1px solid var(--color-info);
+  outline-offset: 1px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-2);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 表格：紧凑、可横向滚动、表头吸顶 */
+table.dense {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.dense th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-panel-2);
+  color: var(--color-ink-2);
+  font-weight: 500;
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-line);
+  white-space: nowrap;
+}
+table.dense td {
+  padding: 3px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 55%, transparent);
+  white-space: nowrap;
+}
+table.dense tbody tr:hover {
+  background: var(--color-panel-2);
+}
