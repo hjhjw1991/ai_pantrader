@@ -262,3 +262,26 @@ describe("collectDaily 的无序列处理", () => {
     expect(g.n).toBe(0);
   });
 });
+
+describe("collectWatchMinute 的无序列处理", () => {
+  const nullClient = {
+    source: "sina",
+    async get() { return { ok: true as const, text: "null", status: 200, latencyMs: 1 }; },
+  };
+
+  it("无分钟序列的代码不记缺口 —— 分钟线 recoverable=0，记了就永远挂在告警里", async () => {
+    const r = await collectWatchMinute(db, nullClient as any, ["000003"], 5);
+    expect(r.noData).toEqual(["000003"]);
+    expect(r.failed).toEqual([]);
+    const n = db.prepare("SELECT COUNT(*) n FROM data_gap").get() as any;
+    expect(n.n).toBe(0);
+  });
+
+  it("真失败（空响应体=限频）仍记不可回补缺口", async () => {
+    const r = await collectWatchMinute(db, clientReturning("", false) as any, ["601012"], 5);
+    expect(r.failed).toEqual(["601012"]);
+    expect(r.noData).toEqual([]);
+    const g = db.prepare("SELECT * FROM data_gap").get() as any;
+    expect(g.recoverable).toBe(0);
+  });
+});

@@ -77,8 +77,13 @@ export function lhbRefreshDates(db: Db, since: string, today: string): string[] 
  * M1 引入 watchpool 表后替换这里。
  */
 function watchCodes(db: Db): string[] {
+  // 只取有日线序列的在市票。快照里含退市/PT 代码（000003 之类），
+  // 它们在新浪没有分钟序列，抓了纯浪费请求，还会污染缺口统计
   return db.prepare(
-    "SELECT DISTINCT code FROM quote_snapshot ORDER BY code LIMIT 50"
+    `SELECT s.code FROM security s
+      WHERE s.delist_date IS NULL AND s.first_bar_date IS NOT NULL
+        AND EXISTS (SELECT 1 FROM quote_snapshot q WHERE q.code = s.code)
+      ORDER BY s.code LIMIT 50`
   ).all().map((r: any) => r.code);
 }
 
@@ -125,6 +130,7 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         const min = await collectWatchMinute(db, clients.sina, wc, 5);
         stats.minuteWritten = min.written;
         stats.minuteFailed = min.failed.length;
+        stats.minuteNoData = min.noData.length;
       }
       break;
     }
