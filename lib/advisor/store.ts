@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { Db } from "@/lib/db";
 import type { AdvisorMode, AdvisorSnapshot, AdvisorSlots } from "@/lib/contracts/advisor";
 import { cloneDefaultSlots, isDefaultSlots, GEARS } from "@/lib/advisor/slots";
@@ -15,13 +16,28 @@ import { cloneDefaultSlots, isDefaultSlots, GEARS } from "@/lib/advisor/slots";
  *   2. prompt_hash / input_snapshot_hash 每行都带。换提示词就是换实验条件，
  *      不同 prompt 的运行必须能分开统计，不能混进同一组均值。
  *   3. INSERT OR REPLACE：同一时点重跑（比如手工重扫盘）覆盖旧值，不撞主键。
+ *   4. 行身份带 run_id。A/B 是"同一份输入跑两次"，两次 ts 相同，
+ *      不带 run_id 会让第二次覆盖第一次 —— 对照组永远是空的（见 migration 007）。
  */
 
 export const ENV_LEVEL_CODE = "";
 export const ENV_LEVEL_SLOTS = ["gearOverride", "extraSectors", "narrative"] as const;
 export const PER_CODE_SLOTS = ["scoreAdjust", "risks"] as const;
 
+/**
+ * 从 (mode, promptHash, inputSnapshotHash) 派生 run_id。
+ * 确定性：同一份历史输入回放两次必须得到同一个 run_id，
+ * 否则 spec §17 断言 4（两次回测结果哈希一致）不成立。所以不用时钟、不用随机数。
+ */
+export function deriveRunId(snap: AdvisorSnapshot): string {
+  if (snap.runId) return snap.runId;
+  return crypto.createHash("sha256")
+    .update(`${snap.mode}\u0000${snap.promptHash}\u0000${snap.inputSnapshotHash}`)
+    .digest("hex").slice(0, 16);
+}
+
 interface Row {
+  run_id: string;
   ts: string;
   code: string;
   slot: string;
@@ -36,6 +52,7 @@ interface Row {
 
 function rowsOf(snap: AdvisorSnapshot): Row[] {
   const base = {
+    run_id: deriveRunId(snap),
     ts: snap.ts,
     mode: snap.mode,
     model: snap.model,
@@ -59,8 +76,8 @@ function rowsOf(snap: AdvisorSnapshot): Row[] {
 }
 
 const INSERT = `INSERT OR REPLACE INTO advisor_output
-  (ts, code, slot, value, mode, model, prompt_hash, input_snapshot_hash, confidence, degraded)
-  VALUES (@ts, @code, @slot, @value, @mode, @model, @prompt_hash, @input_snapshot_hash, @confidence, @degraded)`;
+  (run_id, ts, code, slot, value, mode, model, prompt_hash, input_snapshot_hash, confidence, degraded)
+  VALUES (@run_id, @ts, @code, @slot, @value, @mode, @model, @prompt_hash, @input_snapshot_hash, @confidence, @degraded)`;
 
 /** 返回写入行数。整体一个事务：半截留痕比没留痕更难查 */
 export function saveSnapshot(db: Db, snap: AdvisorSnapshot): number {
@@ -96,6 +113,8 @@ export interface SnapshotQuery {
   influencedOnly?: boolean;
   mode?: AdvisorMode;
   promptHash?: string;
+  /** 只取某一次运行 —— A/B 里锁定实验组或对照组 */
+  runId?: string;
 }
 
 function parseJson(v: string | null): unknown {
@@ -127,19 +146,25 @@ export function loadSnapshots(db: Db, q: SnapshotQuery = {}): AdvisorSnapshot[] 
     where.push("prompt_hash = ?");
     args.push(q.promptHash);
   }
+  if (q.runId) {
+    where.push("run_id = ?");
+    args.push(q.runId);
+  }
   const sql = `SELECT * FROM advisor_output${where.length ? ` WHERE ${where.join(" AND ")}` : ""}
-    ORDER BY ts ASC, slot ASC, code ASC`;
+    ORDER BY ts ASC, run_id ASC, slot ASC, code ASC`;
   const rows = db.prepare(sql).all(...(args as any[])) as Row[];
 
-  // 同一次调用的行靠 (ts, mode, prompt_hash, input_snapshot_hash) 归组。
-  // 只按 ts 归组是不够的：同一时点可能跑过两种模式/两版提示词做对比。
+  // 同一次调用的行靠 run_id 归组。旧数据的 run_id 是 'legacy'（migration 007 回填），
+  // 所以仍带上 (ts, mode, prompt_hash, input_snapshot_hash) 一起做键，
+  // 让历史行不会因为共享 'legacy' 而被错并成一组。
   const groups = new Map<string, { snap: AdvisorSnapshot }>();
   for (const r of rows) {
-    const key = `${r.ts}|${r.mode}|${r.prompt_hash}|${r.input_snapshot_hash}`;
+    const key = `${r.run_id}|${r.ts}|${r.mode}|${r.prompt_hash}|${r.input_snapshot_hash}`;
     let g = groups.get(key);
     if (!g) {
       g = {
         snap: {
+          runId: r.run_id,
           ts: r.ts,
           mode: r.mode as AdvisorMode,
           model: r.model,

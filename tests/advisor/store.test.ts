@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { openDb, type Db } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
-import { DEFAULT_SLOTS, type AdvisorSnapshot } from "@/lib/contracts/advisor";
-import { saveSnapshot, loadSnapshots, snapshotInfluenced } from "@/lib/advisor/store";
+import { DEFAULT_SLOTS, type AdvisorSnapshot, type AdvisorSlots } from "@/lib/contracts/advisor";
+import { saveSnapshot, loadSnapshots, snapshotInfluenced, deriveRunId } from "@/lib/advisor/store";
 
 let dir: string;
 let db: Db;
@@ -46,7 +46,8 @@ describe("advisor store", () => {
     saveSnapshot(db, s);
     const got = loadSnapshots(db);
     expect(got).toHaveLength(1);
-    expect(got[0]).toEqual(s);
+    // 读回会带上 run_id（写入时确定性派生），其余字段必须逐一相同
+    expect(got[0]).toEqual({ ...s, runId: deriveRunId(s) });
   });
 
   it("默认/降级快照也留痕 —— 否则无法证明当时 Advisor 跑过", () => {
@@ -115,5 +116,59 @@ describe("advisor store", () => {
       "2026-08-01T09:15:00+08:00",
       "2026-08-05T09:15:00+08:00",
     ]);
+  });
+});
+
+describe("run_id 与 A/B 对照", () => {
+  // 这是当初装不下 A/B 的回归测试：两次运行 ts 相同，
+  // 旧主键 (ts, code, slot) 会让第二次覆盖第一次，对照组永远为空。
+  function snap(mode: any, promptHash: string, slots: Partial<AdvisorSlots> = {}) {
+    return {
+      ts: "2026-08-03 09:15:00.000",
+      mode,
+      model: null,
+      promptHash,
+      inputSnapshotHash: "same-input",
+      slots: { ...DEFAULT_SLOTS, ...slots },
+      confidence: 0.5,
+      degraded: false,
+    } as any;
+  }
+
+  it("同一时点的两种模式互不覆盖", () => {
+    saveSnapshot(db, snap("null", "p1"));
+    saveSnapshot(db, snap("claude-cli", "p2", { gearOverride: "防守" }));
+    const all = loadSnapshots(db);
+    expect(all).toHaveLength(2);
+    expect(new Set(all.map(s => s.mode))).toEqual(new Set(["null", "claude-cli"]));
+  });
+
+  it("同一时点两版提示词互不覆盖 —— 换提示词就是换实验条件", () => {
+    saveSnapshot(db, snap("claude-cli", "prompt-v1", { narrative: "v1 说法" }));
+    saveSnapshot(db, snap("claude-cli", "prompt-v2", { narrative: "v2 说法" }));
+    expect(loadSnapshots(db)).toHaveLength(2);
+  });
+
+  it("runId 可确定性派生 —— 同输入回放两次必须一致", () => {
+    const a = deriveRunId(snap("claude-cli", "p1"));
+    const b = deriveRunId(snap("claude-cli", "p1"));
+    expect(a).toBe(b);
+    expect(deriveRunId(snap("null", "p1"))).not.toBe(a);
+  });
+
+  it("完全相同的一次运行重跑是幂等的，不产生第二组", () => {
+    saveSnapshot(db, snap("claude-cli", "p1", { narrative: "x" }));
+    saveSnapshot(db, snap("claude-cli", "p1", { narrative: "x" }));
+    expect(loadSnapshots(db)).toHaveLength(1);
+  });
+
+  it("可按 runId 锁定某一组", () => {
+    const ctrl = snap("null", "p1");
+    const exp = snap("claude-cli", "p2", { gearOverride: "防守" });
+    saveSnapshot(db, ctrl);
+    saveSnapshot(db, exp);
+    const only = loadSnapshots(db, { runId: deriveRunId(exp) });
+    expect(only).toHaveLength(1);
+    expect(only[0].mode).toBe("claude-cli");
   });
 });

@@ -45,6 +45,17 @@ export interface AdvisorInput {
 
 export interface AdvisorSnapshot {
   ts: string;
+  /**
+   * 一次 Advisor 调用的标识，A/B 对照的分组键（spec §5.3）。
+   *
+   * 必须存在的理由：A/B 是"同一份输入跑两次"，两次的 ts 天然相同，
+   * 只靠 ts 做行身份会让第二次覆盖第一次，对照组永远为空。
+   *
+   * 省略时由 (mode, promptHash, inputSnapshotHash) 确定性派生 ——
+   * 不掺时钟和随机数，否则同一份历史输入回放两次会得到不同 run_id，
+   * 违反 spec §17 断言 4 的可复现性。
+   */
+  runId?: string;
   mode: AdvisorMode;
   model: string | null;
   /** 提示词哈希 + 输入快照哈希：换了提示词就是换了实验条件，必须能分辨 */
