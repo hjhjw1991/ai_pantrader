@@ -101,17 +101,21 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
     return { name, skipped: false, stats, since };
   }
 
+  // preopen 只同步交易日历，休市日跑一次也无害。
+  // 更重要的是：它必须在"还判不出今天是否开市"的时候也照跑 ——
+  // 日历本来就是靠它补上的，被交易日门槛挡住就成了死锁（2026-08-04 就是这么丢了一上午）。
+  if (name === "preopen") {
+    stats.calendarRows = await syncCalendar(db, clients.sina, 60);
+    return { name, skipped: false, stats };
+  }
+
   // 日历缺当日记录时用实时行情兜底（当日日线收盘后才有）
   const isToday = date === shanghaiDate(new Date());
-  if (!await ensureTradingDay(db, clients.tencent, date, isToday)) {
+  if (!await ensureTradingDay(db, clients.tencent, date, isToday, now)) {
     return { name, skipped: true, reason: `${date} is not a trading day`, stats };
   }
 
   switch (name) {
-    case "preopen": {
-      stats.calendarRows = await syncCalendar(db, clients.sina, 60);
-      break;
-    }
     case "intraday": {
       const snap = await collectMarketSnapshot(db, clients.tencent, allCodes(db));
       stats.snapshotWritten = snap.written;
