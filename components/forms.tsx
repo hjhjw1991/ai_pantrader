@@ -58,12 +58,13 @@ function Msg({ msg }: { msg: { kind: "ok" | "err"; text: string } | null }) {
 
 // ─────────────────────────── 观察池 ───────────────────────────
 
-export function WatchpoolForm() {
+export function WatchpoolForm({ accountIds = [] }: { accountIds?: string[] }) {
   const { busy, msg, send } = useSubmit();
   const [f, setF] = useState({
     code: "",
     name: "",
-    account: "贼王",
+    // 默认取第一个真实账户；没有账户就留空，由下面的提示引导去建
+    account: accountIds[0] ?? "",
     triggerPx: "",
     stopPx: "",
     thesis: "",
@@ -105,13 +106,19 @@ export function WatchpoolForm() {
       </label>
       <label className="flex flex-col gap-0.5">
         <span className="text-ink-3 text-[11px]">账户</span>
+        {/* 选项来自 account 表，代码不预设任何账户名 */}
         <select
-          className={`${inputCls} w-20`}
+          className={`${inputCls} w-24`}
           value={f.account}
           onChange={(e) => setF({ ...f, account: e.target.value })}
+          required
         >
-          <option value="贼王">贼王</option>
-          <option value="价值">价值</option>
+          {accountIds.length === 0 ? <option value="">（先建账户）</option> : null}
+          {accountIds.map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
         </select>
       </label>
       <label className="flex flex-col gap-0.5">
@@ -181,8 +188,8 @@ export function ManualFillForm({ accountIds }: { accountIds: string[] }) {
   if (accountIds.length === 0) {
     return (
       <p className="text-warn">
-        还没有账户。先在下面建账户（贼王 / 价值），再回填成交 ——
-        自动建账户会让"记错账户"静默通过，而两个账户的止损规则不可混用。
+        还没有账户。先在下面建一个（名称与类型都由你定），再回填成交 ——
+        自动建账户会让"记错账户"静默通过，而不同账户的止损规则不可混用。
       </p>
     );
   }
@@ -289,7 +296,7 @@ export function ManualFillForm({ accountIds }: { accountIds: string[] }) {
 
 export function AccountForm() {
   const { busy, msg, send } = useSubmit();
-  const [f, setF] = useState({ id: "", name: "", type: "贼王" });
+  const [f, setF] = useState({ id: "", name: "", type: "" });
   return (
     <form
       className="flex flex-wrap items-end gap-2"
@@ -319,15 +326,19 @@ export function AccountForm() {
         />
       </label>
       <label className="flex flex-col gap-0.5">
-        <span className="text-ink-3 text-[11px]">类型（止损规则由它决定）</span>
-        <select
-          className={`${inputCls} w-24`}
+        {/*
+          自由输入，不是下拉。账户类型是用户自己起的标签 ——
+          写死成 贼王/价值 两个选项，等于账户体系要改代码才能扩展。
+          止损规则来自 strategy.yaml 里以账户 id 为键的那一段，不由这个标签决定。
+        */}
+        <span className="text-ink-3 text-[11px]">类型标签（自定义，仅用于分组展示）</span>
+        <input
+          className={`${inputCls} w-28`}
           value={f.type}
           onChange={(e) => setF({ ...f, type: e.target.value })}
-        >
-          <option value="贼王">贼王</option>
-          <option value="价值">价值</option>
-        </select>
+          placeholder="如 短线 / 长线"
+          required
+        />
       </label>
       <button className={btnCls} disabled={busy} type="submit">
         保存账户

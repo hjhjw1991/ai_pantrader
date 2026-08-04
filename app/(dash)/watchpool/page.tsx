@@ -4,7 +4,7 @@ import { Panel, Tag } from "@/components/Panel";
 import { WatchpoolForm, WatchpoolRemoveButton } from "@/components/forms";
 import { dbPath, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtTs, ageMinutes } from "@/lib/ui/format";
-import { latestQuoteTs } from "@/lib/ui/queries";
+import { latestQuoteTs, accounts } from "@/lib/ui/queries";
 import { watchpoolView } from "@/lib/ui/views";
 
 export const dynamic = "force-dynamic";
@@ -138,7 +138,7 @@ export default function WatchpoolPage() {
       </Panel>
 
       <Panel title="加入观察池" hint="买入条件想清楚了再记，触发价与止损同时写">
-        <WatchpoolForm />
+        <WatchpoolForm accountIds={accounts(db).map((a) => a.id)} />
       </Panel>
 
       <p className="text-ink-3 text-[11px]">

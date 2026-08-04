@@ -5,7 +5,7 @@
  * PIT 的具体实现在 lib/pit/。引擎也不 import 具体因子，只依赖 FactorRegistry 接口。
  */
 export {
-  DEFAULT_STRATEGY_YAML_REL, ACCOUNT_KEY_ALIASES, StrategyConfigSchema,
+  DEFAULT_STRATEGY_YAML_REL, ACCOUNT_KEY_SUFFIX, normalizeAccountKey, StrategyConfigSchema,
   validateStrategyYaml, validateStrategyConfig, formatIssue, formatIssues,
 } from "@/lib/strategy/schema";
 export type {

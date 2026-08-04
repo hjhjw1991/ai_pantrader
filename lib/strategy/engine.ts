@@ -13,10 +13,10 @@
  * 静默放过等于宣称"条件都查过了"，那是这套系统里最贵的一种假阳性。
  */
 import type {
-  AccountType, Action, Candidate, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
-  Phase, PointInTimeView, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput,
-} from "@/lib/contracts";
+  AccountId, AccountType, Action, Candidate, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
+  Phase, PointInTimeView, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput } from "@/lib/contracts";
 import { accountRule, takeProfitRules, unparsedTakeProfit } from "@/lib/strategy/loader";
+import { normalizeAccountKey } from "@/lib/strategy/schema";
 
 /** 低置信线。spec §10.3：代理因子 ρ<0.8 要在回测报告首页标红，信号卡同一把尺子 */
 export const LOW_CONFIDENCE = 0.8;
@@ -73,10 +73,31 @@ const asNum = (v: unknown): number | null =>
 const strArray = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
-/** 只认这四个板，北交所两个账户都不做（filters 第 5 道筛的口径） */
-function accountForBoard(board: string): AccountType | null {
-  if (board === "主板") return "贼王";
-  if (board === "创业板" || board === "科创板") return "价值";
+/**
+ * 每账户可交易的板块，来自 strategy.yaml 的 `持仓.<账户>.可交易板块`。
+ * 账户名与权限都是用户的配置 —— 早期版本把 "主板→贼王 / 创业板→价值" 写死在这里，
+ * 那等于我替用户决定了他有几个账户、各自开了什么权限。
+ */
+function accountBoards(config: StrategyConfig): Array<{ account: AccountId; boards: string[] }> {
+  const held = (config as unknown as { 持仓?: Record<string, unknown> }).持仓;
+  if (held === null || typeof held !== "object") return [];
+  const out: Array<{ account: AccountId; boards: string[] }> = [];
+  for (const key of Object.keys(held)) {
+    const account = normalizeAccountKey(key);
+    if (account.length === 0) continue;
+    out.push({ account, boards: strArray(accountRule(config, account)["可交易板块"]) });
+  }
+  return out;
+}
+
+/**
+ * 板块 → 账户。命中多个账户时取 YAML 里靠前的那个（顺序即优先级，用户可自行调整）。
+ * 没有任何账户能交易这个板块就返回 null，该标的不进候选 —— 出一个买不进的信号更糟。
+ */
+function accountForBoard(
+  perms: Array<{ account: AccountId; boards: string[] }>, board: string
+): AccountId | null {
+  for (const { account, boards } of perms) if (boards.includes(board)) return account;
   return null;
 }
 
@@ -302,6 +323,8 @@ function buildCandidates(
 ): RawCandidate[] {
   const { view, config } = input;
   const 阈值 = config.选股.过滤器阈值;
+  // 账户与其板块权限全部来自 YAML，顺序即优先级
+  const perms = accountBoards(config);
   const out: RawCandidate[] = [];
 
   // 排序先定死：连板高 → 封单大 → 代码。名次会影响风控分配，抖动就是结果不可复现
@@ -320,8 +343,9 @@ function buildCandidates(
       warn(`标的元数据缺失：${row.code} 查不到板与上市信息，跳过（不猜板别就不会猜错涨跌幅限制）`);
       continue;
     }
-    const account = accountForBoard(sec.board);
-    if (account === null) continue;                     // 北交所：两个账户都不做
+    const account = accountForBoard(perms, sec.board);
+    // 没有账户开通该板块权限：不出信号（出了也买不进）
+    if (account === null) continue;
 
     const filt = runner.run("过滤器", { ...阈值, code: row.code, 账户: account });
     if (filt === null) continue;
@@ -419,24 +443,33 @@ export function applyPortfolioCaps(
 ): Candidate[] {
   const 风控 = config.组合风控;
   const 比例 = 风控.核心卫星比例;
-  // 贼王吃波动 = 卫星，价值扛逻辑 = 核心
-  const bucketShare: Record<AccountType, number> = {
-    贼王: asNum(比例.卫星) ?? 0,
-    价值: asNum(比例.核心) ?? 0,
-  };
+  /**
+   * 每账户占核心/卫星哪个桶，来自 `持仓.<账户>.仓位桶`（值为 核心 或 卫星）。
+   * 早期版本写死 "贼王=卫星、价值=核心"，改个账户名预算就变 0 且不报错。
+   * 没配 仓位桶 的账户预算为 0，但会在卡片 warnings 里点名，不静默吞掉。
+   */
+  const bucketShare: Record<string, number> = {};
+  const missingBucket: string[] = [];
+  for (const { account } of accountBoards(config)) {
+    const bucket = accountRule(config, account)["仓位桶"];
+    if (bucket === "卫星") bucketShare[account] = asNum(比例.卫星) ?? 0;
+    else if (bucket === "核心") bucketShare[account] = asNum(比例.核心) ?? 0;
+    else { bucketShare[account] = 0; missingBucket.push(account); }
+  }
 
   const usedTotal = { v: 0 };
-  const usedAccount: Record<string, number> = { 贼王: 0, 价值: 0 };
+  const usedAccount: Record<string, number> = {};
+  for (const a of Object.keys(bucketShare)) usedAccount[a] = 0;
   const usedSector = new Map<string, number>();
 
   const out: Candidate[] = [];
   for (const c of cands) {
-    const accountBudget = round6(targetPosition * bucketShare[c.account]);
+    const accountBudget = round6(targetPosition * (bucketShare[c.account] ?? 0));
     const sectorUsed = usedSector.get(c.sector) ?? 0;
     const limits: Array<{ room: number; label: string }> = [
       { room: 风控.单票最大占比, label: `单票最大占比 ${风控.单票最大占比}` },
       { room: targetPosition - usedTotal.v, label: `总仓位预算 ${round6(targetPosition)} 已用满` },
-      { room: accountBudget - usedAccount[c.account], label: `${c.account}账户占比上限 ${accountBudget}（核心卫星比例）已用满` },
+      { room: accountBudget - (usedAccount[c.account] ?? 0), label: `${c.account}账户占比上限 ${accountBudget}（核心卫星比例）已用满` },
       { room: 风控.单行业最大占比 - sectorUsed, label: `单行业最大占比 ${风控.单行业最大占比}（${c.sector}）已用满` },
     ];
     const binding = limits.reduce((m, x) => (x.room < m.room ? x : m), limits[0]);
@@ -454,7 +487,7 @@ export function applyPortfolioCaps(
       continue;
     }
     usedTotal.v = round6(usedTotal.v + size);
-    usedAccount[c.account] = round6(usedAccount[c.account] + size);
+    usedAccount[c.account] = round6((usedAccount[c.account] ?? 0) + size);
     usedSector.set(c.sector, round6(sectorUsed + size));
     out.push({ ...base, action: "买入" as Action, size });
   }

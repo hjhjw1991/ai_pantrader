@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AccountType, StrategyConfig } from "@/lib/contracts/strategy";
 import {
-  DEFAULT_STRATEGY_YAML_REL, ACCOUNT_KEY_ALIASES,
+  DEFAULT_STRATEGY_YAML_REL, normalizeAccountKey,
   validateStrategyYaml, formatIssues, type ValidationIssue,
 } from "@/lib/strategy/schema";
 import { indexYaml, type YamlSpan } from "@/lib/strategy/yaml-pos";
@@ -216,11 +216,8 @@ export function writeStrategyParam(
 /* ------------------------------ 账户规则读取 ------------------------------ */
 
 /**
- * 取某账户的规则段。
- *
- * 契约里 StrategyConfig.持仓 的键是 AccountType（贼王 / 价值），
- * 而 spec §9.1 的 YAML 写的是"贼王账户 / 价值账户"，ledger 契约的 paramPath 示例
- * 也写着 "持仓.贼王账户.止损"。两种写法都得认，否则一份 spec 原样抄下来的 YAML 读不出规则。
+ * 取某账户的规则段。账户名由用户定义，这里不认任何固定名字，
+ * 只按构词规则归一化（`贼王` 与 `贼王账户` 视为同一账户）。
  */
 export function accountRule(
   cfg: StrategyConfig, account: AccountType
@@ -228,7 +225,8 @@ export function accountRule(
   const held = cfg.持仓 as unknown as Record<string, unknown>;
   if (held === undefined || held === null) return {};
   for (const [k, v] of Object.entries(held)) {
-    if (ACCOUNT_KEY_ALIASES[k] === account && v !== null && typeof v === "object") {
+    if (normalizeAccountKey(k) === normalizeAccountKey(account)
+        && v !== null && typeof v === "object") {
       return v as Record<string, unknown>;
     }
   }

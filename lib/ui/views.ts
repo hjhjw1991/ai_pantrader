@@ -47,6 +47,8 @@ export interface PositionsView {
   risk: PortfolioRisk;
   /** 有 position 行但 account 表查不到对应账户 —— 会导致止损规则套错，必须点名 */
   orphanAccountIds: string[];
+  /** YAML 里配了规则、但 account 表里没有的账户名 */
+  rulesWithoutAccount: string[];
   /** 规则是否来自 strategy.yaml。false = 没读到配置，硬线告警只能靠逐票止损价 */
   rulesFromConfig: boolean;
 }
@@ -87,12 +89,11 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
     };
   });
 
-  // 键的两种写法（"贼王" / "贼王账户"）由 loader 的 accountRule 统一认，这里不再猜
+  // 规则按 YAML 里实际存在的账户构建，不预设任何账户名。
+  // 用户改了账户名或加了账户，这里自动跟上；写死键名会让硬线告警静默失效
   const rawRules = accountRules(cfg);
-  const rules = {
-    贼王: toAccountRules(rawRules.贼王),
-    价值: toAccountRules(rawRules.价值),
-  };
+  const rules: Record<string, ReturnType<typeof toAccountRules>> = {};
+  for (const [acct, raw] of Object.entries(rawRules)) rules[acct] = toAccountRules(raw);
 
   return {
     rows,
@@ -111,7 +112,10 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
       null
     ),
     orphanAccountIds: [...new Set(pos.map((p) => p.accountId).filter((id) => !accIds.has(id)))],
-    rulesFromConfig: Boolean(rules.贼王 || rules.价值),
+    // 有任一账户从 YAML 读到了规则
+    rulesFromConfig: Object.values(rules).some(r => r !== null),
+    /** YAML 里配了规则、但 account 表里不存在的账户名 —— 大概率是改名后忘了同步 */
+    rulesWithoutAccount: Object.keys(rules).filter(a => !accIds.has(a)),
   };
 }
 

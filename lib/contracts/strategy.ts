@@ -6,8 +6,23 @@ export type EnvGear = "进攻" | "中性" | "防守";
 
 export type Phase = "盘前" | "盘中" | "盘后";
 
-/** 两个账户语义完全不同：贼王吃波动、价值扛逻辑，止损规则不可混用。 */
-export type AccountType = "贼王" | "价值";
+/**
+ * 账户标识。**由用户自己定义**，代码里不预设任何账户名。
+ *
+ * 早期版本把它写成 `"贼王" | "价值"` 联合类型，那意味着加一个账户、改一个名字
+ * 都要改代码并跑一遍编译 —— 账户是用户的资产组织方式，不是程序的枚举。
+ *
+ * 现在的分工：
+ *   账户清单   → `account` 表，用户在设置页增删改（数据）
+ *   每账户规则 → strategy.yaml 的 `持仓` 段，按账户 id 作键（策略参数，D7 唯一真相源）
+ *
+ * 不同账户的止损语义可以完全不同（吃波动的按比例止损、扛逻辑的按逻辑破坏），
+ * 所以规则必须按账户分开配，不能共用一套 —— 但"分成哪几个账户"是用户的决定。
+ */
+export type AccountId = string;
+
+/** @deprecated 用 AccountId。保留别名避免调用点一次性全改。 */
+export type AccountType = AccountId;
 
 export interface EnvAssessment {
   gear: EnvGear;

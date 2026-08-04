@@ -86,9 +86,11 @@ interface Bucket {
 function build(b: Bucket, cfg: unknown): ParamSuggestion | null {
   switch (b.errorType) {
     case "逆势扛": {
-      // 止损是按账户分的，贼王与价值的止损语义完全不同，不能混着提
-      const account = b.account ?? "贼王";
-      const paramPath = `持仓.${account}.止损`;
+      // 止损按账户分：不同账户的止损语义可以完全不同，不能混着提。
+      // 预测没记账户时不猜一个 —— 猜错会把建议指到别人的账户上，
+      // 用户照着改就动了不该动的参数
+      if (b.account === null || b.account === undefined) return null;
+      const paramPath = `持仓.${b.account}.止损`;
       const current = readPath(cfg, paramPath);
       const suggested = tightenStop(current);
       return {
@@ -96,7 +98,7 @@ function build(b: Bucket, cfg: unknown): ParamSuggestion | null {
         suggested: suggested ?? 0.06,
         rationale: suggested == null
           ? `${b.occurrences} 次逆势扛（破止损未走）。当前止损值无法解析（${JSON.stringify(current)}），需人工设定；建议先按 6% 收紧`
-          : `${b.occurrences} 次逆势扛（破止损未走）。建议把 ${account} 账户止损从 ${current} 收紧到 ${suggested}（-25%），让破位更早触发离场`,
+          : `${b.occurrences} 次逆势扛（破止损未走）。建议把 ${b.account} 账户止损从 ${current} 收紧到 ${suggested}（-25%），让破位更早触发离场`,
       };
     }
     case "追高": {

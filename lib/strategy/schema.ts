@@ -15,11 +15,22 @@ import { indexYaml, locate, type YamlIndex } from "@/lib/strategy/yaml-pos";
 /** 相对项目根。参数面板与导入导出都引用这个常量，别各写一份字符串 */
 export const DEFAULT_STRATEGY_YAML_REL = "config/strategy.yaml";
 
-/** 持仓段的账户键：契约用 AccountType（贼王/价值），spec §9.1 的 YAML 写的是"贼王账户"。见最终报告的契约矛盾 */
-export const ACCOUNT_KEY_ALIASES: Record<string, "贼王" | "价值"> = {
-  贼王: "贼王", 贼王账户: "贼王",
-  价值: "价值", 价值账户: "价值",
-};
+/**
+ * 账户键归一化。**不维护账户名白名单** —— 账户由用户定义，代码不该知道它们叫什么。
+ *
+ * 只做一件事：去掉结尾的"账户"二字，让 `贼王` 与 `贼王账户` 指向同一个账户。
+ * 这个别名需求是真实的：spec §9.1 的 YAML 写"贼王账户"，而 ledger 契约的
+ * paramPath 示例写"持仓.贼王.止损"，一份照 spec 抄下来的 YAML 必须读得出规则。
+ * 但它是**构词规则**，跟具体账户名无关，所以对用户新建的任何账户同样成立。
+ */
+export const ACCOUNT_KEY_SUFFIX = "账户";
+
+export function normalizeAccountKey(k: string): string {
+  const t = k.trim();
+  return t.length > ACCOUNT_KEY_SUFFIX.length && t.endsWith(ACCOUNT_KEY_SUFFIX)
+    ? t.slice(0, -ACCOUNT_KEY_SUFFIX.length)
+    : t;
+}
 
 /* --------------------------------- zod --------------------------------- */
 
@@ -177,25 +188,17 @@ function crossChecks(cfg: Raw): Array<{ path: string[]; message: string }> {
   // 持仓段的账户键
   const 持仓 = asObj(cfg["持仓"]);
   const keys = Object.keys(持仓);
+  // 不校验账户叫什么名字 —— 那是用户的决定。只挡空键这种真正无法处理的输入
   for (const k of keys) {
-    if (ACCOUNT_KEY_ALIASES[k] === undefined) {
-      out.push({
-        path: ["持仓", k],
-        message: `未知账户键 ${k}，只认 ${Object.keys(ACCOUNT_KEY_ALIASES).join(" / ")}`,
-      });
+    if (normalizeAccountKey(k).length === 0) {
+      out.push({ path: ["持仓", k], message: `账户键不能为空` });
     }
-  }
-  if (keys.length > 0 && keys.every(k => ACCOUNT_KEY_ALIASES[k] === undefined)) {
-    out.push({
-      path: ["持仓"],
-      message: `持仓段没有任何可识别的账户（贼王 / 价值）`,
-    });
   }
   // 同一账户写了两种别名 → 两份规则，实际生效哪份取决于遍历顺序
   const seen = new Map<string, string>();
   for (const k of keys) {
-    const norm = ACCOUNT_KEY_ALIASES[k];
-    if (norm === undefined) continue;
+    const norm = normalizeAccountKey(k);
+    if (norm.length === 0) continue;
     const prev = seen.get(norm);
     if (prev !== undefined) {
       out.push({ path: ["持仓", k], message: `与 ${prev} 指向同一账户 ${norm}，重复配置` });

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS strategy (
 CREATE TABLE IF NOT EXISTS watchpool (
   code        TEXT PRIMARY KEY,
   name        TEXT,
-  account     TEXT,                -- 贼王 | 价值
+  account     TEXT,                -- 账户 id，见 account 表（用户自定义）
   trigger_px  REAL,
   stop_px     REAL,
   thesis      TEXT,
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS advisor_output (
 CREATE TABLE IF NOT EXISTS account (
   id     TEXT PRIMARY KEY,
   name   TEXT NOT NULL,
-  type   TEXT NOT NULL             -- 贼王 | 价值
+  type   TEXT NOT NULL             -- 用户自起的标签，不是固定枚举
 );
 
 CREATE TABLE IF NOT EXISTS position (

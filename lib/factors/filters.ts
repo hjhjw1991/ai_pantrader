@@ -71,11 +71,13 @@ export const DEFAULT_FILTER_PARAMS: FilterParams = {
   止损幅度: 5,
   振幅容忍倍数: 2,
   MA20偏离上限: 20,
-  // 用户选的是"路 B"：不开科创/创业权限，贼王账户只做主板；北交所两个账户都不做
-  账户可交易板块: {
-    贼王: ["主板"],
-    价值: ["主板", "创业板", "科创板"],
-  },
+  /**
+   * 每个账户能交易哪些板块，由用户按自己的开通权限配置（strategy.yaml）。
+   * 默认留空：这里不预设任何账户名，也不替用户假设他开了哪些权限 ——
+   * 猜错的两个方向都有害（少给权限漏掉可交易标的，多给权限给出买不进的信号）。
+   * 未配置的账户，这道筛报"未判定"而不是默默放行或默默否决。
+   */
+  账户可交易板块: {},
 };
 
 export interface FilterOutcome {
@@ -90,7 +92,7 @@ export interface FilterOutcome {
 
 export interface FilterReport {
   code: string;
-  account: AccountType;
+  account: AccountType | null;
   /** 无任何"已判定且否决" */
   passedAll: boolean;
   outcomes: FilterOutcome[];
@@ -118,7 +120,7 @@ function mergeParams(p: Partial<FilterParams> = {}): FilterParams {
 }
 
 export function runFilters(
-  view: PointInTimeView, code: string, account: AccountType,
+  view: PointInTimeView, code: string, account: AccountType | null,
   overrides: Partial<FilterParams> = {}, date = view.asOf
 ): FilterReport {
   const p = mergeParams(overrides);
@@ -180,8 +182,20 @@ export function runFilters(
   /* 5. 权限×账户 */
   if (sec === null) {
     outcomes.push({ name: "权限账户", pass: false, evaluated: false, reason: "security 表没有这个代码，板块未知" });
+  } else if (account === null) {
+    outcomes.push({
+      name: "权限账户", pass: false, evaluated: false,
+      reason: "未指定账户，无法判定板块权限",
+    });
+  } else if (p.账户可交易板块[account] === undefined) {
+    // 关键：没配置 ≠ 什么都不能买。空数组会让这道筛否决一切，
+    // 看起来像"策略很严格"，实际是配置缺失被当成了结论
+    outcomes.push({
+      name: "权限账户", pass: false, evaluated: false,
+      reason: `账户 ${account} 未配置可交易板块（strategy.yaml 持仓段），本道筛未判定`,
+    });
   } else {
-    const allowed = p.账户可交易板块[account] ?? [];
+    const allowed = p.账户可交易板块[account];
     const ok = allowed.includes(sec.board);
     outcomes.push({
       name: "权限账户", pass: ok, evaluated: true,
@@ -259,11 +273,15 @@ function paramsFrom(raw: Record<string, unknown>): Partial<FilterParams> {
 
 const 过滤器: FactorSpec<number> = {
   name: "过滤器", version: "1.0.0", group: "filter",
-  defaults: { ...DEFAULT_FILTER_PARAMS, 账户: "贼王" },
+  // 账户不设默认值：账户名由用户定义，代码猜一个名字必然是错的
+  defaults: { ...DEFAULT_FILTER_PARAMS },
   fn: ctx => {
     const code = requireCode(ctx.params, "过滤器");
     const date = evalDate(ctx.view, ctx.params);
-    const account = (ctx.params["账户"] === "价值" ? "价值" : "贼王") as AccountType;
+    // 没传账户就是"不按账户过滤"，权限筛会因此报未判定并压低 confidence，
+    // 而不是套用某个猜出来的账户的权限
+    const account = typeof ctx.params["账户"] === "string"
+      ? (ctx.params["账户"] as AccountType) : null;
     const rep = runFilters(ctx.view, code, account, paramsFrom(ctx.params), date);
     return {
       name: "过滤器", version: "1.0.0",
@@ -275,7 +293,7 @@ const 过滤器: FactorSpec<number> = {
       // 置信度 = 真正跑过的筛数 / 7。缺基本面与消息面时它上不去 5/7，这个数字要露出来
       confidence: round6((rep.passed.length + rep.rejected.length) / FILTER_NAMES.length),
       inputs: {
-        代码: code, 日期: date, 账户: account,
+        代码: code, 日期: date, 账户: account ?? "未指定",
         通过: rep.passed, 否决: rep.rejected, 未判定: rep.unevaluated,
         明细: rep.outcomes.map(o => ({ 筛: o.name, 通过: o.pass, 已判定: o.evaluated, 说明: o.reason })),
       },

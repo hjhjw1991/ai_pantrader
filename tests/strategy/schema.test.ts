@@ -36,15 +36,20 @@ describe("默认 strategy.yaml", () => {
     });
   });
 
-  it("持仓段用 spec 的 贼王账户/价值账户 写法，两账户都在", () => {
+  it("默认 YAML 的每个账户都带齐引擎需要的键", () => {
+    // 不再断言具体账户名 —— 默认 YAML 里的账户只是示例，用户随时改名或删掉。
+    // 要保证的是：凡是配了的账户，可交易板块与仓位桶都在，否则引擎会静默给它 0 预算
     const r = validateStrategyYaml(DEFAULT_YAML);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const held = r.config.持仓 as unknown as Record<string, Record<string, unknown>>;
-    expect(held["贼王账户"]).toEqual({
-      止损: -0.05, 灾难位: -0.08, 止损确认: "收盘", 止盈: ["0.08减半", "0.15清"],
-    });
-    expect(held["价值账户"]).toEqual({ 止损: "逻辑破坏", 加仓: "逆势分批" });
+    const accounts = Object.keys(held);
+    expect(accounts.length).toBeGreaterThan(0);
+    for (const a of accounts) {
+      expect(Array.isArray(held[a].可交易板块), `${a} 缺 可交易板块`).toBe(true);
+      expect(["核心", "卫星"], `${a} 的 仓位桶 非法`).toContain(held[a].仓位桶);
+      expect(held[a].止损, `${a} 缺 止损`).toBeDefined();
+    }
   });
 });
 
@@ -160,11 +165,18 @@ ${body}`;
     expect(b.ok).toBe(true);
   });
 
-  it("持仓账户键名写错时否决，并把认得的写法列出来", () => {
-    const r = validateStrategyYaml(bad(base.replace("贼王账户:", "打板账户:")));
+  it("用户自定义的账户名一律接受 —— 账户是用户的资产组织方式，不是程序的枚举", () => {
+    // 这条以前是反的：旧实现维护账户名白名单，改个名字就被否决。
+    // 账户叫什么是用户的决定，schema 无权过问。
+    for (const name of ["打板账户", "长线", "港股通", "my-account", "A组"]) {
+      const r = validateStrategyYaml(bad(base.replace("贼王账户:", `${name}:`)));
+      expect(r.ok, `账户名 ${name} 应被接受`).toBe(true);
+    }
+  });
+
+  it("空账户键仍然否决 —— 那是真的没法处理，不是命名自由", () => {
+    const r = validateStrategyYaml(bad(base.replace("贼王账户:", '"":')));
     expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.message).toMatch(/贼王/);
   });
 });
 

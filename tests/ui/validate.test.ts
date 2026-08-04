@@ -62,8 +62,11 @@ describe("观察池条目", () => {
     ).toBe(true);
   });
 
-  it("账户只能是两个之一", () => {
-    expect(WatchpoolUpsertSchema.safeParse({ code: "600519", account: "别的" }).success).toBe(false);
+  it("账户名由用户定义，任意名字都接受；空串不接受", () => {
+    for (const account of ["别的", "打板", "长线", "my-acct"]) {
+      expect(WatchpoolUpsertSchema.safeParse({ code: "600519", account }).success).toBe(true);
+    }
+    expect(WatchpoolUpsertSchema.safeParse({ code: "600519", account: "  " }).success).toBe(false);
   });
 
   it("价格必须为正、有限", () => {
@@ -103,9 +106,12 @@ describe("手工成交回填", () => {
 });
 
 describe("账户", () => {
-  it("类型只能是贼王/价值（决定套哪套止损规则）", () => {
-    expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type: "贼王" }).success).toBe(true);
-    expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type: "融资" }).success).toBe(false);
+  it("账户类型是用户自己起的标签，不做白名单", () => {
+    // 以前这里锁死两个名字，等于加个账户要改代码 —— 账户是用户的资产组织方式
+    for (const type of ["贼王", "融资", "打板", "长线", "港股通"]) {
+      expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type }).success).toBe(true);
+    }
+    expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type: "" }).success).toBe(false);
   });
 });
 

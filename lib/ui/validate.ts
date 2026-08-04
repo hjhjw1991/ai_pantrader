@@ -18,7 +18,8 @@ export const IsoTsSchema = z
   .string()
   .refine((s) => !Number.isNaN(new Date(s).getTime()), "时间戳无法解析");
 
-export const AccountTypeSchema = z.enum(["贼王", "价值"]);
+// 账户名由用户定义，不做白名单校验；只挡空串与超长输入
+export const AccountTypeSchema = z.string().trim().min(1).max(40);
 
 /** 一次最多问 200 只票的报价：再多就该走批量导出，不是页面查询 */
 export const CodesQuerySchema = z

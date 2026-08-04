@@ -10,6 +10,7 @@ import {
   writeStrategyParam as loaderWriteParam,
   type ParamValue,
 } from "@/lib/strategy/loader";
+import { normalizeAccountKey } from "@/lib/strategy/schema";
 
 /**
  * strategy.yaml 适配器 —— 参数面板与策略层之间唯一的一层。
@@ -153,10 +154,22 @@ export function flattenConfig(obj: unknown, prefix: string[] = []): FlatParam[] 
  * 两种键写法（spec §9.1 的 YAML 用后者，契约类型用前者）。
  * 读不到就返回空对象，**不套内置默认止损线**：内置默认会让人以为那是自己设的线。
  */
-export function accountRules(cfg: StrategyConfig | null): Partial<Record<AccountType, Record<string, unknown>>> {
+/**
+ * YAML 持仓段里配了规则的所有账户。键取自用户的 YAML，**不预设任何账户名** ——
+ * 早期版本这里写死 贼王/价值 两键，用户改个账户名规则就静默读不到、
+ * 硬线告警跟着静默失效，而页面上看不出任何异常。
+ */
+export function accountRules(
+  cfg: StrategyConfig | null
+): Record<AccountType, Record<string, unknown>> {
   if (!cfg) return {};
-  return {
-    贼王: accountRule(cfg, "贼王"),
-    价值: accountRule(cfg, "价值"),
-  };
+  const held = (cfg as unknown as { 持仓?: Record<string, unknown> }).持仓;
+  if (held === null || typeof held !== "object") return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const k of Object.keys(held)) {
+    const norm = normalizeAccountKey(k);
+    if (norm.length === 0) continue;
+    out[norm] = accountRule(cfg, norm);
+  }
+  return out;
 }

@@ -127,23 +127,44 @@ describe("过滤器 3/4 缺数据源 —— 不许假装筛过了", () => {
 });
 
 describe("过滤器 5 权限×账户", () => {
-  it("创业板 + 贼王账户 → 否决", () => {
-    const rep = runFilters(viewFor({ closes: calm, board: "创业板", code: "300750" }), "300750", "贼王");
+  // 账户名与其可交易板块全部由用户配置，测试自己给，不依赖代码里的任何预设账户
+  const 权限 = { 账户可交易板块: { 主板only: ["主板"], 全开: ["主板", "创业板", "科创板"] } } as any;
+
+  it("创业板 + 只开主板的账户 → 否决", () => {
+    const rep = runFilters(
+      viewFor({ closes: calm, board: "创业板", code: "300750" }), "300750", "主板only", 权限);
     const o = rep.outcomes.find(o => o.name === "权限账户")!;
     expect(o.pass).toBe(false);
+    expect(o.evaluated).toBe(true);
     expect(o.reason).toMatch(/创业板/);
   });
 
-  it("创业板 + 价值账户 → 通过", () => {
-    const rep = runFilters(viewFor({ closes: calm, board: "创业板", code: "300750" }), "300750", "价值");
+  it("创业板 + 开了创业板的账户 → 通过", () => {
+    const rep = runFilters(
+      viewFor({ closes: calm, board: "创业板", code: "300750" }), "300750", "全开", 权限);
     expect(rep.outcomes.find(o => o.name === "权限账户")!.pass).toBe(true);
   });
 
-  it("北交所两个账户都不做", () => {
-    for (const acct of ["贼王", "价值"] as const) {
-      const rep = runFilters(viewFor({ closes: calm, board: "北交所", code: "832317" }), "832317", acct);
+  it("北交所不在任何账户的配置里 → 都否决", () => {
+    for (const acct of ["主板only", "全开"]) {
+      const rep = runFilters(
+        viewFor({ closes: calm, board: "北交所", code: "832317" }), "832317", acct, 权限);
       expect(rep.outcomes.find(o => o.name === "权限账户")!.pass).toBe(false);
     }
+  });
+
+  it("账户未配置可交易板块 → 未判定，而不是否决一切", () => {
+    // 空配置若当成"什么都不能买"，缺配置就会伪装成"策略很严格"
+    const rep = runFilters(
+      viewFor({ closes: calm, board: "主板", code: "600000" }), "600000", "没配过的账户", 权限);
+    const o = rep.outcomes.find(o => o.name === "权限账户")!;
+    expect(o.evaluated).toBe(false);
+    expect(o.reason).toMatch(/未配置/);
+  });
+
+  it("不指定账户 → 这道筛未判定", () => {
+    const rep = runFilters(viewFor({ closes: calm, board: "主板", code: "600000" }), "600000", null);
+    expect(rep.outcomes.find(o => o.name === "权限账户")!.evaluated).toBe(false);
   });
 
   it("可交易板块可参数化", () => {
@@ -213,7 +234,10 @@ describe("过滤器整体", () => {
   it("因子形态：置信度 = 已判定筛数 / 7", () => {
     const spec = FILTER_FACTORS.find(f => f.name === "过滤器")!;
     const view = viewFor({ closes: calm });
-    const r = spec.fn({ view, params: { ...spec.defaults, code: "600000", 账户: "贼王" } });
+    const r = spec.fn({ view, params: {
+      ...spec.defaults, code: "600000", 账户: "我的账户",
+      账户可交易板块: { 我的账户: ["主板"] },
+    } });
     expect(r.value).toBe(0);                       // 硬否决数
     expect(r.confidence).toBeCloseTo(5 / 7, 6);
     expect(r.provenance).toBe("real");

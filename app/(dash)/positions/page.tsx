@@ -9,17 +9,17 @@ import { unavailable } from "@/lib/ui/derive";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { latestQuoteTs, trades } from "@/lib/ui/queries";
 import { positionsView, type PositionView } from "@/lib/ui/views";
-import type { AccountType } from "@/lib/contracts/strategy";
-
 export const dynamic = "force-dynamic";
 
-const ACCOUNTS: AccountType[] = ["贼王", "价值"];
-
 /**
- * 持仓管理。spec §13：两账户分离、浮盈亏、止损止盈线、硬线告警、组合风控占比。
+ * 持仓管理。spec §13：账户分离、浮盈亏、止损止盈线、硬线告警、组合风控占比。
  *
- * 两个账户**物理分开渲染**，不做一张合表：贼王吃波动按比例止损，价值扛逻辑靠
- * 逻辑破坏离场，混在一起看会把两套纪律搅乱（这正是 spec 把它们分开的原因）。
+ * 账户**由用户自己定义**（设置页增删改），这里按 account 表里实际存在的账户渲染，
+ * 代码不预设任何账户名。早期版本写死了两个账户，改个名字页面就空一半。
+ *
+ * 每个账户**物理分开渲染**，不做一张合表：不同账户的离场纪律可以完全不同
+ * （按比例止损 vs 逻辑破坏才走），混在一张表里看会把两套纪律搅乱。
+ * 每账户的提示语来自它自己的 YAML 规则，不由代码按名字猜。
  */
 export default function PositionsPage() {
   const db = readDb();
@@ -78,23 +78,32 @@ export default function PositionsPage() {
         </Panel>
       ) : null}
 
-      {/* ── 两账户分离 ── */}
-      {ACCOUNTS.map((acc) => {
+      {/* ── 账户分离渲染，账户清单来自 account 表 ── */}
+      {pv.accounts.length === 0 ? (
+        <NoRows
+          what="还没有账户"
+          hint="账户由你自己定义（名称、类型、各自的止损规则）。在下方新建一个，持仓与信号才有地方归属。"
+        />
+      ) : null}
+
+      {pv.accounts.map((a) => {
+        const acc = a.id;
         const rows = pv.rows.filter((r) => r.position.account === acc);
+        const hasRules = pv.rulesFromConfig && !pv.rulesWithoutAccount.includes(acc);
         return (
           <Panel
             key={acc}
-            title={`${acc}账户`}
+            title={a.name || acc}
             hint={
-              acc === "贼王"
-                ? "吃波动：按比例止损，破灾难位不等收盘确认"
-                : "扛逻辑：逻辑破坏才走，逆势分批加仓"
+              hasRules
+                ? `规则来自 strategy.yaml 持仓.${acc}`
+                : `strategy.yaml 的持仓段没有 ${acc} 的规则，硬线告警对该账户不生效`
             }
             right={`${rows.length} 只 · 快照 ${fmtTs(snapTs, true)}`}
           >
             {rows.length === 0 ? (
               <NoRows
-                what={`${acc}账户无持仓`}
+                what={`${a.name || acc} 无持仓`}
                 hint="手工成交回填后出现在这里；position 表不由行情 job 写"
               />
             ) : (
