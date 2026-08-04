@@ -9,6 +9,7 @@ import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
+import { deriveSecurityMeta } from "@/lib/data/security-meta";
 
 export type JobName = "selfcheck" | "preopen" | "intraday" | "close" | "post" | "night";
 
@@ -141,6 +142,12 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.dailyFailed = daily.failed.length;
       // 源上无 K 线序列的代码（新股/定向转让），不是缺口但要能看见数量变化
       stats.dailyNoData = daily.noData.length;
+
+      // 日线刚更新完，紧接着刷新上市日/ST 观测。
+      // 新股每天在增加，它们的序列还没触顶，今天推不出来明天也推不出来
+      const meta = deriveSecurityMeta(db);
+      stats.listDateResolved = meta.listDateResolved;
+      stats.stObserved = meta.stObserved;
 
       // 重拉历史龙虎榜，把随时间回填的 D1..D30 标签取回来
       let refreshed = 0, refreshFailed = 0;

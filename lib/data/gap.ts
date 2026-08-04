@@ -1,5 +1,6 @@
 import type { Db } from "@/lib/db";
 import { tradingDaysBetween } from "@/lib/data/calendar";
+import { shanghaiTs } from "@/lib/data/clock";
 
 export function recordGap(
   db: Db, date: string, source: string, kind: string,
@@ -10,13 +11,13 @@ export function recordGap(
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(date, source, kind) DO UPDATE SET
        reason = excluded.reason, detected_at = excluded.detected_at, resolved_at = NULL`
-  ).run(date, source, kind, reason, recoverable ? 1 : 0, new Date().toISOString());
+  ).run(date, source, kind, reason, recoverable ? 1 : 0, shanghaiTs());
 }
 
 export function resolveGap(db: Db, date: string, source: string, kind: string): void {
   db.prepare(
     `UPDATE data_gap SET resolved_at = ? WHERE date = ? AND source = ? AND kind = ?`
-  ).run(new Date().toISOString(), date, source, kind);
+  ).run(shanghaiTs(), date, source, kind);
 }
 
 /** 以 Asia/Shanghai 计的今天，避免 UTC 偏移把收盘后的时间算到前一天 */

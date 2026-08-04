@@ -1,4 +1,5 @@
 import type { Db } from "@/lib/db";
+import { shanghaiTs } from "@/lib/data/clock";
 
 export function getMeta(db: Db, key: string): string | null {
   const r = db.prepare("SELECT value FROM app_meta WHERE key = ?").get(key) as any;
@@ -9,7 +10,7 @@ export function setMeta(db: Db, key: string, value: string): void {
   db.prepare(
     `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-  ).run(key, value, new Date().toISOString());
+  ).run(key, value, shanghaiTs());
 }
 
 /**

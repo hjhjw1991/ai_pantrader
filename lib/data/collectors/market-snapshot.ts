@@ -2,6 +2,7 @@ import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
 import { fetchGtimgBatch, chunk, GTIMG_BATCH_SIZE } from "@/lib/data/sources/tencent";
 import { recordGap, today } from "@/lib/data/gap";
+import { shanghaiTs } from "@/lib/data/clock";
 
 /**
  * 全市场实时快照。用 gtimg 批量接口，60 只/请求——5545 只全市场约 93 个请求。
@@ -10,7 +11,7 @@ import { recordGap, today } from "@/lib/data/gap";
 export async function collectMarketSnapshot(
   db: Db, client: SourceClient, codes: string[]
 ): Promise<{ written: number; failedBatches: number }> {
-  const ts = new Date().toISOString();
+  const ts = shanghaiTs();
   const stmt = db.prepare(
     `INSERT OR REPLACE INTO quote_snapshot
      (ts, code, price, pct, turnover, amplitude, bid_ask_json)

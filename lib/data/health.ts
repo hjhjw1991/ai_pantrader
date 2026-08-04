@@ -1,4 +1,5 @@
 import type { Db } from "@/lib/db";
+import { shanghaiTs } from "@/lib/data/clock";
 
 export class CircuitBreaker {
   private fails = 0;
@@ -66,5 +67,5 @@ export function recordHealth(
   db.prepare(
     `INSERT OR REPLACE INTO source_health (source, ts, ok, latency_ms, err)
      VALUES (?, ?, ?, ?, ?)`
-  ).run(source, new Date().toISOString(), ok ? 1 : 0, latencyMs, err ?? null);
+  ).run(source, shanghaiTs(), ok ? 1 : 0, latencyMs, err ?? null);
 }
