@@ -94,10 +94,34 @@ describe("样本外不过就是不过：结构上不给回调样本内的机会"
   });
 
   it("模块不提供任何看过样本外再回调样本内的入口", () => {
-    // 导出面是白名单：加任何 retune/refit 类 API 都会让这条红
+    // 导出面是白名单：加任何 retune/refit 类 API 都会让这条红。
+    // 新增的三个（聚合样本外，选项 D）经过检查同样不开后门：
+    //   runWalkForwardAggregated —— optimize 依旧只拿到 train 区间
+    //   stitchEquity            —— 纯函数，只拼净值
+    //   suggestAggregatedPlan   —— 只吃交易日数量，碰不到收益
     expect(Object.keys(wf).sort()).toEqual([
-      "IN_SAMPLE_RATIO", "planWalkForward", "runWalkForward", "summarizeWalkForward", "walkForwardVerdict",
+      "IN_SAMPLE_RATIO", "planWalkForward", "runWalkForward", "runWalkForwardAggregated",
+      "stitchEquity", "suggestAggregatedPlan", "summarizeWalkForward", "walkForwardVerdict",
     ]);
+  });
+
+  it("聚合样本外的 optimize 同样只拿到训练区间 —— 不给偷看测试段的机会", () => {
+    const seen: Array<Record<string, unknown>> = [];
+    wf.runWalkForwardAggregated(days, {
+      windowDays: 20, stepDays: 6, inSampleRatio: 0.7,
+      optimize: (train, trainDays) => {
+        // 参数里只有 train 区间与训练日；测试段的任何信息都不该出现
+        seen.push({ keys: Object.keys(train).sort(), n: trainDays.length });
+        return { params: {} };
+      },
+      evaluate: (_p, _t, testDays) => {
+        let e = 1;
+        const equity = testDays.map(d => ({ date: d, equity: (e *= 1.001), position: 0 }));
+        return { metrics: metrics(1), equity, closed: [] };
+      },
+    });
+    expect(seen.length).toBeGreaterThan(0);
+    for (const s of seen) expect(s.keys).toEqual(["from", "to"]);
   });
 
   it("bestParams 与测试区间一起记进窗口，供复现", () => {

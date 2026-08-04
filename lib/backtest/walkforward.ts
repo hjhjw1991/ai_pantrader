@@ -1,4 +1,6 @@
-import type { BacktestMetrics, WalkForwardWindow } from "@/lib/contracts";
+import type { BacktestMetrics, EquityPoint, WalkForwardWindow } from "@/lib/contracts";
+import { computeMetricsDetailed, MIN_SAMPLE_DAYS } from "@/lib/backtest/metrics";
+import type { ClosedTrade } from "@/lib/backtest/types";
 
 /**
  * walk-forward 滚动验证（spec §10.4）。
@@ -200,4 +202,148 @@ export function summarizeWalkForward(
     decayRatio,
     overfitSuspected: isMean > 0 && decayRatio < 0.5,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 聚合样本外（选项 D）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 单次 7:3 切分测不出结论的原因是分母：Calmar 的分母是最大回撤，
+ * 而最大回撤是**极值统计量** —— 189 个交易日里通常只发生 1~2 段回撤，
+ * 抽样误差极大且系统性偏小（期望最大回撤随 √时间 增长），
+ * 于是 Calmar 被放大，放大倍数还不固定。这就是 MIN_SAMPLE_DAYS=252 的由来。
+ *
+ * spec R1 的有效区间约 630 个交易日，单次 7:3 只给 189 天样本外，必然退化；
+ * 要样本外 ≥252 得总量 ≥840 天（3.3 年），数据没有。
+ *
+ * 解法不是放宽阈值，而是换切分方式：滚动多窗口，把各段**互不重叠**的样本外
+ * 净值按链式收益拼成一条连续曲线，在这条曲线上算指标。
+ * 630 天用 训练252/测试63/步长63 能切出 6 段，聚合样本外 378 天 > 252，非退化。
+ *
+ * 这不是取巧。每一段用的都是只看过该段之前数据训出的参数，
+ * 拼出来的曲线正是"一个每季度重新调参的系统"真实会走出的净值 ——
+ * 比单次切分更贴近实盘做法。这是 walk-forward 的标准用法。
+ *
+ * 代价写清楚：窗口数 × 寻优 = 数倍算力；每段训练期只有 1 年，拟合参数偏薄。
+ */
+
+/** 每段样本外都要给净值，不能只给指标 —— 只有净值才拼得起来 */
+export interface SegmentResult {
+  metrics: BacktestMetrics;
+  equity: EquityPoint[];
+  closed: ClosedTrade[];
+}
+
+export interface AggregatedRunOptions extends WalkForwardPlanOptions {
+  optimize: (
+    train: { from: string; to: string }, trainDays: string[]
+  ) => { params: Record<string, unknown>; metrics?: BacktestMetrics };
+  evaluate: (
+    params: Record<string, unknown>, test: { from: string; to: string }, testDays: string[]
+  ) => SegmentResult;
+}
+
+export interface AggregatedOos {
+  /** 拼接后的连续样本外净值曲线 */
+  equity: EquityPoint[];
+  /** 在拼接曲线上算的指标 —— 这才是可用来判断的那个数 */
+  metrics: BacktestMetrics;
+  degeneracy: string[];
+  /** 聚合后的样本外交易日数。判是否够 MIN_SAMPLE_DAYS 看这个 */
+  oosDays: number;
+  segments: number;
+  /** 各段自己的 Calmar：聚合值好但段间方差极大，说明是某一段扛起来的 */
+  segmentCalmars: number[];
+  windows: WalkForwardWindowList;
+}
+
+/**
+ * 链式拼接：每段净值先转成相对自身起点的收益，再复利叠到运行净值上。
+ *
+ * 为什么不直接把各段净值首尾相接：各段都从自己的基准（通常 1.0）起算，
+ * 直接接会在段边界产生假跳空，最大回撤要么被凭空造出来要么被抹掉。
+ */
+export function stitchEquity(segments: EquityPoint[][]): EquityPoint[] {
+  const out: EquityPoint[] = [];
+  let running = 1;
+
+  for (const seg of segments) {
+    if (seg.length === 0) continue;
+    const base = seg[0].equity;
+    // 段起点净值为 0 或负：无法转成收益率，跳过并让上层在 degeneracy 里看到段数不符
+    if (!Number.isFinite(base) || base <= 0) continue;
+
+    for (let i = 1; i < seg.length; i++) {
+      const prev = seg[i - 1].equity;
+      const cur = seg[i].equity;
+      if (!Number.isFinite(prev) || prev <= 0 || !Number.isFinite(cur)) continue;
+      running *= cur / prev;
+      out.push({ date: seg[i].date, equity: running, position: seg[i].position });
+    }
+    // 段内第一天没有前一日收益，用段起点占位，保证曲线不缺首日
+    if (out.length === 0) {
+      out.push({ date: seg[0].date, equity: running, position: seg[0].position });
+    }
+  }
+  return out;
+}
+
+export function runWalkForwardAggregated(
+  days: string[], o: AggregatedRunOptions
+): AggregatedOos {
+  const splits = planWalkForward(days, o);
+  const windows: WalkForwardWindow[] = [];
+  const segEquity: EquityPoint[][] = [];
+  const closed: ClosedTrade[] = [];
+  const segmentCalmars: number[] = [];
+
+  for (const s of splits) {
+    const best = o.optimize(s.train, s.trainDays);
+    const seg = o.evaluate(best.params, s.test, s.testDays);
+    windows.push(Object.freeze({
+      train: Object.freeze({ ...s.train }),
+      test: Object.freeze({ ...s.test }),
+      bestParams: Object.freeze({ ...best.params }),
+      testMetrics: Object.freeze({ ...seg.metrics }),
+    }));
+    segEquity.push(seg.equity);
+    closed.push(...seg.closed);
+    segmentCalmars.push(seg.metrics.calmar);
+  }
+
+  const equity = stitchEquity(segEquity);
+  const detailed = computeMetricsDetailed({ equity, closed });
+
+  return {
+    equity,
+    metrics: detailed.metrics,
+    degeneracy: detailed.degeneracy,
+    oosDays: equity.length,
+    segments: splits.length,
+    segmentCalmars,
+    windows: Object.freeze(windows),
+  };
+}
+
+/**
+ * 给聚合结果的切分建议：在给定交易日数下，怎么切才能让聚合样本外过 252 天。
+ * 返回 null = 这个区间无论怎么切都不够，该去解决数据（spec R1）而不是调参数。
+ */
+export function suggestAggregatedPlan(
+  totalDays: number, o: { trainDays?: number; testDays?: number } = {}
+): { windowDays: number; stepDays: number; segments: number; oosDays: number } | null {
+  const train = o.trainDays ?? MIN_SAMPLE_DAYS;      // 训练至少一年
+  const test = o.testDays ?? Math.round(MIN_SAMPLE_DAYS / 4);   // 一季度
+  const windowDays = train + test;
+  if (totalDays < windowDays) return null;
+  const segments = Math.floor((totalDays - train) / test);
+
+  // 每段的第一天要当链式收益的基准用掉，拼接后每段只贡献 test-1 个点。
+  // 必须按拼接后的真实长度算，否则这里承诺 378 天、实际曲线只有 372 天 ——
+  // 差 6 天平时无害，但落在 252 阈值边缘就会"承诺够、实际退化"，
+  // 而退化的表现是 Calmar 记 0，看起来像策略不行。
+  const oosDays = segments * (test - 1);
+  if (oosDays < MIN_SAMPLE_DAYS) return null;
+  return { windowDays, stepDays: test, segments, oosDays };
 }
