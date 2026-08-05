@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db";
 import type { JobDeps, JobName, JobResult } from "@/lib/data/jobs";
-import { runJob } from "@/lib/data/jobs";
+import { runJob, jobOutcome } from "@/lib/data/jobs";
 import { SCHEDULE, hmToMinutes } from "@/lib/data/schedule";
 import { shanghaiTs } from "@/lib/data/clock";
 import { isTradingDay } from "@/lib/data/calendar";
@@ -165,8 +165,15 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
 
         try {
           const result = await runJob(d.job, { db: o.db, clients: o.clients, now: at });
-          finish(o.db, date, d.job, d.slot, "done", result.stats);
-          emit({ kind: "run", job: d.job, slot: d.slot, result });
+          // 没抛错 ≠ 成功：采集器批次失败时记 gap 后继续，全军覆没也会正常返回
+          const outcome = jobOutcome(d.job, result.stats);
+          if (outcome.ok) {
+            finish(o.db, date, d.job, d.slot, "done", result.stats);
+            emit({ kind: "run", job: d.job, slot: d.slot, result });
+          } else {
+            finish(o.db, date, d.job, d.slot, "failed", result.stats, outcome.reason);
+            emit({ kind: "fail", job: d.job, slot: d.slot, error: outcome.reason! });
+          }
         } catch (e: any) {
           const msg = String(e?.message ?? e);
           finish(o.db, date, d.job, d.slot, "failed", undefined, msg);

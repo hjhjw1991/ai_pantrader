@@ -1,12 +1,17 @@
 import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
 import { fetchSinaKline, SourceNoData } from "@/lib/data/sources/sina";
-import { recordGap, today } from "@/lib/data/gap";
+import { recordGap, resolveGap, today } from "@/lib/data/gap";
 
 /**
- * 关注池分钟线。新浪分钟线是单票单请求且无 end-date 参数，
- * 只能拿最近 N 根——不可回补，缺一天永久缺一天。
+ * 关注池分钟线。新浪分钟线是单票单请求且无 end-date 参数，只能拿最近 240 根。
  * 因此只对持仓+观察池（约 50 只）抓，不做全市场。
+ *
+ * 可回补性要分两种情况，早期版本混成了一种（一律 recoverable=0），
+ * 结果一次限频就留下 50 条永远消不掉的缺口，把真正的告警淹掉：
+ *   窗口内的瞬时失败 —— **可回补**。下一轮成功采集会把这 240 根一并带回来，
+ *                       所以标 recoverable=1，并在下次成功时主动 resolve。
+ *   整天没采（机器关着）—— 才是永久丢失，那由 selfcheck 的 slotCoverage 反映。
  */
 export async function collectWatchMinute(
   db: Db, client: SourceClient, codes: string[], scale: 5 = 5
@@ -24,6 +29,8 @@ export async function collectWatchMinute(
         for (const b of bars) stmt.run(code, b.ts, `m${scale}`, b.o, b.h, b.l, b.c, b.vol);
       })();
       written += bars.length;
+      // 这一轮拿到了 240 根，之前那次失败留下的缺口已被本轮覆盖
+      resolveGap(db, today(), client.source, `kline_min:${code}`);
     } catch (e: any) {
       if (e instanceof SourceNoData) {
         // 源上没有这条分钟序列（退市/PT 代码，实测 000003/000013/000015/000047）。
@@ -34,7 +41,8 @@ export async function collectWatchMinute(
         continue;
       }
       failed.push(code);
-      recordGap(db, today(), client.source, `kline_min:${code}`, e.message, false);
+      // recoverable=1：窗口内的失败下一轮就能补回来
+      recordGap(db, today(), client.source, `kline_min:${code}`, e.message, true);
     }
   }
   return { written, failed, noData };

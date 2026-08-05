@@ -87,6 +87,41 @@ function watchCodes(db: Db): string[] {
   ).all().map((r: any) => r.code);
 }
 
+/**
+ * 判定一次 job 的真实成败。
+ *
+ * 为什么不能"没抛错就算成功"：采集器遇到批次失败时记 data_gap 后继续，
+ * 不抛错 —— 这是刻意设计（一个批次挂了不该让整轮白跑）。
+ * 于是 `snapshotWritten:0, snapshotFailedBatches:99` 这种全军覆没也会正常返回，
+ * 台账把它记成 done，覆盖率就被凭空抬高。实测 2026-08-05 有两轮正是如此。
+ *
+ * 判据：**该写的一条都没写进去，就是失败**，不管有没有抛错。
+ */
+export function jobOutcome(
+  name: JobName, stats: Record<string, number>
+): { ok: boolean; reason?: string } {
+  const wroteNothing = (wrote: string, failed: string) =>
+    (stats[wrote] ?? 0) === 0 && (stats[failed] ?? 0) > 0;
+
+  if (name === "intraday" || name === "close") {
+    if (wroteNothing("snapshotWritten", "snapshotFailedBatches")) {
+      return {
+        ok: false,
+        reason: `全市场快照 0 条写入、${stats.snapshotFailedBatches} 个批次失败（大概率限频）`,
+      };
+    }
+  }
+  if (name === "night" && wroteNothing("dailyWritten", "dailyFailed")) {
+    return { ok: false, reason: `日线 0 条写入、${stats.dailyFailed} 只失败` };
+  }
+  if (name === "post" && (stats.lhbRows ?? -1) === 0) {
+    // 龙虎榜真有可能当日为空（无票上榜），所以只在明确 0 且非交易日之外才提示，
+    // 这里不判失败，只是不静默 —— 交给 selfcheck 的缺口统计
+    return { ok: true };
+  }
+  return { ok: true };
+}
+
 export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   if (!KNOWN.includes(name)) throw new Error(`unknown job: ${name}`);
   const { db, clients, now } = deps;

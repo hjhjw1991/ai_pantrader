@@ -3,6 +3,8 @@ import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { systemStatus } from "@/lib/ui/status";
 import { shanghaiTs } from "@/lib/ui/time";
+import { diffAndNotify } from "@/lib/ui/notify";
+import { positionsView } from "@/lib/ui/views";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,6 +24,17 @@ export function GET() {
     const asOf = shanghaiTs();
     const r = todaySignalCard(db, asOf, cfg.config);
     if (!r.available) return err(503, r.reason, { needs: r.needs });
+
+    // 与上次状态比对，把需要人做动作的变化写成通知（SSE 与桌面通知从 notification 表读）。
+    // 放在这里是因为信号卡本来就在这条路径上算好了 —— 另起一个 job 重算等于算两遍。
+    // 只读的调用方（比如导出）不会走到这里，所以不会产生噪音通知。
+    try {
+      const alerts = positionsView(db, cfg.config).alerts.length;
+      diffAndNotify(db, r.card, alerts);
+    } catch {
+      // 通知是增强，算不出来绝不能影响信号卡本身返回
+    }
+
     return ok({
       card: r.card,
       phase: r.phase,

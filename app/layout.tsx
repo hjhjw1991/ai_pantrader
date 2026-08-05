@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "@/app/globals.css";
 import { Nav } from "@/components/Nav";
+import { LiveBar } from "@/components/LiveBar";
 import { StatusRail } from "@/components/StatusRail";
 import { systemStatus } from "@/lib/ui/status";
 
@@ -26,6 +27,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-screen bg-bg text-ink">
         <Nav />
         <StatusRail s={s} />
+        {/* 实时条：1 分钟自刷 + SSE 推送 + 桌面通知 + 立即采集 */}
+        <div className="px-3 pt-1">
+          <LiveBar />
+        </div>
         <main className="p-3">{children}</main>
       </body>
     </html>

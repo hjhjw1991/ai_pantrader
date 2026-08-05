@@ -105,10 +105,11 @@ describe("collectWatchMinute", () => {
     expect(row.code).toBe("601012");
   });
 
-  it("单只失败不影响其他，且记不可回补 gap", async () => {
+  it("单只失败不影响其他，每只各记一条可回补 gap", async () => {
     const r = await collectWatchMinute(db, clientReturning("", false) as any, ["601012", "000001"], 5);
     expect(r.failed).toEqual(["601012", "000001"]);
-    const gaps = db.prepare("SELECT COUNT(*) n FROM data_gap WHERE recoverable = 0").get() as any;
+    // 窗口内的瞬时失败是可回补的：下一轮的 240 根会带回来
+    const gaps = db.prepare("SELECT COUNT(*) n FROM data_gap WHERE recoverable = 1").get() as any;
     expect(gaps.n).toBe(2);
   });
 });
@@ -277,11 +278,25 @@ describe("collectWatchMinute 的无序列处理", () => {
     expect(n.n).toBe(0);
   });
 
-  it("真失败（空响应体=限频）仍记不可回补缺口", async () => {
+  it("瞬时失败记可回补 —— 下一轮的 240 根会把它带回来", async () => {
     const r = await collectWatchMinute(db, clientReturning("", false) as any, ["601012"], 5);
     expect(r.failed).toEqual(["601012"]);
     expect(r.noData).toEqual([]);
     const g = db.prepare("SELECT * FROM data_gap").get() as any;
-    expect(g.recoverable).toBe(0);
+    // 早期版本标 0，一次限频就留 50 条永远消不掉的缺口，把真告警淹掉
+    expect(g.recoverable).toBe(1);
+  });
+
+  it("下一轮成功会自动解决上一轮的缺口", async () => {
+    await collectWatchMinute(db, clientReturning("", false) as any, ["601012"], 5);
+    expect((db.prepare(
+      "SELECT COUNT(*) n FROM data_gap WHERE resolved_at IS NULL").get() as any).n).toBe(1);
+
+    const bars = JSON.stringify([
+      { day: "2026-07-31 14:55:00", open: "1", high: "2", low: "0.5", close: "1.5", volume: "100" },
+    ]);
+    await collectWatchMinute(db, clientReturning(bars) as any, ["601012"], 5);
+    expect((db.prepare(
+      "SELECT COUNT(*) n FROM data_gap WHERE resolved_at IS NULL").get() as any).n).toBe(0);
   });
 });

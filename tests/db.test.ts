@@ -41,7 +41,7 @@ describe("db", () => {
   });
 
   it("每张数据表都在 .ptbak 清单里 —— 漏一张就是备份里静默少一张", async () => {
-    const { BAK_TABLES } = await import("@/lib/backup/export");
+    const { BAK_TABLES, EPHEMERAL_TABLES } = await import("@/lib/backup/export");
     const db = openDb(path.join(dir, "t.db"));
     runMigrations(db);
     const names = db.prepare(
@@ -49,7 +49,13 @@ describe("db", () => {
     ).all().map((r: any) => r.name)
       // _migrations 是迁移账本、app_meta 是本机配置，都不属于可搬迁的历史数据
       .filter((n: string) => !n.startsWith("_") && n !== "app_meta");
-    for (const t of names) expect(BAK_TABLES).toContain(t);
+    // 每张表要么备份、要么显式声明为易失，不允许"没人管"的第三种状态
+    for (const t of names) {
+      const covered = BAK_TABLES.includes(t) || EPHEMERAL_TABLES.includes(t);
+      expect(covered, `表 ${t} 既不在 BAK_TABLES 也不在 EPHEMERAL_TABLES`).toBe(true);
+    }
+    // 两份清单不能重叠，否则语义矛盾
+    for (const t of EPHEMERAL_TABLES) expect(BAK_TABLES).not.toContain(t);
     db.close();
   });
 

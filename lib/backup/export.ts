@@ -29,6 +29,21 @@ export const BAK_TABLES = [
   "job_run",
 ];
 
+/**
+ * **故意不进 .ptbak** 的表，以及理由。
+ *
+ * 这份清单必须显式存在：db 测试断言"每张表要么在 BAK_TABLES、要么在这里"，
+ * 于是新加一张真正的数据表时不可能被忘掉，而刻意排除的也留下了理由。
+ * 只写一句"测试放宽一下"就会让那条防线失效。
+ */
+export const EPHEMERAL_TABLES = [
+  // 界面告警队列。易失的提示，不是历史资产；搬到新机器上重算信号会重新产生
+  "notification",
+  // 信号状态摘要，纯派生缓存，只为"和上次比有没有变"服务。
+  // 搬过去反而有害：旧状态会让第一次比对得出错误的"变化"，凭空弹一堆通知
+  "signal_state",
+];
+
 function sha256File(p: string): string {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 }

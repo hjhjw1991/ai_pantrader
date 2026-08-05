@@ -5,6 +5,7 @@ import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { createScheduler, dueSlots, todayRuns } from "@/lib/data/scheduler";
+import { jobOutcome } from "@/lib/data/jobs";
 import { SCHEDULE, intradaySlots, awakeWindows, hmToMinutes, allSlots } from "@/lib/data/schedule";
 
 let dir: string, db: any;
@@ -165,5 +166,45 @@ describe("createScheduler", () => {
     expect(s.running).toBe(true);
     s.stop();
     expect(s.running).toBe(false);
+  });
+});
+
+describe("jobOutcome：没抛错不等于成功", () => {
+  it("全市场快照 0 条写入 + 批次全失败 → 判失败", () => {
+    const r = jobOutcome("intraday", { snapshotWritten: 0, snapshotFailedBatches: 99 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/限频/);
+  });
+
+  it("写入了就算成功，即使有个别批次失败", () => {
+    expect(jobOutcome("intraday", { snapshotWritten: 5825, snapshotFailedBatches: 1 }).ok).toBe(true);
+  });
+
+  it("非交易日跳过（全 0 且无失败）不算失败", () => {
+    expect(jobOutcome("intraday", {}).ok).toBe(true);
+    expect(jobOutcome("intraday", { snapshotWritten: 0, snapshotFailedBatches: 0 }).ok).toBe(true);
+  });
+
+  it("night 日线 0 条写入且有失败 → 判失败", () => {
+    expect(jobOutcome("night", { dailyWritten: 0, dailyFailed: 5888 }).ok).toBe(false);
+  });
+
+  it("调度器把这类空跑记成 failed 而不是 done —— 否则覆盖率被凭空抬高", async () => {
+    // 桩客户端全部返回空响应体（限频的典型表现）
+    const dead = {
+      source: "dead",
+      breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+      async get() { return { ok: false as const, error: "empty response body", latencyMs: 1 }; },
+    };
+    db.prepare("INSERT INTO security (code,name,board) VALUES ('601012','x','主板')").run();
+    const s = createScheduler({
+      db,
+      clients: { sina: dead as any, tencent: dead as any, eastmoney: dead as any },
+      now: () => at("09:36"),
+    });
+    await s.tickOnce();
+    const r = todayRuns(db, "2026-08-05").find(x => x.job === "intraday" && x.slot === "09:35");
+    expect(r?.status).toBe("failed");
+    expect(r?.error).toMatch(/快照|限频|probe/);
   });
 });
