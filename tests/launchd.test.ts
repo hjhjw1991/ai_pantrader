@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildPlist, JOB_SCHEDULE, KEEPAWAKE_SCHEDULE } from "@/scripts/install-launchd";
+import { buildTasks, schtasksArgs } from "@/scripts/install-schtasks";
+import { allSlots } from "@/lib/data/schedule";
 
 describe("buildPlist", () => {
   const plist = buildPlist({
@@ -88,21 +90,23 @@ describe("JOB_SCHEDULE", () => {
 });
 
 describe("保持唤醒 agent", () => {
-  it("覆盖盘中全时段 —— 起点不晚于第一个 intraday，终点不早于 close", () => {
-    const s = KEEPAWAKE_SCHEDULE.find(k => k.label.endsWith("session"))!;
-    const start = (s.calendar.Hour ?? 0) * 60 + s.calendar.Minute;
-    const end = start + s.seconds / 60;
-    expect(start).toBeLessThanOrEqual(9 * 60 + 35);   // 第一个 intraday
-    expect(end).toBeGreaterThanOrEqual(15 * 60 + 5);  // close
+  /** 断言"覆盖性"而不是标签名：名字会变，覆盖不到才是真问题 */
+  const covers = (hm: number) => KEEPAWAKE_SCHEDULE.some(k => {
+    const start = (k.calendar.Hour ?? 0) * 60 + k.calendar.Minute;
+    return hm >= start && hm <= start + k.seconds / 60;
   });
 
-  it("覆盖 post 与 night", () => {
-    for (const [name, jobHM] of [["post", 18 * 60 + 40], ["night", 22 * 60]] as const) {
-      const k = KEEPAWAKE_SCHEDULE.find(x => x.label.endsWith(name))!;
-      const start = (k.calendar.Hour ?? 0) * 60 + k.calendar.Minute;
-      expect(start).toBeLessThanOrEqual(jobHM);
-      expect(start + k.seconds / 60).toBeGreaterThan(jobHM);
+  it("每一个 job 时点都被某个防休眠时段覆盖", () => {
+    for (const { slot } of allSlots()) {
+      const [h, m] = slot.split(":").map(Number);
+      expect(covers(h * 60 + m), `${slot} 未被防休眠覆盖`).toBe(true);
     }
+  });
+
+  it("盘中首尾与收盘都在覆盖内", () => {
+    expect(covers(9 * 60 + 35)).toBe(true);
+    expect(covers(14 * 60 + 55)).toBe(true);
+    expect(covers(15 * 60 + 5)).toBe(true);
   });
 
   it("用 -t 限时，不会一直吊着不让机器睡", () => {
@@ -119,8 +123,33 @@ describe("保持唤醒 agent", () => {
     }
   });
 
-  it("night 的时长要盖住全量日线（实测约 30 分钟）", () => {
-    const k = KEEPAWAKE_SCHEDULE.find(x => x.label.endsWith("night"))!;
-    expect(k.seconds).toBeGreaterThanOrEqual(35 * 60);
+  it("夜间时段要盖住全量日线（实测约 30 分钟）", () => {
+    // 22:00 起跑，跑到 22:30 左右，覆盖必须延续到 22:35 之后
+    expect(covers(22 * 60)).toBe(true);
+    expect(covers(22 * 60 + 35)).toBe(true);
+  });
+});
+
+describe("Windows 计划任务安装器", () => {
+  it("时刻表与 launchd 共用同一份数据，两平台不会漂移", () => {
+    const tasks = buildTasks("C:\\node.exe", "C:\\pantrader");
+    const winSlots = tasks.map(t => t.time).sort();
+    const shared = allSlots().map(s => s.slot).sort();
+    expect(winSlots).toEqual(shared);
+  });
+
+  it("每个任务名唯一 —— schtasks 一个任务只能一个时点", () => {
+    const names = buildTasks("node", "/w").map(t => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("带空格的路径要加引号，否则 schtasks 会截断命令", () => {
+    const t = buildTasks("C:\\Program Files\\node.exe", "C:\\My Projects\\pantrader")[0];
+    const args = schtasksArgs(t);
+    const tr = args[args.indexOf("/TR") + 1];
+    expect(tr.startsWith('"')).toBe(true);
+    expect(tr).toContain(String.raw`\"C:\Program Files\node.exe\"`);
+    // 工作目录也带空格，同样要被引起来
+    expect(tr).toContain(String.raw`\"C:\My Projects\pantrader\scripts\job.ts\"`);
   });
 });

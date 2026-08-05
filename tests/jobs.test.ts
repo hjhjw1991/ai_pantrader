@@ -112,3 +112,28 @@ describe("lhbRefreshDates", () => {
     empty.close();
   });
 });
+
+describe("selfcheck 暴露调度覆盖率", () => {
+  it("漏采的时点要出现在自检里 —— 只记库里没人看等于白记", async () => {
+    const ins = db.prepare(
+      "INSERT INTO job_run (date,job,slot,status,runner) VALUES ('2026-07-31',?,?,?,'scheduler')");
+    ins.run("intraday", "09:35", "done");
+    ins.run("intraday", "09:40", "missed");
+    ins.run("intraday", "09:45", "missed");
+    ins.run("intraday", "09:50", "failed");
+    const r = await runJob("selfcheck", {
+      db, clients: clients(), now: new Date("2026-07-31T08:00:00Z"),
+    });
+    expect(r.stats.slots_done).toBe(1);
+    expect(r.stats.slots_missed).toBe(2);
+    expect(r.stats.slots_failed).toBe(1);
+    expect(r.stats.slotCoverage).toBe(0.25);
+  });
+
+  it("没有任何调度记录时覆盖率算 1，不报假警", async () => {
+    const r = await runJob("selfcheck", {
+      db, clients: clients(), now: new Date("2026-07-31T08:00:00Z"),
+    });
+    expect(r.stats.slotCoverage).toBe(1);
+  });
+});

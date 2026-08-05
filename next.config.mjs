@@ -6,6 +6,9 @@ const nextConfig = {
   // 必须让 Node 自己 require —— 前端所有 DB 读取都在 server component / route handler 里，
   // 走的就是这条路径。
   experimental: {
+    // 让 instrumentation.ts 在服务启动时执行（Next 14 需显式开启）——
+    // 这是"跑起系统就自动采集"的钩子
+    instrumentationHook: true,
     serverComponentsExternalPackages: ["better-sqlite3"],
   },
 

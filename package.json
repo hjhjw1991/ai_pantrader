@@ -15,7 +15,9 @@
     "install-launchd": "tsx scripts/install-launchd.ts",
     "migrate": "tsx scripts/migrate-cli.ts",
     "db:export": "tsx scripts/export.ts",
-    "db:import": "tsx scripts/import.ts"
+    "db:import": "tsx scripts/import.ts",
+    "daemon": "tsx scripts/daemon.ts",
+    "install-schtasks": "tsx scripts/install-schtasks.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

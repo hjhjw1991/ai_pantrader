@@ -54,6 +54,7 @@ const TABLES: TableSpec[] = [
   { name: "position",         pk: ["account_id", "code"] },
   { name: "trade",            pk: ["id"] },
   { name: "ord",              pk: ["id"] },
+  { name: "job_run",          pk: ["date", "job", "slot"] },
 ];
 
 function unpack(bakPath: string): { stage: string; dbFile: string; meta: BakMeta } {

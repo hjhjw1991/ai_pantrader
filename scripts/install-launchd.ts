@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { getConfig } from "@/lib/config";
+import { SCHEDULE, awakeWindows } from "@/lib/data/schedule";
 
 export interface CalEntry { Hour?: number; Minute: number }
 
@@ -62,19 +63,10 @@ ${calBlock}
 `;
 }
 
-/** 盘中 09:35–11:30、13:00–14:55，每 5 分钟一次，避开午休 */
-function intradaySlots(): CalEntry[] {
-  const out: CalEntry[] = [];
-  for (const h of [9, 10, 11, 13, 14]) {
-    for (let m = 0; m < 60; m += 5) {
-      const t = h * 60 + m;
-      if (t < 9 * 60 + 35) continue;
-      if (t > 11 * 60 + 30 && t < 13 * 60) continue;
-      if (t > 14 * 60 + 55) continue;
-      out.push({ Hour: h, Minute: m });
-    }
-  }
-  return out;
+/** 把共享时刻表的 "HH:MM" 转成 launchd 的 CalEntry。时刻表本身在 lib/data/schedule.ts */
+function calOf(slot: string): CalEntry {
+  const [h, m] = slot.split(":").map(Number);
+  return { Hour: h, Minute: m };
 }
 
 /**
@@ -92,25 +84,24 @@ function intradaySlots(): CalEntry[] {
  *   1. 合盖 —— clamshell 下除非接电源+外接显示器，照样睡
  *   2. 机器关机 —— launchd 不会把关机期间错过的时点补齐
  */
-export const KEEPAWAKE_SCHEDULE: Array<{ label: string; calendar: CalEntry; seconds: number }> = [
-  // 08:45 → 15:20，覆盖 selfcheck/preopen/全部 intraday/close
-  { label: "com.pantrader.awake.session", calendar: { Hour: 8, Minute: 45 }, seconds: 23700 },
-  // 18:35 → 18:55，覆盖 post（龙虎榜）
-  { label: "com.pantrader.awake.post", calendar: { Hour: 18, Minute: 35 }, seconds: 1200 },
-  // 21:55 → 23:05，覆盖 night（全量日线约 30 分钟）
-  { label: "com.pantrader.awake.night", calendar: { Hour: 21, Minute: 55 }, seconds: 4200 },
-];
+export const KEEPAWAKE_SCHEDULE: Array<{ label: string; calendar: CalEntry; seconds: number }> =
+  awakeWindows().map((w) => ({
+    // 按时段起点命名，launchctl list 里一眼看出是哪个时段
+    label: `com.pantrader.awake.${w.from.replace(":", "")}`,
+    calendar: calOf(w.from),
+    seconds: w.seconds,
+  }));
 
-export const JOB_SCHEDULE: Array<{ label: string; job: string; calendar: CalEntry | CalEntry[] }> = [
-  { label: "com.pantrader.selfcheck", job: "selfcheck", calendar: { Hour: 8, Minute: 50 } },
-  { label: "com.pantrader.preopen",   job: "preopen",   calendar: { Hour: 9, Minute: 0 } },
-  { label: "com.pantrader.intraday",  job: "intraday",  calendar: intradaySlots() },
-  { label: "com.pantrader.close",     job: "close",     calendar: { Hour: 15, Minute: 5 } },
-  // 17:00 太早：龙虎榜逐步发布，实测当日 17:00 只有 35 行、18:50 已 58 行。
-  // night job 22:00 会再重拉当日收尾（见 LHB_LABEL_OFFSETS 含 0）。
-  { label: "com.pantrader.post",      job: "post",      calendar: { Hour: 18, Minute: 40 } },
-  { label: "com.pantrader.night",     job: "night",     calendar: { Hour: 22, Minute: 0 } },
-];
+/**
+ * 由共享时刻表推导，不再手写一份。
+ * 手写两份的下场是漂移：改了 post 时间只改一处，另一个平台还在旧时点上。
+ */
+export const JOB_SCHEDULE: Array<{ label: string; job: string; calendar: CalEntry | CalEntry[] }> =
+  SCHEDULE.map(j => ({
+    label: `com.pantrader.${j.job}`,
+    job: j.job,
+    calendar: j.slots.length === 1 ? calOf(j.slots[0]) : j.slots.map(calOf),
+  }));
 
 // 直接执行时安装；被 import 时（测试）不执行。
 // 用文件名判断而非 import.meta.url 全等——tsx 下路径可能经符号链接解析，全等会漏判。

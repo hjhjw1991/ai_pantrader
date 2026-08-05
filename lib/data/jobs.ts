@@ -99,6 +99,20 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
 
   if (name === "selfcheck") {
     Object.assign(stats, coverageReport(db, since, date));
+
+    // 调度覆盖率。今天该跑的时点跑了多少 —— 这个数字必须露在自检里：
+    // 2026-08-05 合盖休眠导致 43 个盘中时点只采到 14 个，
+    // 当时台账里有记录、但没人看得见，等于白记。
+    const sched = db.prepare(
+      `SELECT status, COUNT(*) n FROM job_run WHERE date = ? GROUP BY status`
+    ).all(date) as Array<{ status: string; n: number }>;
+    for (const r of sched) stats[`slots_${r.status}`] = r.n;
+    const done = sched.find(r => r.status === "done")?.n ?? 0;
+    const missed = sched.find(r => r.status === "missed")?.n ?? 0;
+    const failed = sched.find(r => r.status === "failed")?.n ?? 0;
+    const total = done + missed + failed;
+    // 漏采的时点多半是机器睡了。快照与分钟线不可回补，缺了就是永久缺
+    stats.slotCoverage = total === 0 ? 1 : Number((done / total).toFixed(4));
     const gaps = detectGaps(db, since, date);
     stats.missingDailyDays = gaps.missingDaily.length;
     stats.missingZtPoolDays = gaps.missingZtPool.length;

@@ -25,6 +25,8 @@ export const BAK_TABLES = [
   // 否则换机后台账里的 strategy_id 会指向不存在的策略。
   "strategy", "watchpool", "prediction", "outcome", "advisor_output",
   "account", "position", "trade", "ord",
+  // 调度台账：哪些时点漏采过是不可再生的覆盖率史，换机后不该丢
+  "job_run",
 ];
 
 function sha256File(p: string): string {
