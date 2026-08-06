@@ -30,7 +30,7 @@ function spec(name: string, version: string): FactorSpec<any> {
 const EXPORT_ARGS = {
   yaml: BASE_YAML,
   lock: { 盘面强度: "1.0.0", 跌停家数: "1.0.0" },
-  author: "barney",
+  author: "tester",
   createdAt: "2026-08-03T22:00:00.000Z",
 };
 
@@ -41,7 +41,7 @@ describe("导出", () => {
     expect(pkg["factors.lock"]).toEqual({ 盘面强度: "1.0.0", 跌停家数: "1.0.0" });
     expect(pkg["backtest_report.json"]).toBeUndefined();
     expect(pkg.meta.schema_version).toBe(STRATEGY_SCHEMA_VERSION);
-    expect(pkg.meta.author).toBe("barney");
+    expect(pkg.meta.author).toBe("tester");
     expect(pkg.meta.created_at).toBe("2026-08-03T22:00:00.000Z");
     expect(pkg.meta.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
