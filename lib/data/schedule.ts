@@ -27,6 +27,17 @@ export interface JobSlot {
    *             更重要的是不能把没跑过的时点记成成功，那是伪造覆盖率。
    */
   catchUp: "all" | "latest";
+  /**
+   * **跨天**是否还补得回来。注意这和 catchUp 是两个不同的轴，别混用 ——
+   * 混用过一次：close 是 catchUp="all"（16:00 才开机跑它仍能拿到当日涨停池，
+   * 日内补跑确实有意义），但它内部用的日期是"今天"，
+   * 对上周五的暗日跑一遍只会再拿一份今天的涨停池，等于什么都没补回来。
+   *
+   *   true  —— 今天跑一次就能把过去若干天的数据一并带回来。
+   *            night 拉 1023 根日线、preopen 同步未来 60 天日历，都属于这类。
+   *   false —— 绑定在某个过去时点上的现场，只能如实记 missed。
+   */
+  backfillsAcrossDays: boolean;
   /** 给人看的说明，装任务时打印 */
   desc: string;
   /**
@@ -53,19 +64,30 @@ export function intradaySlots(): string[] {
 }
 
 export const SCHEDULE: JobSlot[] = [
-  { job: "selfcheck", slots: ["08:50"], catchUp: "all", durationMin: 1, desc: "缺口自检与覆盖率" },
-  { job: "preopen", slots: ["09:00"], catchUp: "all", durationMin: 1, desc: "同步交易日历" },
+  // 自检是对一个日期区间出报告，今天跑一次就把暗日一并算进去了
+  { job: "selfcheck", slots: ["08:50"], catchUp: "all", backfillsAcrossDays: true,
+    durationMin: 1, desc: "缺口自检与覆盖率" },
+  { job: "preopen", slots: ["09:00"], catchUp: "all", backfillsAcrossDays: true,
+    durationMin: 1, desc: "同步交易日历" },
   {
     job: "intraday", slots: intradaySlots(), catchUp: "latest",
+    // 过去某一刻的盘口，源上不存在历史查询接口，永久丢失
+    backfillsAcrossDays: false,
     // 实测一轮 5885 只快照 + 50 只分钟线约 45 秒
     durationMin: 2,
     desc: "全市场快照 + 关注池分钟线（不可回补）",
   },
-  { job: "close", slots: ["15:05"], catchUp: "all", durationMin: 3, desc: "收盘快照 + 涨停池（不可回补）" },
+  // catchUp=all 但 backfillsAcrossDays=false：日内补跑有意义（涨停池收盘后才全），
+  // 跨天补跑没意义（内部日期写死是"今天"）
+  { job: "close", slots: ["15:05"], catchUp: "all", backfillsAcrossDays: false,
+    durationMin: 3, desc: "收盘快照 + 涨停池（不可回补）" },
   // 17:00 太早：龙虎榜逐步发布，实测当日 17:00 只有 35 行、18:50 已 58 行
-  { job: "post", slots: ["18:40"], catchUp: "all", durationMin: 3, desc: "龙虎榜 + 营业部席位" },
+  // 跨天由 night 的 lhbRefreshDates 覆盖近 30 个交易日，不必逐日补跑 post
+  { job: "post", slots: ["18:40"], catchUp: "all", backfillsAcrossDays: true,
+    durationMin: 3, desc: "龙虎榜 + 营业部席位" },
   // 实测 2026-08-03：写入 5,672,962 根日线，22:00 → 22:29
-  { job: "night", slots: ["22:00"], catchUp: "all", durationMin: 40, desc: "全量日线 + 缺口回补" },
+  { job: "night", slots: ["22:00"], catchUp: "all", backfillsAcrossDays: true,
+    durationMin: 40, desc: "全量日线 + 缺口回补" },
 ];
 
 /** 时刻表里所有 job 的所有时点，升序展开，用于装 OS 级任务 */

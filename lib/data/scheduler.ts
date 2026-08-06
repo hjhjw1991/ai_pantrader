@@ -4,6 +4,11 @@ import { runJob, jobOutcome } from "@/lib/data/jobs";
 import { SCHEDULE, hmToMinutes } from "@/lib/data/schedule";
 import { shanghaiTs } from "@/lib/data/clock";
 import { isTradingDay } from "@/lib/data/calendar";
+import {
+  assessWake, lastActivity, findStaleClaims, reclaimStaleClaims,
+  markUnaccountedMissed, crossedCalendarDay, wakeSlot,
+  WAKE_GAP_MIN, type WakeAssessment,
+} from "@/lib/data/wake";
 
 /**
  * 进程内调度器。跨平台（纯 Node，不依赖 launchd / cron / 计划任务），
@@ -41,7 +46,8 @@ export type SchedulerEvent =
   | { kind: "run"; job: JobName; slot: string; result: JobResult }
   | { kind: "fail"; job: JobName; slot: string; error: string }
   | { kind: "missed"; job: JobName; slot: string }
-  | { kind: "skip"; job: JobName; slot: string; reason: string };
+  | { kind: "skip"; job: JobName; slot: string; reason: string }
+  | { kind: "wake"; assessment: WakeAssessment; markedMissed: number };
 
 const shanghaiParts = (d: Date) => {
   const ts = shanghaiTs(d);
@@ -139,6 +145,46 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
   let timer: NodeJS.Timeout | null = null;
   // 串行闸门：上一轮没跑完就不开下一轮，避免慢 job（night 约 30 分钟）被叠着起
   let busy = false;
+  // 上一次 **interval 回调** 触发的时刻 —— 注意不是上一次 tick 执行完的时刻。
+  // 回调每 tickMs 必到，不受 busy 闸门影响；而 night 要跑 40 分钟，
+  // 用"上次执行完"做基准会把一次正常的慢 job 误判成休眠。
+  let lastCallbackAt = now().getTime();
+  // 进程启动后的第一轮一定评估
+  let needWakeCheck = true;
+
+  /**
+   * 跑一个补偿 job，用 wake: 标签，不占用时刻表上的真实时点。
+   *
+   * 今天已经成功跑过同一个 job 就不再补 —— 22:00 之后开机时，
+   * dueSlots 本来就会跑 night@22:00，补偿再跑一遍是白花 40 分钟拉同一批日线。
+   */
+  async function runCompensation(job: JobName, at: Date): Promise<void> {
+    const { date } = shanghaiParts(at);
+    const slot = wakeSlot(at);
+    const alreadyDone = o.db.prepare(
+      `SELECT 1 FROM job_run WHERE date = ? AND job = ? AND status = 'done' LIMIT 1`
+    ).get(date, job) !== undefined;
+    if (alreadyDone) {
+      emit({ kind: "skip", job, slot, reason: "今天已成功跑过，无需补偿" });
+      return;
+    }
+    if (!claim(o.db, date, job, slot, runner)) return;
+    try {
+      const result = await runJob(job, { db: o.db, clients: o.clients, now: at });
+      const outcome = jobOutcome(job, result.stats);
+      if (outcome.ok) {
+        finish(o.db, date, job, slot, "done", result.stats);
+        emit({ kind: "run", job, slot, result });
+      } else {
+        finish(o.db, date, job, slot, "failed", result.stats, outcome.reason);
+        emit({ kind: "fail", job, slot, error: outcome.reason! });
+      }
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      finish(o.db, date, job, slot, "failed", undefined, msg);
+      emit({ kind: "fail", job, slot, error: msg });
+    }
+  }
 
   async function tickOnce(): Promise<void> {
     if (busy) return;
@@ -146,6 +192,30 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
     try {
       const at = now();
       const { date } = shanghaiParts(at);
+
+      // ── 唤醒评估 ──
+      // 放在 dueSlots 之前：回收 running 残留会让被卡住的时点重新变成 pending，
+      // 本轮就能补上；同步日历也让今天的交易日判定立刻可用。
+      //
+      // 顺序在这里是有实质约束的，别调：
+      //   1. 先取 lastSeen —— 后面的写库动作都会污染 lastActivity
+      //   2. 回收残留
+      //   3. 跨过日历日就同步日历 —— 日历不含未来日期，不先同步就查不到沉睡期间
+      //      任何一天，漏采日恒为 0，补偿静默失效
+      //   4. 拿第 1 步的 lastSeen 评估，记账
+      let wake: WakeAssessment | null = null;
+      if (needWakeCheck) {
+        needWakeCheck = false;
+        const lastSeen = lastActivity(o.db);
+        const stale = findStaleClaims(o.db, at);
+        reclaimStaleClaims(o.db, stale);
+        if (crossedCalendarDay(lastSeen, at)) await runCompensation("preopen", at);
+        wake = assessWake(o.db, at, lastSeen, stale);
+        const marked = markUnaccountedMissed(o.db, wake.unaccounted);
+        if (stale.length > 0 || marked > 0 || wake.compensate.length > 0) {
+          emit({ kind: "wake", assessment: wake, markedMissed: marked });
+        }
+      }
 
       for (const d of dueSlots(o.db, at)) {
         if (d.action === "missed") {
@@ -181,6 +251,10 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
           // 单个 job 失败不能中断整轮：后面的时点还得照跑
         }
       }
+
+      // night 放最后：要 40 分钟，不能让它挡住今天不可回补的盘中快照。
+      // preopen 相反，在评估之前就跑了 —— 它是判据的前提，且只要一次请求
+      for (const job of wake?.compensate ?? []) await runCompensation(job, at);
     } finally {
       busy = false;
     }
@@ -192,7 +266,14 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
       if (timer !== null) return;
       // 立刻跑一轮："只要运行过这个系统就自动唤起采集"
       void tickOnce();
-      timer = setInterval(() => void tickOnce(), tickMs);
+      timer = setInterval(() => {
+        // 时间跳变 = 机器睡过一觉。进程没死，start() 不会再跑，
+        // 只有这里能发现"重新被激活"，否则跨天的暗日永远没人补
+        const t = now().getTime();
+        if (t - lastCallbackAt > WAKE_GAP_MIN * 60_000) needWakeCheck = true;
+        lastCallbackAt = t;
+        void tickOnce();
+      }, tickMs);
       timer.unref?.();     // 不因为调度器而拖住进程退出
     },
     stop() {

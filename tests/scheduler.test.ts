@@ -96,7 +96,7 @@ describe("createScheduler", () => {
     const events: string[] = [];
     const s = createScheduler({
       db, clients: clients(), now: () => at("09:36"),
-      onEvent: e => events.push(`${e.kind}:${e.job}@${e.slot}`),
+      onEvent: e => events.push(e.kind === "wake" ? "wake" : `${e.kind}:${e.job}@${e.slot}`),
     });
     await s.tickOnce();
     expect(events.some(e => e.startsWith("run:intraday@09:35"))).toBe(true);
@@ -133,7 +133,7 @@ describe("createScheduler", () => {
     const s = createScheduler({
       db, clients: { ...clients(), eastmoney: bad as any },
       now: () => at("18:45"),
-      onEvent: e => events.push(`${e.kind}:${e.job}`),
+      onEvent: e => events.push(e.kind === "wake" ? "wake" : `${e.kind}:${e.job}`),
     });
     await s.tickOnce();
     // post 会失败，但 selfcheck/preopen/intraday/close 仍应被处理

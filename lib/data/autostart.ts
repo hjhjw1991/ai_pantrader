@@ -33,6 +33,15 @@ function log(e: SchedulerEvent): void {
     console.log(`[采集 ${t}] ${e.job}@${e.slot} ${JSON.stringify(e.result.stats)}`);
   } else if (e.kind === "fail") {
     console.error(`[采集 ${t}] ${e.job}@${e.slot} 失败：${e.error}`);
+  } else if (e.kind === "wake") {
+    const a = e.assessment;
+    console.warn(
+      `[采集 ${t}] 唤醒补偿：上次活动 ${a.lastSeen ?? "无"}`
+      + `，沉睡 ${a.dormantMin === null ? "—" : Math.round(a.dormantMin) + " 分钟"}`
+      + `｜${a.reason}`
+      + (a.stale.length > 0 ? `｜回收 running 残留 ${a.stale.length} 条` : "")
+      + (e.markedMissed > 0 ? `｜补记 missed ${e.markedMissed} 个时点` : "")
+    );
   } else if (e.kind === "missed") {
     // 不可回补的时点漏了要看得见，不能只记库里
     console.warn(`[采集 ${t}] ${e.job}@${e.slot} 已过期未执行，记为 missed（不可回补）`);
