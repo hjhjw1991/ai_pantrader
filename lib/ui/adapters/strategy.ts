@@ -11,6 +11,7 @@ import {
   type ParamValue,
 } from "@/lib/strategy/loader";
 import { normalizeAccountKey } from "@/lib/strategy/schema";
+import { activeStrategyPath } from "@/lib/strategy/registry";
 
 /**
  * strategy.yaml 适配器 —— 参数面板与策略层之间唯一的一层。
@@ -25,7 +26,17 @@ import { normalizeAccountKey } from "@/lib/strategy/schema";
 /** 只用于显示相对路径，不用来定位文件 —— 文件位置由 loader 的 defaultStrategyPath 决定 */
 const PROJECT_ROOT = process.cwd();
 
-export const STRATEGY_YAML_REL = "config/strategy.yaml";
+/**
+ * 当前生效策略的相对路径，**只用于显示**。
+ *
+ * 以前这是个写死的常量 `config/strategy.yaml`。策略改成可增删之后那个字符串就在骗人：
+ * 界面上写着 config/strategy.yaml，用户去改那个文件却发现没生效（真相源已经是
+ * config/strategies/<id>.yaml）。提示文案指错文件比不给提示更耗时间，所以它必须跟着 active 走。
+ */
+export function strategyYamlRel(): string {
+  const p = activeStrategyPath();
+  return p === null ? "config/strategies/<id>.yaml" : path.relative(PROJECT_ROOT, p);
+}
 
 export function strategyYamlPath(): string {
   return defaultStrategyPath();
@@ -150,13 +161,13 @@ export function flattenConfig(obj: unknown, prefix: string[] = []): FlatParam[] 
 }
 
 /**
- * 某账户的规则段。走 loader 的 accountRule —— 它同时认 "贼王" 与 "贼王账户"
+ * 某账户的规则段。走 loader 的 accountRule —— 它同时认 "卫星" 与 "卫星账户"
  * 两种键写法（spec §9.1 的 YAML 用后者，契约类型用前者）。
  * 读不到就返回空对象，**不套内置默认止损线**：内置默认会让人以为那是自己设的线。
  */
 /**
  * YAML 持仓段里配了规则的所有账户。键取自用户的 YAML，**不预设任何账户名** ——
- * 早期版本这里写死 贼王/价值 两键，用户改个账户名规则就静默读不到、
+ * 早期版本这里写死两个内置账户名，用户改个账户名规则就静默读不到、
  * 硬线告警跟着静默失效，而页面上看不出任何异常。
  */
 export function accountRules(

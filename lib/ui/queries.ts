@@ -503,16 +503,36 @@ export interface AccountRow {
   id: string;
   name: string;
   type: AccountType;
+  /** false = 已停用。仍要列出来：历史台账还按它分组，藏起来用户会以为记录丢了 */
+  active: boolean;
+  /** 台账引用数。>0 的账户只能停用，不能物理删 */
+  refs: { positions: number; trades: number; orders: number };
 }
 
+/**
+ * 全部账户，含已停用的。
+ *
+ * 引用数在这里一次算清，不让界面按行去查 —— 界面要靠它决定按钮是"删除"还是"停用"，
+ * 而"点了删除结果只是停用了"这种意外必须在点之前就说清楚。
+ */
 export function accounts(db: Db): AccountRow[] {
-  const rows = db.prepare("SELECT id, name, type FROM account ORDER BY id").all() as Array<
-    Record<string, unknown>
-  >;
+  const rows = db.prepare(
+    `SELECT a.id, a.name, a.type, a.active,
+            (SELECT COUNT(*) FROM position p WHERE p.account_id = a.id) positions,
+            (SELECT COUNT(*) FROM trade t WHERE t.account_id = a.id) trades,
+            (SELECT COUNT(*) FROM ord o WHERE o.account_id = a.id) orders
+     FROM account a ORDER BY a.active DESC, a.id`
+  ).all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     id: r.id as string,
     name: r.name as string,
     type: r.type as AccountType,
+    active: Number(r.active ?? 1) === 1,
+    refs: {
+      positions: Number(r.positions ?? 0),
+      trades: Number(r.trades ?? 0),
+      orders: Number(r.orders ?? 0),
+    },
   }));
 }
 
@@ -531,8 +551,17 @@ export function positions(db: Db): PositionRow[] {
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     accountId: r.account_id as string,
-    // account 表缺行时不猜账户类型：归到"价值"会套用错的止损规则
-    account: (r.acc_type as AccountType) ?? ("价值" as AccountType),
+    /**
+     * account 表缺行时**回落到账户 id 本身**，绝不编一个账户名出来。
+     *
+     * 这里原先写的是 `?? "价值"` —— 一个内置账户名。注释当时还写着"不猜账户类型"，
+     * 但代码干的正是猜：持仓归到那个账户，下游 accountRule 就按它的段套止损，
+     * 于是一笔仓位被套上**另一个账户的止损线**，而界面看不出任何异常。
+     *
+     * 用 id 的好处是两种情况都诚实：YAML 里有以该 id 为键的段 → 规则正确命中；
+     * 没有 → accountRule 返回空对象，持仓页照原样提示"该账户硬线告警不生效"。
+     */
+    account: (r.acc_type as AccountType) ?? (r.account_id as AccountType),
     code: r.code as string,
     qty: Number(r.qty),
     cost: Number(r.cost),

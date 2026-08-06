@@ -2,7 +2,7 @@ import Link from "next/link";
 import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
-import { AccountForm, ManualFillForm } from "@/components/forms";
+import { AccountForm, AccountManager, ManualFillForm } from "@/components/forms";
 import { dbPath, readDb } from "@/lib/ui/db";
 import { fmtAmount, fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
@@ -166,39 +166,24 @@ export default function PositionsPage() {
         hint="manual 模式：你在券商 App 手敲下单，回来把成交登记进来"
         right="系统不下单"
       >
-        <ManualFillForm accountIds={pv.accounts.map((a) => a.id)} />
+        {/* 停用的账户不给新成交用：回填到一个已经停用的账户是记错账，
+            而这种错要到看统计时才发现 */}
+        <ManualFillForm accountIds={pv.accounts.filter((a) => a.active).map((a) => a.id)} />
         <p className="mt-2 text-ink-3 text-[11px]">
           这不是下单按钮。自动下单要等券商权限到位 + paper 模式连续跑满一个季度并达标
           （spec §18.2 红线），在那之前系统里不存在下单能力。
         </p>
       </Panel>
 
-      <Panel title="账户" hint="类型决定套哪套止损规则，不可混用">
-        {pv.accounts.length === 0 ? (
-          <NoRows what="account 表为空" hint="先建账户才能回填成交" />
-        ) : (
-          <div className="overflow-x-auto mb-3">
-            <table className="dense">
-              <thead>
-                <tr>
-                  <th>id</th>
-                  <th>名称</th>
-                  <th>类型</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pv.accounts.map((a) => (
-                  <tr key={a.id}>
-                    <td className="num text-ink">{a.id}</td>
-                    <td>{a.name}</td>
-                    <td className="text-ink-2">{a.type}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <AccountForm />
+      <Panel
+        title="账户"
+        hint="清单由你维护；每账户的止损规则来自 strategy.yaml 里以账户 id 为键的那一段"
+        right={`${pv.accounts.filter((a) => a.active).length} 启用 / ${pv.accounts.length} 共`}
+      >
+        <AccountManager rows={pv.accounts} />
+        <div className="mt-3 pt-3 border-t border-line">
+          <AccountForm />
+        </div>
       </Panel>
 
       <Panel title="近期成交" right={`${recent.length} 条`}>

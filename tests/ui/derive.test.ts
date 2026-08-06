@@ -13,7 +13,7 @@ import {
 
 function pos(o: Partial<Position> = {}): Position {
   return {
-    account: "贼王",
+    account: "卫星",
     code: "600519",
     qty: 1000,
     cost: 10,
@@ -69,7 +69,7 @@ describe("浮动盈亏", () => {
 });
 
 describe("硬线告警", () => {
-  const rules = { 贼王: { 止损: -0.05, 灾难位: -0.08, 止盈: [0.08, 0.15] } };
+  const rules = { 卫星: { 止损: -0.05, 灾难位: -0.08, 止盈: [0.08, 0.15] } };
 
   it("逐票止损价被破 → danger", () => {
     const a = hardLineAlerts(
@@ -98,8 +98,8 @@ describe("硬线告警", () => {
 
   it("两个账户的规则不串用", () => {
     const a = hardLineAlerts(
-      [{ position: pos({ account: "价值" }), price: 9.1, stopPx: null }],
-      rules // 只配了贼王
+      [{ position: pos({ account: "核心" }), price: 9.1, stopPx: null }],
+      rules // 只配了卫星
     );
     expect(a).toHaveLength(0);
   });
@@ -113,7 +113,7 @@ describe("硬线告警", () => {
 describe("组合风控占比", () => {
   const rows = [
     { position: pos({ code: "600519", qty: 100, cost: 10 }), price: 20 },
-    { position: pos({ code: "000001", qty: 200, cost: 5, account: "价值" as const }), price: 10 },
+    { position: pos({ code: "000001", qty: 200, cost: 5, account: "核心" as const }), price: 10 },
   ];
 
   it("总资产未记录时占比一律 null，不用持仓市值当分母", () => {
@@ -143,8 +143,8 @@ describe("组合风控占比", () => {
 
   it("按账户分别汇总", () => {
     const r = portfolioRisk(rows, null);
-    expect(r.byAccount.find((a) => a.account === "贼王")!.marketValue).toBe(2000);
-    expect(r.byAccount.find((a) => a.account === "价值")!.marketValue).toBe(2000);
+    expect(r.byAccount.find((a) => a.account === "卫星")!.marketValue).toBe(2000);
+    expect(r.byAccount.find((a) => a.account === "核心")!.marketValue).toBe(2000);
   });
 });
 

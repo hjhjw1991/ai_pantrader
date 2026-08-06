@@ -75,7 +75,7 @@ const strArray = (v: unknown): string[] =>
 
 /**
  * 每账户可交易的板块，来自 strategy.yaml 的 `持仓.<账户>.可交易板块`。
- * 账户名与权限都是用户的配置 —— 早期版本把 "主板→贼王 / 创业板→价值" 写死在这里，
+ * 账户名与权限都是用户的配置 —— 早期版本把 "主板→A 账户 / 创业板→B 账户" 写死在这里，
  * 那等于我替用户决定了他有几个账户、各自开了什么权限。
  */
 function accountBoards(config: StrategyConfig): Array<{ account: AccountId; boards: string[] }> {
@@ -445,7 +445,7 @@ export function applyPortfolioCaps(
   const 比例 = 风控.核心卫星比例;
   /**
    * 每账户占核心/卫星哪个桶，来自 `持仓.<账户>.仓位桶`（值为 核心 或 卫星）。
-   * 早期版本写死 "贼王=卫星、价值=核心"，改个账户名预算就变 0 且不报错。
+   * 早期版本把"哪个账户吃哪个桶"写死在代码里，改个账户名预算就变 0 且不报错。
    * 没配 仓位桶 的账户预算为 0，但会在卡片 warnings 里点名，不静默吞掉。
    */
   const bucketShare: Record<string, number> = {};

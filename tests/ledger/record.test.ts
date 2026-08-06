@@ -28,7 +28,7 @@ describe("ledger/record", () => {
 
     const back = getPrediction(db, "a");
     expect(back).toMatchObject({
-      id: "a", code: "300502", action: "买入", account: "贼王",
+      id: "a", code: "300502", action: "买入", account: "卫星",
       evalHorizon: 5, advisorInfluenced: true,
     });
   });

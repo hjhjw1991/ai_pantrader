@@ -156,7 +156,7 @@ describe("候选池", () => {
     const c = card.candidates.find(x => x.code === "600183");
     expect(c).toBeDefined();
     expect(c!.action).toBe("买入");
-    expect(c!.account).toBe("贼王");
+    expect(c!.account).toBe("卫星");
     // 不追高：触发价不高于最新收盘（回踩企稳低吸）
     expect(c!.triggerPx).not.toBeNull();
     expect(c!.triggerPx!).toBeLessThanOrEqual(11);
@@ -198,7 +198,7 @@ describe("候选池", () => {
     expect(card.candidates).toEqual([]);
   });
 
-  it("创业板票落到价值账户，主板票落到贼王账户（权限×账户）", () => {
+  it("创业板票落到核心账户，主板票落到卫星账户（权限×账户）", () => {
     const view = makeView({
       asOf: `${D} 15:05:00`, tradingDays: DAYS,
       securities: [sec("600183", "主板"), sec("300750", "创业板")],
@@ -209,8 +209,8 @@ describe("候选池", () => {
       zt: { [D]: [zt(D, "600183", { sector: "半导体" }), zt(D, "300750", { sector: "半导体" })] },
     });
     const card = run({ view });
-    expect(card.candidates.find(c => c.code === "600183")!.account).toBe("贼王");
-    expect(card.candidates.find(c => c.code === "300750")!.account).toBe("价值");
+    expect(card.candidates.find(c => c.code === "600183")!.account).toBe("卫星");
+    expect(card.candidates.find(c => c.code === "300750")!.account).toBe("核心");
   });
 
   it("北交所票两个账户都不做，直接不进候选", () => {
@@ -226,7 +226,7 @@ describe("候选池", () => {
 
   it("已持仓的票不重复进新开仓池，只出现在 holdings", () => {
     const card = run({
-      positions: [{ account: "贼王", code: "600183", cost: 10, qty: 1000, stopPx: 9.5 }],
+      positions: [{ account: "卫星", code: "600183", cost: 10, qty: 1000, stopPx: 9.5 }],
     });
     expect(card.candidates.map(c => c.code)).not.toContain("600183");
     expect(card.holdings.map(h => h.code)).toContain("600183");
@@ -279,10 +279,10 @@ describe("组合风控", () => {
     expect(sum).toBeLessThanOrEqual(0.35 + 1e-9);
   });
 
-  it("贼王账户合计不超过 卫星比例 × 目标仓位", () => {
+  it("卫星账户合计不超过 卫星比例 × 目标仓位", () => {
     const card = run({ view: manyView(8) });
-    const 贼王 = card.candidates.filter(c => c.account === "贼王").reduce((a, c) => a + c.size, 0);
-    expect(贼王).toBeLessThanOrEqual(0.7 * 0.4 + 1e-9);
+    const 卫星 = card.candidates.filter(c => c.account === "卫星").reduce((a, c) => a + c.size, 0);
+    expect(卫星).toBeLessThanOrEqual(0.7 * 0.4 + 1e-9);
   });
 
   it("被上限挤掉的票降级为观察，并写明是哪条上限挤的", () => {
@@ -294,7 +294,7 @@ describe("组合风控", () => {
   });
 
   it("无法核算现有持仓占比时必须告警 —— 引擎拿不到总资产", () => {
-    const card = run({ positions: [{ account: "贼王", code: "000001", cost: 10, qty: 1000, stopPx: null }] });
+    const card = run({ positions: [{ account: "卫星", code: "000001", cost: 10, qty: 1000, stopPx: null }] });
     expect(card.warnings.some(w => w.includes("总资产") || w.includes("现有持仓"))).toBe(true);
   });
 });
@@ -302,8 +302,8 @@ describe("组合风控", () => {
 /* -------------------------------- 持仓动作 -------------------------------- */
 
 describe("持仓动作", () => {
-  const held = (over: Partial<{ cost: number; stopPx: number | null; account: "贼王" | "价值" }> = {}) => ([{
-    account: over.account ?? "贼王" as const,
+  const held = (over: Partial<{ cost: number; stopPx: number | null; account: "卫星" | "核心" }> = {}) => ([{
+    account: over.account ?? "卫星" as const,
     code: "600183", cost: over.cost ?? 10.8, qty: 1000,
     stopPx: over.stopPx === undefined ? 9.5 : over.stopPx,
   }]);
@@ -385,7 +385,7 @@ describe("持仓动作", () => {
     expect(card.holdings[0].thesis).toMatch(/防守/);
   });
 
-  it("价值账户止损是 逻辑破坏，不给机械止损价，只提示复核", () => {
+  it("核心账户止损是 逻辑破坏，不给机械止损价，只提示复核", () => {
     const view = makeView({
       asOf: `${D} 15:05:00`, tradingDays: DAYS,
       securities: [sec("300750", "创业板")],
@@ -394,7 +394,7 @@ describe("持仓动作", () => {
     });
     const card = run({
       view,
-      positions: [{ account: "价值", code: "300750", cost: 20, qty: 100, stopPx: null }],
+      positions: [{ account: "核心", code: "300750", cost: 20, qty: 100, stopPx: null }],
     });
     const h = card.holdings[0];
     expect(h.stopPx).toBeNull();

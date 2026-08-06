@@ -63,9 +63,58 @@ export interface AccountInput {
 
 export function upsertAccount(db: Db, a: AccountInput): void {
   db.prepare(
-    `INSERT INTO account (id, name, type) VALUES (?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type`
-  ).run(a.id, a.name, a.type);
+    `INSERT INTO account (id, name, type, active, created_at)
+     VALUES (?, ?, ?, 1, ?)
+     ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type,
+       -- 重新保存一个停用过的账户 = 恢复它。要真删就走 deleteAccount
+       active = 1`
+  ).run(a.id, a.name, a.type, shanghaiTs());
+}
+
+export function setAccountActive(db: Db, id: string, active: boolean): boolean {
+  const r = db.prepare("UPDATE account SET active = ? WHERE id = ?").run(active ? 1 : 0, id);
+  return r.changes > 0;
+}
+
+/** 这个账户被台账引用了多少次。>0 就不能物理删 */
+export function accountRefs(db: Db, id: string): { positions: number; trades: number; orders: number } {
+  const one = (sql: string) => (db.prepare(sql).get(id) as { c: number }).c;
+  return {
+    positions: one("SELECT COUNT(*) c FROM position WHERE account_id = ?"),
+    trades: one("SELECT COUNT(*) c FROM trade WHERE account_id = ?"),
+    orders: one("SELECT COUNT(*) c FROM ord WHERE account_id = ?"),
+  };
+}
+
+export interface DeleteAccountResult {
+  id: string;
+  mode: "hard" | "soft";
+  refs: { positions: number; trades: number; orders: number };
+  note: string;
+}
+
+/**
+ * 删账户。**有引用就只停用，不物理删。**
+ *
+ * 硬删一个还挂着 position/trade 的账户，台账里那些行的 account_id 就指向不存在的账户：
+ * 持仓页显示不出归属、按账户分组的胜率统计凭空少一组，而且没有任何提示 ——
+ * 这正是"静默丢历史"。所以规则按引用分两种：
+ *   有引用 → active=0。界面不再列它、引擎不给它出候选，但历史归属完整保留
+ *   无引用 → 物理删。建错了名字随手就能清掉，不该留一堆停用的空壳
+ */
+export function deleteAccount(db: Db, id: string): DeleteAccountResult {
+  const refs = accountRefs(db, id);
+  const total = refs.positions + refs.trades + refs.orders;
+  if (total > 0) {
+    setAccountActive(db, id, false);
+    return {
+      id, mode: "soft", refs,
+      note: `台账里有 ${refs.positions} 条持仓 / ${refs.trades} 条成交 / ${refs.orders} 条委托`
+        + `挂在 ${id} 上，已停用而非删除 —— 硬删会让这些历史记录失去归属`,
+    };
+  }
+  db.prepare("DELETE FROM account WHERE id = ?").run(id);
+  return { id, mode: "hard", refs, note: `${id} 没有任何台账引用，已彻底删除` };
 }
 
 export function accountExists(db: Db, id: string): boolean {

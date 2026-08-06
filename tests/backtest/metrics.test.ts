@@ -13,7 +13,7 @@ function eqSeries(values: number[], from = 0): EquityPoint[] {
 /** 造 n 笔往返，前 win 笔赚 pnl+，其余亏 pnl- */
 function closedTrades(n: number, win: number, gain = 1000, loss = -500): ClosedTrade[] {
   return Array.from({ length: n }, (_, i) => ({
-    code: `60000${i % 10}`, account: "贼王" as const,
+    code: `60000${i % 10}`, account: "卫星" as const,
     entryDate: "2026-01-05", exitDate: "2026-01-09",
     entryPx: 10, exitPx: i < win ? 11 : 9.5, qty: 1000,
     pnl: i < win ? gain : loss, fees: 10, holdDays: i < win ? 4 : 2,

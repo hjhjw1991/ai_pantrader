@@ -47,9 +47,14 @@ describe("lib/strategy 纯度", () => {
     }
   });
 
-  it("除 loader/package 外不碰文件系统 —— 只有它们负责读写 YAML 与策略包", () => {
+  /**
+   * registry.ts 也在白名单里：它和 loader 同类 —— 配置文件的管道，不是决策逻辑。
+   * 放它进来不削弱这套断言，因为真正要守的那条（断言 3：不许碰存储）
+   * 仍然罩着它，而且是它被从 lib/strategy 里切出一半到 lib/ledger 的原因。
+   */
+  it("除 loader/package/registry 外不碰文件系统 —— 只有它们负责读写 YAML 与策略包", () => {
     for (const f of files) {
-      if (f === "loader.ts" || f === "package.ts" || f === "index.ts") continue;
+      if (f === "loader.ts" || f === "package.ts" || f === "index.ts" || f === "registry.ts") continue;
       expect(read(f), `${f} 出现了文件系统访问`).not.toMatch(/from\s+"node:fs"/);
     }
   });

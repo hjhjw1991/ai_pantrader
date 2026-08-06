@@ -274,7 +274,7 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
     upsertWatch(db, {
       code: "600468",
       name: "百利电气",
-      account: "贼王",
+      account: "卫星",
       triggerPx: 5.8,
       stopPx: 5.51,
       thesis: "电网主线回踩",
@@ -283,10 +283,10 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ code: "600468", triggerPx: 5.8, stopPx: 5.51, active: true });
 
-    upsertWatch(db, { code: "600468", account: "价值", triggerPx: 5.6 });
+    upsertWatch(db, { code: "600468", account: "核心", triggerPx: 5.6 });
     rows = watchpool(db);
     expect(rows).toHaveLength(1);
-    expect(rows[0].account).toBe("价值");
+    expect(rows[0].account).toBe("核心");
     expect(rows[0].triggerPx).toBe(5.6);
 
     deactivateWatch(db, "600468");
@@ -296,7 +296,7 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
   });
 
   it("买入按加权平均摊成本，且把费用摊进去", () => {
-    upsertAccount(db, { id: "zw", name: "贼王主号", type: "贼王" });
+    upsertAccount(db, { id: "zw", name: "卫星主号", type: "卫星" });
     expect(accounts(db).map((a) => a.id)).toContain("zw");
 
     recordManualFill(db, { accountId: "zw", code: "600468", side: "buy", px: 10, qty: 1000, fee: 5 });
@@ -342,6 +342,6 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
 
   it("持仓带出账户类型（止损规则靠它区分）", () => {
     recordManualFill(db, { accountId: "zw", code: "601700", side: "buy", px: 5, qty: 100 });
-    expect(positions(db).find((x) => x.code === "601700")!.account).toBe("贼王");
+    expect(positions(db).find((x) => x.code === "601700")!.account).toBe("卫星");
   });
 });

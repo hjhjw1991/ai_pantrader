@@ -46,7 +46,39 @@ function useSubmit() {
       setBusy(false);
     }
   }
-  return { busy, msg, send };
+  /**
+   * 需要**看服务端说了什么**的操作用这个，不是 send。
+   *
+   * send 一律显示"已保存"，但删除类操作的结果不是二值的：
+   * 点了"删除账户"实际可能只是停用了（有台账引用时），那句解释必须原样显示出来 ——
+   * 让用户以为删掉了而其实没删，是最糟的一种反馈。
+   */
+  async function call(
+    url: string, method: string, body?: unknown
+  ): Promise<Record<string, unknown> | null> {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await fetch(url, {
+        method,
+        ...(body === undefined
+          ? {}
+          : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+      });
+      const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!r.ok) throw new Error(String(j?.error ?? `HTTP ${r.status}`));
+      setMsg({ kind: "ok", text: String(j.note ?? "已完成") });
+      router.refresh();
+      return j;
+    } catch (e) {
+      setMsg({ kind: "err", text: (e as Error).message });
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return { busy, msg, send, call };
 }
 
 function Msg({ msg }: { msg: { kind: "ok" | "err"; text: string } | null }) {
@@ -328,7 +360,7 @@ export function AccountForm() {
       <label className="flex flex-col gap-0.5">
         {/*
           自由输入，不是下拉。账户类型是用户自己起的标签 ——
-          写死成 贼王/价值 两个选项，等于账户体系要改代码才能扩展。
+          写死成几个固定选项，等于账户体系要改代码才能扩展。
           止损规则来自 strategy.yaml 里以账户 id 为键的那一段，不由这个标签决定。
         */}
         <span className="text-ink-3 text-[11px]">类型标签（自定义，仅用于分组展示）</span>
@@ -345,6 +377,252 @@ export function AccountForm() {
       </button>
       <Msg msg={msg} />
     </form>
+  );
+}
+
+export interface AccountManagerRow {
+  id: string;
+  name: string;
+  type: string;
+  active: boolean;
+  refs: { positions: number; trades: number; orders: number };
+}
+
+/**
+ * 账户列表 + 停用 / 恢复 / 删除。
+ *
+ * 界面在点之前就说清会发生什么：有台账引用的账户按钮写"停用"，没有的写"删除"。
+ * 两者都调同一个 DELETE，服务端按引用决定实际动作 —— 判断只放一处，
+ * 界面写死一套规则、服务端另一套，早晚对不上。
+ */
+export function AccountManager({ rows }: { rows: AccountManagerRow[] }) {
+  const { busy, msg, call } = useSubmit();
+  if (rows.length === 0) {
+    return (
+      <p className="text-ink-3 text-[12px]">
+        还没有账户。用下面的表单建一个 —— 代码不预置任何账户，
+        账户是你组织自己资金的方式。
+      </p>
+    );
+  }
+  const refTotal = (r: AccountManagerRow) => r.refs.positions + r.refs.trades + r.refs.orders;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="overflow-x-auto">
+        <table className="dense">
+          <thead>
+            <tr>
+              <th>账户 id</th>
+              <th>显示名</th>
+              <th>类型标签</th>
+              <th className="text-right">持仓</th>
+              <th className="text-right">成交</th>
+              <th className="text-right">委托</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((a) => (
+              <tr key={a.id} className={a.active ? "" : "opacity-50"}>
+                <td className="num text-ink">{a.id}</td>
+                <td className="text-ink-2">{a.name}</td>
+                <td className="text-ink-3">{a.type}</td>
+                <td className="num">{a.refs.positions}</td>
+                <td className="num">{a.refs.trades}</td>
+                <td className="num">{a.refs.orders}</td>
+                <td className={a.active ? "text-down" : "text-ink-3"}>
+                  {a.active ? "启用" : "已停用"}
+                </td>
+                <td className="flex gap-1">
+                  <button
+                    className={btnCls}
+                    disabled={busy}
+                    type="button"
+                    onClick={() =>
+                      void call("/api/settings/account", "PATCH", { id: a.id, active: !a.active })
+                    }
+                  >
+                    {a.active ? "停用" : "恢复"}
+                  </button>
+                  <button
+                    className={btnCls}
+                    disabled={busy}
+                    type="button"
+                    onClick={() => {
+                      const n = refTotal(a);
+                      const q = n > 0
+                        ? `${a.id} 有 ${n} 条台账记录，只会停用（保留历史归属），确定？`
+                        : `${a.id} 没有任何台账记录，将彻底删除，确定？`;
+                      if (!confirm(q)) return;
+                      void call(`/api/settings/account?id=${encodeURIComponent(a.id)}`, "DELETE");
+                    }}
+                  >
+                    {refTotal(a) > 0 ? "停用（有台账）" : "删除"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Msg msg={msg} />
+      <p className="text-ink-3 text-[11px]">
+        有台账记录的账户只能停用：硬删会让那些持仓/成交行的 account_id 指向不存在的账户，
+        持仓页显示不出归属、按账户分组的胜率统计凭空少一组，且没有任何提示。
+        停用后不再出现在新建表单里，也不会被引擎当作可下单账户，但历史归属完整保留。
+      </p>
+    </div>
+  );
+}
+
+// ─────────────────────────── 策略 ───────────────────────────
+
+export interface StrategyManagerRow {
+  id: string;
+  version: string | null;
+  active: boolean;
+  valid: boolean;
+  invalidReason?: string;
+  filePath: string;
+  bytes: number;
+}
+
+/**
+ * 策略清单 + 新建 / 切换 / 删除。
+ *
+ * 新建是**复制现有策略的原文**，不是生成空模板：YAML 里每个阈值下面
+ * 都有一段注释记着它的由来，从空模板开始等于从"不知道这些数该是多少"开始。
+ */
+export function StrategyManager({
+  rows, activeId, dirRel, undecided,
+}: {
+  rows: StrategyManagerRow[];
+  activeId: string | null;
+  dirRel: string;
+  undecided: boolean;
+}) {
+  const { busy, msg, call } = useSubmit();
+  const [newId, setNewId] = useState("");
+  const [from, setFrom] = useState("");
+
+  return (
+    <div className="flex flex-col gap-2">
+      {undecided ? (
+        <p className="text-danger text-[12px]">
+          有 {rows.length} 个策略但没有 ACTIVE 指针 —— 系统读不出该用哪个。下面选一个「设为生效」。
+        </p>
+      ) : null}
+
+      {rows.length === 0 ? (
+        <p className="text-ink-3 text-[12px]">
+          {dirRel} 下没有任何策略文件。系统没有参数可用 —— 放一份 YAML 进去。
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="dense">
+            <thead>
+              <tr>
+                <th>策略 id</th>
+                <th>版本</th>
+                <th>校验</th>
+                <th className="text-right">大小</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={s.id}>
+                  <td className="num text-ink">{s.id}</td>
+                  <td className="num text-ink-2">{s.version ?? "—"}</td>
+                  <td className={s.valid ? "text-down" : "text-danger"}>
+                    {s.valid ? "通过" : (s.invalidReason ?? "不通过")}
+                  </td>
+                  <td className="num text-ink-3">{s.bytes}B</td>
+                  <td className={s.active ? "text-down" : "text-ink-3"}>
+                    {s.active ? "生效中" : "—"}
+                  </td>
+                  <td className="flex gap-1">
+                    <button
+                      className={btnCls}
+                      disabled={busy || s.active || !s.valid}
+                      type="button"
+                      title={!s.valid ? "校验不过的策略不能设为生效" : undefined}
+                      onClick={() => void call("/api/strategy", "PATCH", { id: s.id })}
+                    >
+                      设为生效
+                    </button>
+                    <button
+                      className={btnCls}
+                      disabled={busy || s.active || rows.length <= 1}
+                      type="button"
+                      title={s.active ? "先切换到别的策略再删" : undefined}
+                      onClick={() => {
+                        if (!confirm(`删除策略 ${s.id}？有预测挂在它上面时会先把原文快照进 strategy 表，归因不丢。`)) return;
+                        void call(`/api/strategy?id=${encodeURIComponent(s.id)}`, "DELETE");
+                      }}
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          const j = await call("/api/strategy", "POST", {
+            id: newId,
+            ...(from ? { from } : {}),
+          });
+          if (j) setNewId("");
+        }}
+      >
+        <label className="flex flex-col gap-0.5">
+          <span className="text-ink-3 text-[11px]">新策略 id（会成为文件名）</span>
+          <input
+            className={`${inputCls} w-40`}
+            value={newId}
+            onChange={(e) => setNewId(e.target.value)}
+            placeholder="aggressive"
+            required
+          />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-ink-3 text-[11px]">复制自</span>
+          <select
+            className={`${inputCls} w-40`}
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          >
+            <option value="">（当前生效：{activeId ?? "无"}）</option>
+            {rows.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className={btnCls} disabled={busy || rows.length === 0} type="submit">
+          新建策略
+        </button>
+        <Msg msg={msg} />
+      </form>
+
+      <p className="text-ink-3 text-[11px]">
+        策略是 <code className="text-ink-2">{dirRel}/&lt;id&gt;.yaml</code> 文件，
+        生效的那个记在同目录的 <code className="text-ink-2">ACTIVE</code> 里 ——
+        指针放文件不放数据库，因为 app_meta 不进 .ptbak，换台机器恢复后
+        「在跑哪个策略」就丢了。新建是复制原文、只改 id 行，
+        <strong>注释一个字节不动</strong>：那些注释记着每个阈值的由来。
+      </p>
+    </div>
   );
 }
 

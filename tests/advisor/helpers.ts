@@ -42,7 +42,7 @@ export function makeCandidate(over: Partial<Candidate> = {}): Candidate {
     code: "600123",
     name: "测试股",
     action: "买入",
-    account: "贼王",
+    account: "卫星",
     triggerPx: 10,
     stopPx: 9,
     size: 0.1,

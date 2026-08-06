@@ -65,8 +65,30 @@ export const AccountUpsertSchema = z.object({
   type: AccountTypeSchema,
 });
 
+export const AccountActiveSchema = z.object({
+  id: z.string().min(1).max(64),
+  active: z.boolean(),
+});
+
+/**
+ * 策略 id 会直接拼成文件名（config/strategies/<id>.yaml），
+ * 所以这里挡的是路径穿越，不是格式洁癖。registry.assertSafeId 再挡一次 ——
+ * 校验入口只有一个的话，哪天多一条调用路径就漏了。
+ */
+export const StrategyIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "只允许字母数字与 . _ -，首字符须为字母或数字");
+
+export const StrategyCreateSchema = z.object({
+  id: StrategyIdSchema,
+  /** 从哪个策略复制原文（含注释）。不给则从当前生效的那个复制 */
+  from: StrategyIdSchema.optional(),
+});
+
+export const StrategyActivateSchema = z.object({ id: StrategyIdSchema });
+
 export const StrategyParamWriteSchema = z.object({
-  /** 形如 "持仓.贼王账户.止损" */
+  /** 形如 "持仓.卫星账户.止损" */
   path: z.string().min(1).max(200).regex(/^[^\s]+$/, "参数路径不能含空格"),
   value: z.union([z.number(), z.string().max(200), z.boolean(), z.array(z.union([z.number(), z.string().max(64)]))]),
 });

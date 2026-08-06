@@ -14,7 +14,7 @@ export const runtime = "nodejs";
  * 一个季度之前不自动下单（spec §18.2）。这条路由只把既成事实记下来。
  *
  * 账户必须先存在：自动建账户会让"记错账户"这类错误静默通过，
- * 而两个账户的止损规则完全不同（贼王按比例、价值按逻辑破坏），套错就是纪律失效。
+ * 而不同账户的止损规则可以完全不同（一个按价格比例、一个按逻辑破坏），套错就是纪律失效。
  */
 export async function POST(req: Request) {
   const b = await parseBody(req, ManualFillSchema);

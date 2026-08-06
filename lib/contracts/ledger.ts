@@ -64,7 +64,7 @@ export interface WinRateStats {
 export interface ParamSuggestion {
   errorType: ErrorType;
   occurrences: number;
-  /** strategy.yaml 里的路径，如 "持仓.贼王账户.止损" */
+  /** strategy.yaml 里的路径，如 "持仓.卫星账户.止损" */
   paramPath: string;
   current: unknown;
   suggested: unknown;

@@ -145,7 +145,7 @@ export function makeConfig(over: Partial<StrategyConfig> = {}): StrategyConfig {
     version: "1.0.0",
     择时: { 仓位档位: { 进攻: 0.8, 中性: 0.5, 防守: 0 }, 防守触发: {} },
     选股: { 过滤器阈值: {}, 主线识别: { 板块涨幅榜TopN: 5, 必查链: ["半导体"] } },
-    持仓: { 贼王: {}, 价值: {} },
+    持仓: { 卫星: {}, 核心: {} },
     组合风控: {
       总仓位上限: 1, 单票最大占比: 1, 单行业最大占比: 1,
       核心卫星比例: { 核心: 0.6, 卫星: 0.4 },
@@ -160,7 +160,7 @@ const NEUTRAL_ENV: EnvAssessment = {
 
 export function makeCandidate(over: Partial<Candidate> & { code: string }): Candidate {
   return {
-    name: over.code, action: "买入", account: "贼王", triggerPx: null, stopPx: null,
+    name: over.code, action: "买入", account: "卫星", triggerPx: null, stopPx: null,
     size: 0.5, thesis: "测试逻辑", passedFilters: [], factors: [], score: 1,
     ...over,
   };

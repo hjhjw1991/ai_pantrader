@@ -2,7 +2,7 @@ import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { SourceHealthTable } from "@/components/StatusRail";
-import { ExportForm, ImportDryRunForm } from "@/components/forms";
+import { ExportForm, ImportDryRunForm, StrategyManager } from "@/components/forms";
 import { ParamPanel } from "@/components/ParamPanel";
 import { appliedMigrations, dbPath, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtAmount, fmtTs, ageMinutes } from "@/lib/ui/format";
@@ -17,10 +17,15 @@ import {
   unresolvedGaps,
 } from "@/lib/ui/queries";
 import {
-  STRATEGY_YAML_REL,
+  strategyYamlRel,
   flattenConfig,
   readStrategyConfig,
 } from "@/lib/ui/adapters/strategy";
+import {
+  STRATEGIES_DIR_REL,
+  activeStrategyId,
+  listStrategies,
+} from "@/lib/strategy/registry";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +50,8 @@ export default function SettingsPage() {
   const cfg = readStrategyConfig();
   const advisor = advisorOutputs(db, 20);
   const startDate = getMetaValue(db, "system_start_date");
+  const strategyList = listStrategies();
+  const activeStrategy = activeStrategyId();
 
   return (
     <div className="flex flex-col gap-3">
@@ -237,10 +244,33 @@ export default function SettingsPage() {
         )}
       </Panel>
 
+      {/* ── 策略清单 ── */}
+      <Panel
+        title="策略"
+        hint={`${STRATEGIES_DIR_REL}/<id>.yaml，生效的记在同目录 ACTIVE 里`}
+        right={`${strategyList.length} 个 · 生效 ${activeStrategy ?? "未选"}`}
+        tone={activeStrategy === null && strategyList.length > 1 ? "danger" : "normal"}
+      >
+        <StrategyManager
+          rows={strategyList.map((s) => ({
+            id: s.id,
+            version: s.version,
+            active: s.active,
+            valid: s.valid,
+            invalidReason: s.invalidReason,
+            filePath: s.filePath,
+            bytes: s.bytes,
+          }))}
+          activeId={activeStrategy}
+          dirRel={STRATEGIES_DIR_REL}
+          undecided={activeStrategy === null && strategyList.length > 1}
+        />
+      </Panel>
+
       {/* ── 参数面板 ── */}
       <Panel
         title="策略参数面板"
-        hint={`${STRATEGY_YAML_REL} 的投影（D7）。这里不存第二份状态`}
+        hint={`${strategyYamlRel()} 的投影（D7）。这里不存第二份状态`}
         right={cfg.available && cfg.validated ? "已通过 loader 校验" : "校验未通过"}
       >
         {!cfg.available ? (

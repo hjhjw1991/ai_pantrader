@@ -1,5 +1,6 @@
 import type { Db } from "@/lib/db";
 import type { Prediction } from "@/lib/contracts";
+import { snapshotForPrediction } from "@/lib/ledger/strategy-snapshot";
 import { EVAL_HORIZONS, PRED_COLS, predWhere, toPrediction, type EvalHorizon, type LedgerFilter, type PredictionRow } from "@/lib/ledger/query";
 
 /**
@@ -53,8 +54,24 @@ function fingerprint(p: Prediction): string {
   ]);
 }
 
+/**
+ * 快照当前策略原文。细节见 lib/ledger/strategy-snapshot.ts ——
+ * 那一刻正是台账开始依赖这套参数的时刻。
+ *
+ * 失败绝不能拖垮台账写入：预测本身不可再生（事后补记等于事后选样本），
+ * 而快照随时可以补。所以吞异常，只在 stderr 留声。
+ */
+function snapshotIfNeeded(db: Db, strategyId: string): void {
+  try {
+    snapshotForPrediction(db, strategyId);
+  } catch (e) {
+    console.error(`[台账] 策略快照失败（不影响预测写入）：${(e as Error).message}`);
+  }
+}
+
 export function recordPrediction(db: Db, p: Prediction): void {
   assertPrediction(p);
+  snapshotIfNeeded(db, p.strategyId);
 
   const existing = getPrediction(db, p.id);
   if (existing) {

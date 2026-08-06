@@ -5,7 +5,7 @@ import { LabRunner } from "@/components/LabRunner";
 import { dbPath, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
-import { flattenConfig, readStrategyConfig, STRATEGY_YAML_REL } from "@/lib/ui/adapters/strategy";
+import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
 import { calendarRange, strategies, tableCounts } from "@/lib/ui/queries";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 
@@ -37,7 +37,7 @@ export default function LabPage() {
           {strats.length === 0 ? (
             <NoRows
               what="strategy 表无记录"
-              hint={`策略由 ${STRATEGY_YAML_REL} 定义并由策略层写入 strategy 表（改参自动存版本快照）`}
+              hint={`策略由 ${strategyYamlRel()} 定义；产生第一条预测时原文自动快照进 strategy 表`}
             />
           ) : (
             <div className="overflow-x-auto">
@@ -79,7 +79,7 @@ export default function LabPage() {
             <>
               <p className="text-warn text-[11px] mb-2">
                 只读展示。写回需 lib/strategy/loader.ts（未就绪）—— 现在请直接编辑{" "}
-                <code className="text-ink-2">{STRATEGY_YAML_REL}</code>，它本身就是真相源。
+                <code className="text-ink-2">{strategyYamlRel()}</code>，它本身就是真相源。
               </p>
               <div className="max-h-60 overflow-y-auto">
                 <table className="dense">

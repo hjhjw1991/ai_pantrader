@@ -9,7 +9,7 @@ afterEach(() => cleanup(db, dir));
 
 function cfg() {
   return {
-    持仓: { 贼王: { 止损: 0.08 }, 价值: { 止损: 0.15 } },
+    持仓: { 卫星: { 止损: 0.08 }, 核心: { 止损: 0.15 } },
     选股: {
       过滤器阈值: { 位置涨幅上限: 30 },
       主线识别: { 板块涨幅榜TopN: 10, 必查链: ["半导体设备"] },
@@ -20,7 +20,7 @@ function cfg() {
 describe("ledger/suggest", () => {
   it("逆势扛达阈值 → 建议收紧对应账户的止损，路径带账户", () => {
     seedSettled(db, SUGGEST_MIN_OCCURRENCES, {
-      idPrefix: "s", hits: 0, advisorInfluenced: false, errorType: "逆势扛", account: "贼王",
+      idPrefix: "s", hits: 0, advisorInfluenced: false, errorType: "逆势扛", account: "卫星",
     });
 
     const out = suggestParamChanges(db, { config: cfg(), asOf: "2026-08-04" });
@@ -28,7 +28,7 @@ describe("ledger/suggest", () => {
     expect(out[0]).toMatchObject({
       errorType: "逆势扛",
       occurrences: SUGGEST_MIN_OCCURRENCES,
-      paramPath: "持仓.贼王.止损",
+      paramPath: "持仓.卫星.止损",
       current: 0.08,
       suggested: 0.06,
     });

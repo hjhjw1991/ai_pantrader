@@ -50,12 +50,12 @@ describe("代码与日期", () => {
 describe("观察池条目", () => {
   it("接受留空的触发价/止损价（先记下标的也合理）", () => {
     expect(
-      WatchpoolUpsertSchema.safeParse({ code: "600519", account: "贼王" }).success
+      WatchpoolUpsertSchema.safeParse({ code: "600519", account: "卫星" }).success
     ).toBe(true);
     expect(
       WatchpoolUpsertSchema.safeParse({
         code: "600519",
-        account: "价值",
+        account: "核心",
         triggerPx: null,
         stopPx: null,
       }).success
@@ -72,7 +72,7 @@ describe("观察池条目", () => {
   it("价格必须为正、有限", () => {
     for (const px of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(
-        WatchpoolUpsertSchema.safeParse({ code: "600519", account: "贼王", triggerPx: px }).success
+        WatchpoolUpsertSchema.safeParse({ code: "600519", account: "卫星", triggerPx: px }).success
       ).toBe(false);
     }
   });
@@ -108,7 +108,7 @@ describe("手工成交回填", () => {
 describe("账户", () => {
   it("账户类型是用户自己起的标签，不做白名单", () => {
     // 以前这里锁死两个名字，等于加个账户要改代码 —— 账户是用户的资产组织方式
-    for (const type of ["贼王", "融资", "打板", "长线", "港股通"]) {
+    for (const type of ["卫星", "融资", "打板", "长线", "港股通"]) {
       expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type }).success).toBe(true);
     }
     expect(AccountUpsertSchema.safeParse({ id: "a", name: "n", type: "" }).success).toBe(false);
@@ -131,7 +131,7 @@ describe("回测参数", () => {
 
 describe("策略参数写回", () => {
   it("路径不许含空格，值只能是纯量或纯量数组", () => {
-    expect(StrategyParamWriteSchema.safeParse({ path: "持仓.贼王账户.止损", value: -0.05 }).success).toBe(true);
+    expect(StrategyParamWriteSchema.safeParse({ path: "持仓.卫星账户.止损", value: -0.05 }).success).toBe(true);
     expect(StrategyParamWriteSchema.safeParse({ path: "a b", value: 1 }).success).toBe(false);
     expect(StrategyParamWriteSchema.safeParse({ path: "a.b", value: { x: 1 } }).success).toBe(false);
   });

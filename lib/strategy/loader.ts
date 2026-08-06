@@ -19,6 +19,7 @@ import {
   validateStrategyYaml, formatIssues, type ValidationIssue,
 } from "@/lib/strategy/schema";
 import { indexYaml, type YamlSpan } from "@/lib/strategy/yaml-pos";
+import { activeStrategyPath } from "@/lib/strategy/registry";
 
 /** 校验不过时抛这个。issues 带行号，UI 可以直接高亮到那一行。 */
 export class StrategyConfigError extends Error {
@@ -45,7 +46,19 @@ function projectRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
+/**
+ * 当前生效的策略文件。
+ *
+ * 交给 registry 决定"哪个是 active"，这里不重复那套规则 ——
+ * 两处各判一次必然漂移，而漂移的后果是界面显示 A 策略、引擎按 B 出信号。
+ *
+ * registry 只依赖 schema，不依赖本文件，所以这个方向的引用不成环。
+ */
 export function defaultStrategyPath(): string {
+  const p = activeStrategyPath();
+  if (p !== null) return p;
+  // 一个都没有时仍返回老单文件路径，让 loadStrategyFile 抛出那句
+  // "策略配置文件不存在：<路径>" —— 那比在这里抛一句抽象的话好排查
   return path.join(projectRoot(), DEFAULT_STRATEGY_YAML_REL);
 }
 
@@ -217,7 +230,7 @@ export function writeStrategyParam(
 
 /**
  * 取某账户的规则段。账户名由用户定义，这里不认任何固定名字，
- * 只按构词规则归一化（`贼王` 与 `贼王账户` 视为同一账户）。
+ * 只按构词规则归一化（`卫星` 与 `卫星账户` 视为同一账户）。
  */
 export function accountRule(
   cfg: StrategyConfig, account: AccountType

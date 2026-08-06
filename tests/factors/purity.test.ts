@@ -69,7 +69,7 @@ describe("断言 4：确定性", () => {
 
   it("每个因子跑两次结果哈希一致", () => {
     for (const spec of ALL_FACTORS) {
-      const params = { ...spec.defaults, code: codes[0], 账户: "贼王", 板块: "半导体" };
+      const params = { ...spec.defaults, code: codes[0], 账户: "卫星", 板块: "半导体" };
       const a = JSON.stringify(spec.fn({ view, params }));
       const b = JSON.stringify(spec.fn({ view, params: { ...params } }));
       expect(a, `${spec.name} 不确定`).toBe(b);
@@ -81,14 +81,14 @@ describe("断言 4：确定性", () => {
     for (const spec of ALL_FACTORS) {
       expect(() => spec.fn({
         view: empty,
-        params: { ...spec.defaults, code: "600183", 账户: "贼王", 板块: "半导体" },
+        params: { ...spec.defaults, code: "600183", 账户: "卫星", 板块: "半导体" },
       }), `${spec.name} 在空数据上炸了`).not.toThrow();
     }
   });
 
   it("因子结果字段齐全", () => {
     for (const spec of ALL_FACTORS) {
-      const r = spec.fn({ view, params: { ...spec.defaults, code: "600183", 账户: "贼王", 板块: "半导体" } });
+      const r = spec.fn({ view, params: { ...spec.defaults, code: "600183", 账户: "卫星", 板块: "半导体" } });
       expect(r.name).toBe(spec.name);
       expect(r.version).toBe(spec.version);
       expect(["real", "proxy"]).toContain(r.provenance);

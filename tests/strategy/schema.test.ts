@@ -8,10 +8,17 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { validateStrategyYaml, validateStrategyConfig, DEFAULT_STRATEGY_YAML_REL } from "@/lib/strategy/schema";
+import { validateStrategyYaml, validateStrategyConfig } from "@/lib/strategy/schema";
+import { activeStrategyPath } from "@/lib/strategy/registry";
 
-const DEFAULT_YAML = fs.readFileSync(
-  path.join(process.cwd(), DEFAULT_STRATEGY_YAML_REL), "utf8");
+/**
+ * 读当前生效的那份，不写死路径 —— 策略已经是 config/strategies/<id>.yaml，
+ * 写死老路径的测试会在布局变更后变成"读不到文件"而不是"校验失败"，
+ * 报错指错方向比不报错更费时间。
+ */
+const ACTIVE = activeStrategyPath();
+if (ACTIVE === null) throw new Error("仓库里没有生效策略，schema 测试没有可校验的对象");
+const DEFAULT_YAML = fs.readFileSync(ACTIVE, "utf8");
 
 describe("默认 strategy.yaml", () => {
   it("能通过校验", () => {
@@ -65,7 +72,7 @@ ${body}`;
   过滤器阈值: { 位置涨幅上限: 50, 换手上限: 15, 振幅上限: 10 }
   主线识别:  { 板块涨幅榜TopN: 3, 必查链: [半导体全链] }
 持仓:
-  贼王账户:  { 止损: -0.05 }
+  卫星账户:  { 止损: -0.05 }
 组合风控:
   总仓位上限: 0.8
   单票最大占比: 0.15
@@ -158,9 +165,9 @@ ${body}`;
     expect(r.issues.some(i => i.path.join(".") === "version")).toBe(true);
   });
 
-  it("持仓段两种键名都认（贼王 与 贼王账户）", () => {
+  it("持仓段两种键名都认（卫星 与 卫星账户）", () => {
     const a = validateStrategyYaml(bad(base));
-    const b = validateStrategyYaml(bad(base.replace("贼王账户:", "贼王:")));
+    const b = validateStrategyYaml(bad(base.replace("卫星账户:", "卫星:")));
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);
   });
@@ -169,13 +176,13 @@ ${body}`;
     // 这条以前是反的：旧实现维护账户名白名单，改个名字就被否决。
     // 账户叫什么是用户的决定，schema 无权过问。
     for (const name of ["打板账户", "长线", "港股通", "my-account", "A组"]) {
-      const r = validateStrategyYaml(bad(base.replace("贼王账户:", `${name}:`)));
+      const r = validateStrategyYaml(bad(base.replace("卫星账户:", `${name}:`)));
       expect(r.ok, `账户名 ${name} 应被接受`).toBe(true);
     }
   });
 
   it("空账户键仍然否决 —— 那是真的没法处理，不是命名自由", () => {
-    const r = validateStrategyYaml(bad(base.replace("贼王账户:", '"":')));
+    const r = validateStrategyYaml(bad(base.replace("卫星账户:", '"":')));
     expect(r.ok).toBe(false);
   });
 });

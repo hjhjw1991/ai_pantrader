@@ -138,7 +138,7 @@ export default function WatchpoolPage() {
       </Panel>
 
       <Panel title="加入观察池" hint="买入条件想清楚了再记，触发价与止损同时写">
-        <WatchpoolForm accountIds={accounts(db).map((a) => a.id)} />
+        <WatchpoolForm accountIds={accounts(db).filter((a) => a.active).map((a) => a.id)} />
       </Panel>
 
       <p className="text-ink-3 text-[11px]">

@@ -74,7 +74,7 @@ export function mkPred(over: Partial<Prediction> = {}): Prediction {
     code: "300502",
     strategyId: "s1",
     action: "买入",
-    account: "贼王",
+    account: "卫星",
     triggerPx: 10,
     stopPx: 9,
     size: 0.1,
@@ -135,7 +135,7 @@ export function seedSettled(
       ts: opts.ts ?? "2026-08-03T15:30:00+08:00",
       phase: opts.phase ?? "盘后",
       code: opts.code ?? "300502",
-      account: opts.account ?? "贼王",
+      account: opts.account ?? "卫星",
       advisorInfluenced: opts.advisorInfluenced,
     }));
     insertOutcomeRow(db, id, hit ? "命中" : "偏差", hit ? 8 : -6,

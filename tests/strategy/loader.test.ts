@@ -5,6 +5,7 @@
  * strategy.yaml 的注释记的是"为什么是这个阈值"，那是几次复盘换来的；
  * load→dump 往返会把它们全部冲掉，对一个靠纪律赚钱的系统来说这个代价高于面板便利。
  */
+import { activeStrategyPath } from "@/lib/strategy/registry";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -31,8 +32,8 @@ version: 1.0.0
   过滤器阈值: { 位置涨幅上限: 50, 换手上限: 15, 振幅上限: 10 }   # 行尾注释
   主线识别:  { 板块涨幅榜TopN: 3, 必查链: [半导体全链, 军工] }
 持仓:
-  贼王账户:  { 止损: -0.05, 灾难位: -0.08, 止损确认: 收盘, 止盈: [0.08减半, 0.15清] }
-  价值账户:  { 止损: 逻辑破坏, 加仓: 逆势分批 }
+  卫星账户:  { 止损: -0.05, 灾难位: -0.08, 止损确认: 收盘, 止盈: [0.08减半, 0.15清] }
+  核心账户:  { 止损: 逻辑破坏, 加仓: 逆势分批 }
 组合风控:
   总仓位上限: 0.8
   单票最大占比: 0.15
@@ -47,9 +48,13 @@ function writeSrc(name = "strategy.yaml", src = SRC): string {
 }
 
 describe("加载", () => {
-  it("默认路径就是 config/strategy.yaml，且真实存在", () => {
-    expect(defaultStrategyPath().endsWith("config/strategy.yaml")).toBe(true);
+  it("默认路径 = registry 说的那个生效策略，且真实存在", () => {
+    // 策略从单文件改成 config/strategies/<id>.yaml 之后，
+    // "默认路径"的含义就是"ACTIVE 指着的那个"。两处各判一次必然漂移，
+    // 所以这里断言的是"loader 和 registry 给出同一个答案"，不是某个写死的路径
+    expect(defaultStrategyPath()).toBe(activeStrategyPath());
     expect(fs.existsSync(defaultStrategyPath())).toBe(true);
+    expect(defaultStrategyPath().endsWith(".yaml")).toBe(true);
   });
 
   it("仓库自带的默认策略能加载", () => {
@@ -134,7 +139,7 @@ describe("写回：注释与排版必须原样保留", () => {
   it("改布尔与字符串", () => {
     expect(writeParamInText(SRC, ["择时", "防守触发", "权重杀跌"], false))
       .toContain("权重杀跌: false");
-    expect(writeParamInText(SRC, ["持仓", "贼王账户", "止损确认"], "盘中"))
+    expect(writeParamInText(SRC, ["持仓", "卫星账户", "止损确认"], "盘中"))
       .toContain("止损确认: 盘中");
   });
 
@@ -170,23 +175,23 @@ describe("写回：注释与排版必须原样保留", () => {
   });
 
   it("字符串里有特殊字符时加引号，不产出坏 YAML", () => {
-    const out = writeParamInText(SRC, ["持仓", "贼王账户", "止损确认"], "收盘: 是");
+    const out = writeParamInText(SRC, ["持仓", "卫星账户", "止损确认"], "收盘: 是");
     expect(() => parseStrategy(out)).not.toThrow();
   });
 });
 
-describe("账户规则读取（契约用 贼王/价值，YAML 写 贼王账户/价值账户）", () => {
+describe("账户规则读取（契约用 卫星/核心，YAML 写 卫星账户/核心账户）", () => {
   it("两种键名都读得到", () => {
     const cfg = parseStrategy(SRC).config;
-    expect(accountRule(cfg, "贼王")["止损"]).toBe(-0.05);
-    expect(accountRule(cfg, "价值")["止损"]).toBe("逻辑破坏");
-    const cfg2 = parseStrategy(SRC.replace("贼王账户:", "贼王:")).config;
-    expect(accountRule(cfg2, "贼王")["止损"]).toBe(-0.05);
+    expect(accountRule(cfg, "卫星")["止损"]).toBe(-0.05);
+    expect(accountRule(cfg, "核心")["止损"]).toBe("逻辑破坏");
+    const cfg2 = parseStrategy(SRC.replace("卫星账户:", "卫星:")).config;
+    expect(accountRule(cfg2, "卫星")["止损"]).toBe(-0.05);
   });
 
   it("止盈字符串解析成阈值 + 动作", () => {
     const cfg = parseStrategy(SRC).config;
-    expect(takeProfitRules(cfg, "贼王")).toEqual([
+    expect(takeProfitRules(cfg, "卫星")).toEqual([
       { pnl: 0.08, action: "减仓", raw: "0.08减半" },
       { pnl: 0.15, action: "清仓", raw: "0.15清" },
     ]);
@@ -194,11 +199,11 @@ describe("账户规则读取（契约用 贼王/价值，YAML 写 贼王账户/�
 
   it("止盈写法看不懂时返回空并留下原文，不猜", () => {
     const cfg = parseStrategy(SRC.replace("止盈: [0.08减半, 0.15清]", "止盈: [涨多了就卖]")).config;
-    expect(takeProfitRules(cfg, "贼王")).toEqual([]);
+    expect(takeProfitRules(cfg, "卫星")).toEqual([]);
   });
 
   it("没配置的账户返回空对象", () => {
-    const cfg = parseStrategy(SRC.replace(/  价值账户:.*\n/, "")).config;
-    expect(accountRule(cfg, "价值")).toEqual({});
+    const cfg = parseStrategy(SRC.replace(/  核心账户:.*\n/, "")).config;
+    expect(accountRule(cfg, "核心")).toEqual({});
   });
 });
