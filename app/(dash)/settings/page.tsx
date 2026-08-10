@@ -4,7 +4,8 @@ import { KV, Panel, Tag } from "@/components/Panel";
 import { SourceHealthTable } from "@/components/StatusRail";
 import { ExportForm, ImportDryRunForm, StrategyManager } from "@/components/forms";
 import { ParamPanel } from "@/components/ParamPanel";
-import { appliedMigrations, dbPath, readDb } from "@/lib/ui/db";
+import { StrategyRawEditor } from "@/components/StrategyRawEditor";
+import { appliedMigrations, dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtAmount, fmtTs, ageMinutes } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { systemStatus } from "@/lib/ui/status";
@@ -17,6 +18,7 @@ import {
   unresolvedGaps,
 } from "@/lib/ui/queries";
 import {
+  backupDir,
   strategyYamlRel,
   flattenConfig,
   readStrategyConfig,
@@ -38,7 +40,7 @@ export const dynamic = "force-dynamic";
  */
 export default function SettingsPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const s = systemStatus();
   const st = storageInfo();
@@ -264,6 +266,18 @@ export default function SettingsPage() {
           activeId={activeStrategy}
           dirRel={STRATEGIES_DIR_REL}
           undecided={activeStrategy === null && strategyList.length > 1}
+        />
+      </Panel>
+
+      {/* ── 原文编辑器 ── */}
+      <Panel
+        title="策略原文编辑"
+        hint="一屏文本覆盖新增键 / 改列表 / 改整段规则 —— 注释由人自己保全，程序不去猜"
+        right={`备份目录 ${backupDir()}`}
+      >
+        <StrategyRawEditor
+          ids={strategyList.map((s) => s.id)}
+          initialId={activeStrategy ?? strategyList[0]?.id ?? null}
         />
       </Panel>
 

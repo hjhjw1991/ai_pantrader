@@ -30,21 +30,59 @@ export function dbExists(p: string = dbPath()): boolean {
 }
 
 /**
- * 只读连接。库不存在时返回 null —— 调用方必须渲染"数据库不存在"的空态，
- * 不许把它当成"数据为空"，两者的处置动作完全不同。
+ * 拿不到库的两种原因。**必须分开**：
+ *
+ * - missing    —— 文件真的不在，处置是建库灌数据；
+ * - unopenable —— 文件在，但连不上（原生模块 ABI 不匹配、权限、文件损坏……），
+ *                 处置是修环境，跟建库毫无关系。
+ *
+ * 这个区分是踩过坑补的：Node 从 22 升到 24 之后 better-sqlite3 的预编译
+ * .node 还是 ABI 127，构造函数直接 ERR_DLOPEN_FAILED。当时这里一个
+ * `catch { return null }` 把它压成了"数据库不存在"，人被文案带着去查路径，
+ * 而路径从头到尾都是对的。**故障信息说错话，比不说话更贵。**
  */
-export function readDb(p: string = dbPath()): Database.Database | null {
+export type DbUnavailable =
+  | { kind: "missing"; path: string }
+  | { kind: "unopenable"; path: string; detail: string };
+
+export type ReadDbResult =
+  | { ok: true; db: Database.Database }
+  | { ok: false; why: DbUnavailable };
+
+/**
+ * 只读连接，带失败原因。
+ * 调用方必须渲染空态，不许把失败当成"数据为空" —— 两者的处置动作完全不同。
+ */
+export function openRead(p: string = dbPath()): ReadDbResult {
   const hit = cache.get(p);
-  if (hit && hit.open) return hit;
-  if (!fs.existsSync(p)) return null;
+  if (hit && hit.open) return { ok: true, db: hit };
+  if (!fs.existsSync(p)) return { ok: false, why: { kind: "missing", path: p } };
   try {
     const db = new Database(p, { readonly: true, fileMustExist: true });
     db.pragma("busy_timeout = 3000");
     cache.set(p, db);
-    return db;
-  } catch {
-    return null;
+    return { ok: true, db };
+  } catch (e) {
+    // 原始 message 原样带出，不改写、不截断：ABI 号、errno 全在里面，是唯一线索
+    const detail = e instanceof Error ? e.message : String(e);
+    return { ok: false, why: { kind: "unopenable", path: p, detail } };
   }
+}
+
+/** 旧签名保留：绝大多数调用方只关心"有没有连上" */
+export function readDb(p: string = dbPath()): Database.Database | null {
+  const r = openRead(p);
+  return r.ok ? r.db : null;
+}
+
+/**
+ * 供空态/错误响应取失败原因。重新探测一次而不是缓存上次的错误 ——
+ * 缓存住的错误会在人修好环境之后继续撒谎。
+ */
+export function dbUnavailable(p: string = dbPath()): DbUnavailable {
+  const r = openRead(p);
+  if (r.ok) return { kind: "unopenable", path: p, detail: "重新探测时已可打开，请刷新" };
+  return r.why;
 }
 
 /**

@@ -1,7 +1,7 @@
 import { NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
-import { dbPath, readDb } from "@/lib/ui/db";
+import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { dashboard, paramSuggestions, winRateStats } from "@/lib/ui/adapters/ledger";
 import { predictionTimeline } from "@/lib/ui/queries";
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
  */
 export default function LedgerPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const today = shanghaiParts(new Date()).date;
   const stats = winRateStats(db);

@@ -1,11 +1,14 @@
 import type Database from "better-sqlite3";
 import type { Phase, SignalCard, StrategyConfig } from "@/lib/contracts/strategy";
-import type { BacktestReport, Constraints } from "@/lib/contracts/backtest";
+import type { BacktestReport, Constraints, SweepReport } from "@/lib/contracts/backtest";
 import { unavailable, type Avail } from "@/lib/ui/derive";
 import { createSqliteView, universeQuality, type UniverseQuality } from "@/lib/pit/sqlite-view";
 import { createStrategyEngine } from "@/lib/strategy/engine";
 import { defaultRegistry } from "@/lib/factors";
 import { runBacktest as replay } from "@/lib/backtest";
+import { gridPoints, heatmap, optimize, type ParamGrid } from "@/lib/backtest/optimizer";
+import { canonicalJson } from "@/lib/backtest/hash";
+import { overrideConfigParams } from "@/lib/ui/adapters/strategy";
 import { positions as loadPositions } from "@/lib/ui/queries";
 
 /**
@@ -83,6 +86,114 @@ export interface BacktestRunInput {
   constraints?: Constraints;
   /** 报告信封时间戳，必须外部注入：重放路径内不许出现 Date.now()（spec §17 断言 4） */
   generatedAt: string;
+}
+
+/**
+ * 参数扫描点数上限。
+ *
+ * 每个网格点是一次**完整回测**，且和单次回测一样同步跑在请求线程里
+ * （见 /api/backtest 的注释）。36 是"卡一会儿"与"卡到以为挂了"之间的线：
+ * 6×6 已经够看出峰形，再大就该改成后台 job + 进度上报，那是另一个工程。
+ * 超了直接拒并把点数告诉用户 —— 不静默截断网格，截断过的热力图是错的图。
+ */
+export const SWEEP_MAX_POINTS = 36;
+
+export interface SweepRunInput extends BacktestRunInput {
+  /** 轴名是点路径，如 "择时.仓位档位.进攻" */
+  grid: Record<string, unknown[]>;
+  axisX: string;
+  axisY: string;
+}
+
+/**
+ * 跑参数扫描 → 热力图。
+ *
+ * 三条前置检查全在真跑之前做完，一条不过就整体拒：
+ *   1. 点数上限（见 SWEEP_MAX_POINTS）；
+ *   2. 两条轴必须都在 grid 里 —— 画的图必须是扫过的轴；
+ *   3. **每个网格点的配置先全部校验一遍**，任一点非法就拒。
+ *      不能边跑边跳过非法点：跳过会让网格悄悄变小，而热力图上的空洞
+ *      看起来和"这里成绩差"没有区别。
+ */
+export function runSweep(db: Db, i: SweepRunInput): Avail<{ report: SweepReport }> {
+  const axes = Object.keys(i.grid);
+  for (const a of [i.axisX, i.axisY]) {
+    if (!axes.includes(a)) return unavailable(`轴 ${a} 不在扫描网格里`, "只能画扫过的轴");
+  }
+  const points = gridPoints(i.grid as ParamGrid);
+  if (points.length > SWEEP_MAX_POINTS) {
+    return unavailable(
+      `网格 ${points.length} 点，超过上限 ${SWEEP_MAX_POINTS}`,
+      "每个点是一次完整回测且同步跑完。减少取值个数，或分两次扫"
+    );
+  }
+
+  // 先把所有点的配置都校验出来，一次性失败，别跑到一半才发现
+  const configs = new Map<string, StrategyConfig>();
+  for (const p of points) {
+    const r = overrideConfigParams(i.config, p);
+    if (!r.ok) {
+      return unavailable(
+        `网格点 ${JSON.stringify(p)} 非法：${r.reason}`,
+        "整体拒绝而不是跳过该点 —— 跳过会让网格悄悄变小，热力图上的空洞和'成绩差'看起来一样"
+      );
+    }
+    configs.set(canonicalJson(p), r.config);
+  }
+
+  try {
+    const reports = new Map<string, BacktestReport>();
+    const result = optimize({
+      grid: i.grid as ParamGrid,
+      evaluate: (params) => {
+        const key = canonicalJson(params);
+        const cfg = configs.get(key);
+        // optimize 的 refineRounds 默认 0，所以不会出现网格外的点；真出现就是契约破了
+        if (!cfg) throw new Error(`网格点未预校验：${key}（refine 不该在此启用）`);
+        const out = replay({
+          from: i.from,
+          to: i.to,
+          viewFactory: (asOf: string) => createSqliteView(db, asOf),
+          strategy: engine,
+          config: cfg,
+          initialCash: i.initialCash,
+          ...(i.constraints ? { constraints: i.constraints } : {}),
+          generatedAt: i.generatedAt,
+        });
+        reports.set(key, out.report);
+        return out.report.metrics;
+      },
+    });
+
+    const bestKey = canonicalJson(result.best.params);
+    const bestReport = reports.get(bestKey);
+    if (!bestReport) throw new Error("最优点没有对应报告，覆盖率无从取得");
+    const h = heatmap(result.evaluations, i.axisX, i.axisY);
+
+    return {
+      available: true,
+      report: {
+        strategyId: bestReport.strategyId,
+        strategyVersion: bestReport.strategyVersion,
+        range: bestReport.range,
+        constraints: bestReport.constraints,
+        grid: i.grid,
+        evaluated: result.evaluations.length,
+        best: { params: result.best.params, metrics: result.best.metrics },
+        heatmap: h,
+        sensitivity: result.sensitivity,
+        peak: result.peak,
+        coverage: bestReport.coverage,
+        warnings: result.warnings,
+        generatedAt: i.generatedAt,
+      },
+    };
+  } catch (e) {
+    return unavailable(
+      `参数扫描失败：${(e as Error).message}`,
+      "不返回部分热力图 —— 缺格的热力图会被当成'那片参数不好'读"
+    );
+  }
 }
 
 /**

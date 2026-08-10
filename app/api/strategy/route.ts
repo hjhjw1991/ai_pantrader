@@ -97,9 +97,13 @@ export async function DELETE(req: Request) {
 }
 
 /**
- * 写回参数。**当前一律 501**：保留原文注释的写回属于 lib/strategy/loader.ts，
- * 用 js-yaml 往返会把整份 YAML 的注释冲掉，而那些注释记着阈值的由来。
- * 详见 lib/ui/adapters/strategy.ts 的 TODO(loader)。
+ * 写回参数。**只写已存在的纯量**，由 lib/strategy/loader 在原文上做替换：
+ * 保留注释与排版 → 整份重新校验 → 临时文件 + rename 落盘。
+ *
+ * 501 只留给"写回未启用"（loader 不可用）这一种情况，不是常态 ——
+ * 早先这里的注释写着"当前一律 501"，那是 loader 实装前的话，留着会让人
+ * 以为面板改不了参数而绕去手改文件。新增字段、改列表、改整段规则仍然只能编辑 YAML：
+ * 自动插入要猜缩进与注释归属，猜错就破坏了唯一真相源。
  */
 export async function PUT(req: Request) {
   const b = await parseBody(req, StrategyParamWriteSchema);

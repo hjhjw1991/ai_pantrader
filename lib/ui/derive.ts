@@ -175,8 +175,16 @@ export interface PortfolioRisk {
   totalMarketValue: number | null;
   /** 总仓位占比 = 持仓市值 / 账户总资产。总资产未记录时为 null */
   totalPositionRatio: number | null;
-  /** 单票最大占比 */
+  /** 单票最大占比。分母是账户总资产，库里没有 → 恒为 null */
   maxSingleRatio: number | null;
+  /**
+   * 单票最大市值。**这个不需要分母，是能算出来的**。
+   *
+   * 补它是因为界面上那行标着"单票最大市值"却渲染 maxSingleRatio —— 一个恒 null 的比率，
+   * 于是永远是空白。占比算不出来（没有总资产）是事实，但"最大那只值多少钱"是已知的，
+   * 把已知的量也一起留空，等于让人误以为整块集中度信息都拿不到。
+   */
+  maxSingleMarketValue: number | null;
   maxSingleCode: string | null;
   /**
    * 单行业最大占比。**恒为 null**：库里没有行业分类字段
@@ -231,6 +239,7 @@ export function portfolioRisk(
     totalMarketValue,
     totalPositionRatio: totalMarketValue !== null && denom ? totalMarketValue / denom : null,
     maxSingleRatio: maxMv >= 0 && denom ? maxMv / denom : null,
+    maxSingleMarketValue: maxMv >= 0 ? maxMv : null,
     maxSingleCode: maxCode,
     maxIndustryRatio: null,
     missingQuoteCodes,

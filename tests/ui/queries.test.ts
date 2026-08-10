@@ -340,8 +340,23 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
     expect(t.every((x) => x.source === "manual")).toBe(true);
   });
 
-  it("持仓带出账户类型（止损规则靠它区分）", () => {
+  /**
+   * 这条原先断言的是 `.account === "卫星"`，也就是 account.type。
+   *
+   * 那是内置账户时代的遗留：当时 type 恰好等于 YAML `持仓:` 段的键，两者混用看不出问题。
+   * 用户自建账户之后 type 变成自由文本标签（"短线"这种），而持仓页按 account.id 分组、
+   * YAML 键名按 README 也该写成 id —— 于是"表里有持仓、页面显示无持仓"，
+   * 且 accountRule 拿标签去查规则查不到，硬线告警静默失效。
+   *
+   * 所以锁的不变量是：**账户键空间只有一个，就是 account_id**。
+   */
+  it("持仓带出的 account 是 account_id，不是 type 标签（规则/分组都按 id）", () => {
     recordManualFill(db, { accountId: "zw", code: "601700", side: "buy", px: 5, qty: 100 });
-    expect(positions(db).find((x) => x.code === "601700")!.account).toBe("卫星");
+    const p = positions(db).find((x) => x.code === "601700")!;
+    expect(p.account).toBe("zw");
+    expect(p.accountId).toBe("zw");
+    // type 是展示标签，改它不该影响键
+    upsertAccount(db, { id: "zw", name: "卫星主号", type: "短线" });
+    expect(positions(db).find((x) => x.code === "601700")!.account).toBe("zw");
   });
 });

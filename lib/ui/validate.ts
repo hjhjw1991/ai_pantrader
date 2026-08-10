@@ -87,6 +87,22 @@ export const StrategyCreateSchema = z.object({
 
 export const StrategyActivateSchema = z.object({ id: StrategyIdSchema });
 
+/**
+ * 整份原文写回。
+ *
+ * 上限 256 KB：策略 YAML 现实里是几 KB，给两个数量级余量足够；不设上限则
+ * 一次贴错内容就能让服务端拿一份几十 MB 的字符串去做 YAML 解析。
+ * baseHash 必填 —— 它是"我编辑的还是不是我读到的那份"的唯一凭据，
+ * 允许省略就等于允许静默覆盖别人的改动。
+ */
+export const StrategyRawWriteSchema = z.object({
+  id: StrategyIdSchema,
+  text: z.string().min(1).max(256 * 1024),
+  baseHash: z.string().regex(/^[0-9a-f]{16}$/, "baseHash 形状不对，请重新载入原文"),
+  /** true = 只校验、不落盘。编辑器的「校验」按钮走这条 */
+  dryRun: z.boolean().optional(),
+});
+
 export const StrategyParamWriteSchema = z.object({
   /** 形如 "持仓.卫星账户.止损" */
   path: z.string().min(1).max(200).regex(/^[^\s]+$/, "参数路径不能含空格"),
@@ -104,6 +120,29 @@ export const BacktestRunSchema = z.object({
    */
   initialCash: z.number().positive().finite().max(1e12),
 });
+
+/**
+ * 参数扫描（热力图）。
+ *
+ * 轴值只收数字与布尔：字符串轴排序没有语义（"高" 和 "低" 谁在左边？），
+ * 画出来的热力图轴序是任意的，而人会照着轴序读"往右调更好"。
+ * 每轴 2..6 个取值：1 个画不出面，超过 6 个必然撞上 36 点上限。
+ * 点数上限本身在 runSweep 里判（它才知道笛卡尔积多大）—— 这里只挡明显的形状错误。
+ */
+export const SweepRunSchema = z.object({
+  from: DateSchema,
+  to: DateSchema,
+  initialCash: z.number().positive().finite().max(1e12),
+  grid: z
+    .record(
+      z.string().min(1).max(200).regex(/^[^\s]+$/, "参数路径不能含空格"),
+      z.array(z.union([z.number().finite(), z.boolean()])).min(2, "每轴至少 2 个取值才画得出面").max(6)
+    )
+    .refine((g) => Object.keys(g).length >= 2, "至少两条轴（热力图要 x 和 y）")
+    .refine((g) => Object.keys(g).length <= 4, "最多四条轴，再多点数必然超上限"),
+  axisX: z.string().min(1).max(200),
+  axisY: z.string().min(1).max(200),
+}).refine((v) => v.axisX !== v.axisY, { message: "x 轴与 y 轴不能是同一条" });
 
 /** 导出只接受文件名，不接受路径 —— 目录固定在 dataDir 下，避免写到库外任意位置 */
 export const ExportSchema = z.object({

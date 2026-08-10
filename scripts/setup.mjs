@@ -58,18 +58,35 @@ function has(cmd) {
 
 say("检查运行环境");
 
+/**
+ * Node 版本要**上下都卡**，不只是"够新"。
+ *
+ * 上界的理由是原生模块：better-sqlite3 的预编译 .node 绑定 NODE_MODULE_VERSION，
+ * 换了 Node 大版本就 dlopen 失败；而 install-launchd / install-schtasks 写进
+ * 计划任务的解释器路径，是**安装当时那个 Node 的绝对路径**。所以这个项目实际是
+ * "按某个 Node 大版本部署"的，允许更高版本只会让采集与网页跑在两个 ABI 上。
+ *
+ * 解析要按 semver 区间取字段，别用 replace(/[^\d]/g,"") ——
+ * ">=22 <23" 会被那种写法拼成 2223。
+ */
 const major = Number(process.versions.node.split(".")[0]);
-const NEED = Number(
-  (JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")).engines?.node ?? ">=22")
-    .replace(/[^\d]/g, "") || 22
-);
-if (Number.isNaN(major) || major < NEED) {
+const ENGINE = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")).engines?.node ?? ">=22 <23";
+const MIN = Number(/>=\s*(\d+)/.exec(ENGINE)?.[1] ?? 22);
+const MAX_EX = Number(/<\s*(\d+)/.exec(ENGINE)?.[1] ?? Number.POSITIVE_INFINITY);
+if (Number.isNaN(major) || major < MIN) {
   die(
-    `Node 版本过低：当前 ${process.versions.node}，需要 >= ${NEED}`,
-    "装新版：https://nodejs.org 或 nvm install 22 && nvm use 22"
+    `Node 版本过低：当前 ${process.versions.node}，需要 ${ENGINE}`,
+    `装对版本：nvm install ${MIN} && nvm use ${MIN}（仓库根目录有 .nvmrc，nvm use 会自动读）`
   );
 }
-ok(`Node ${process.versions.node}`);
+if (major >= MAX_EX) {
+  die(
+    `Node 版本过高：当前 ${process.versions.node}，本项目按 Node ${MIN} 部署（engines: ${ENGINE}）`,
+    `原生模块 better-sqlite3 的预编译包绑 Node ABI，计划任务里也写死了安装时的 Node 路径。\n  ` +
+      `执行 nvm use ${MIN} 再重跑本脚本。`
+  );
+}
+ok(`Node ${process.versions.node}（engines ${ENGINE}）`);
 ok(`平台 ${platform()} ${process.arch}`);
 
 // pnpm 优先：仓库带 pnpm-lock.yaml，用 npm 装会忽略 lock 里的确定版本
@@ -86,6 +103,39 @@ if (PM === "npm") {
 if (platform() === "win32") {
   info("Windows 上 better-sqlite3 若无预编译包，需要 VS Build Tools（C++ 桌面开发）");
 }
+
+/**
+ * 真装载一次 better-sqlite3。
+ *
+ * 版本号在区间里 ≠ .node 装得上：同一个大版本内换 Node、跨机拷 node_modules、
+ * 装完之后升级 Node，都会留下一个 ABI 不匹配的 .node。这种故障在业务代码里
+ * 表现为"连不上数据库"，离真正的原因隔了好几层，只有在这里探一次才便宜。
+ */
+function probeNative({ required }) {
+  if (!existsSync(path.join(ROOT, "node_modules", "better-sqlite3"))) {
+    if (required) die("装完依赖后仍找不到 node_modules/better-sqlite3", `重跑 ${PM} install`);
+    info("node_modules/better-sqlite3 还没装，装完依赖后再探测");
+    return;
+  }
+  const probe = spawnSync(process.execPath, ["-e", "require('better-sqlite3')"], {
+    cwd: ROOT, encoding: "utf8",
+  });
+  if (probe.status === 0) {
+    ok("better-sqlite3 原生模块可装载");
+    return;
+  }
+  const msg = `${probe.stderr ?? ""}`.trim();
+  const abi = /NODE_MODULE_VERSION (\d+)[\s\S]*?NODE_MODULE_VERSION (\d+)/.exec(msg);
+  die(
+    `better-sqlite3 原生模块装载失败${abi ? `：.node 编译于 ABI ${abi[1]}，当前 Node 要 ABI ${abi[2]}` : ""}`,
+    abi
+      ? `换回匹配的 Node（nvm use ${MIN}），或就地重编：${PM} rebuild better-sqlite3\n  ` +
+        `注意：重编成新 ABI 之后，计划任务里写死的旧 Node 会反过来跑不动 —— 采集和网页必须同一个 Node。`
+      : `原始报错：\n  ${msg.split("\n").slice(0, 6).join("\n  ")}`
+  );
+}
+// --check 只读不改，就在这里探一次；完整安装则等 install 之后探（install 本身可能就把它修好了）
+if (flag("--check")) probeNative({ required: false });
 
 const dataDir = process.env.PANTRADER_DATA_DIR ?? path.join(homedir(), "PanTraderData");
 ok(`数据目录 ${dataDir}`);
@@ -105,6 +155,8 @@ if (existsSync(path.join(ROOT, "node_modules"))) {
 }
 run(PM, PM === "pnpm" ? ["install"] : ["install"]);
 ok("依赖就绪");
+// 装完立刻验原生模块：后面每一步（migrate/bootstrap/build）都要开库，在这里拦住最省事
+probeNative({ required: true });
 
 // ─────────────────────────── 3. 数据库 ───────────────────────────
 

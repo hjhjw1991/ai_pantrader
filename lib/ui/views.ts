@@ -49,6 +49,18 @@ export interface PositionsView {
   orphanAccountIds: string[];
   /** YAML 里配了规则、但 account 表里没有的账户名 */
   rulesWithoutAccount: string[];
+  /**
+   * **确实从 YAML 拿到了规则**的账户 id。
+   *
+   * 为什么必须单列：持仓页原先用 `rulesFromConfig && !rulesWithoutAccount.includes(acc)`
+   * 判断某账户有没有规则 —— 那个式子问的是"YAML 里有没有任何规则"和
+   * "YAML 的规则键是不是都存在于 account 表"，**根本没问过这个账户自己有没有规则**。
+   * 于是用户账户 id 是 hj-main、而 YAML 键还是模板里的 卫星账户/核心账户 时，
+   * 页面照样显示"规则来自 strategy.yaml 持仓.hj-main"，而 hardLineAlerts 里
+   * `rules["hj-main"]` 是 undefined，止损/灾难位/止盈**一条都不生效**。
+   * 界面声称纪律在守着、实际没有守 —— 这是这套系统里最不能出现的一类假信息。
+   */
+  accountsWithRules: string[];
   /** 规则是否来自 strategy.yaml。false = 没读到配置，硬线告警只能靠逐票止损价 */
   rulesFromConfig: boolean;
 }
@@ -114,6 +126,9 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
     orphanAccountIds: [...new Set(pos.map((p) => p.accountId).filter((id) => !accIds.has(id)))],
     // 有任一账户从 YAML 读到了规则
     rulesFromConfig: Object.values(rules).some(r => r !== null),
+    accountsWithRules: Object.entries(rules)
+      .filter(([, r]) => r !== undefined && r !== null)
+      .map(([acct]) => acct),
     /** YAML 里配了规则、但 account 表里不存在的账户名 —— 大概率是改名后忘了同步 */
     rulesWithoutAccount: Object.keys(rules).filter(a => !accIds.has(a)),
   };

@@ -3,10 +3,10 @@ import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { AccountForm, AccountManager, ManualFillForm } from "@/components/forms";
-import { dbPath, readDb } from "@/lib/ui/db";
+import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAmount, fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
-import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
+import { readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
 import { latestQuoteTs, trades } from "@/lib/ui/queries";
 import { positionsView, type PositionView } from "@/lib/ui/views";
 export const dynamic = "force-dynamic";
@@ -23,7 +23,7 @@ export const dynamic = "force-dynamic";
  */
 export default function PositionsPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const cfg = readStrategyConfig();
   const pv = positionsView(db, cfg.available ? cfg.config : null);
@@ -66,6 +66,26 @@ export default function PositionsPage() {
         </Panel>
       ) : null}
 
+      {pv.rulesWithoutAccount.length > 0 ? (
+        <Panel title="策略规则挂空了" tone="danger">
+          <p className="text-ink-2">
+            <code className="num text-ink">{strategyYamlRel()}</code> 的 <code className="text-ink">持仓:</code> 段里
+            这些键在 account 表里不存在：
+            <span className="num text-danger ml-2">{pv.rulesWithoutAccount.join(" ")}</span>
+          </p>
+          <p className="mt-1 text-ink-2">
+            你的账户是：
+            <span className="num text-ink ml-1">{pv.accounts.map((a) => a.id).join(" ") || "（无）"}</span>
+            ，其中真正拿到规则的只有
+            <span className="num text-ink ml-1">{pv.accountsWithRules.join(" ") || "（一个都没有）"}</span>。
+          </p>
+          <p className="mt-1 text-ink-3 text-[11px]">
+            没拿到规则的账户，**账户级止损 / 灾难位 / 止盈档一律不生效**，只剩每只票自己填的止损价在兜。
+            把 YAML 的键名改成你的账户 id（设置页「策略原文编辑」可以直接改），或把账户 id 改成 YAML 里的名字。
+          </p>
+        </Panel>
+      ) : null}
+
       {pv.orphanAccountIds.length > 0 ? (
         <Panel title="账户数据不一致" tone="danger">
           <p className="text-ink-2">
@@ -89,7 +109,9 @@ export default function PositionsPage() {
       {pv.accounts.map((a) => {
         const acc = a.id;
         const rows = pv.rows.filter((r) => r.position.account === acc);
-        const hasRules = pv.rulesFromConfig && !pv.rulesWithoutAccount.includes(acc);
+        // 只认"这个账户自己有规则"。见 PositionsView.accountsWithRules 的注释：
+        // 旧判据会在 YAML 键与账户 id 不一致时谎报"规则已生效"
+        const hasRules = pv.accountsWithRules.includes(acc);
         return (
           <Panel
             key={acc}
@@ -128,7 +150,11 @@ export default function PositionsPage() {
                 <Num v={a.marketValue} kind="amount" />
               </KV>
             ))}
+            {/* 市值与占比分两行：前者不需要总资产、算得出来；后者需要，恒为破折号（右栏解释） */}
             <KV label="单票最大市值" hint={pv.risk.maxSingleCode ?? undefined}>
+              <Num v={pv.risk.maxSingleMarketValue} kind="amount" />
+            </KV>
+            <KV label="单票最大占比" hint="分母是账户总资产，库里没有该字段">
               <Num v={pv.risk.maxSingleRatio} kind="ratio" />
             </KV>
           </div>

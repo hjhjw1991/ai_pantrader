@@ -2,7 +2,7 @@ import { NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { Panel, Tag } from "@/components/Panel";
 import { WatchpoolForm, WatchpoolRemoveButton } from "@/components/forms";
-import { dbPath, readDb } from "@/lib/ui/db";
+import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtTs, ageMinutes } from "@/lib/ui/format";
 import { latestQuoteTs, accounts } from "@/lib/ui/queries";
 import { watchpoolView } from "@/lib/ui/views";
@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
  */
 export default function WatchpoolPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const rows = watchpoolView(db);
   const snapTs = latestQuoteTs(db);

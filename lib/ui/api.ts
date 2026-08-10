@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ZodType } from "zod";
-import { readDb, dbPath } from "@/lib/ui/db";
+import { readDb, openRead } from "@/lib/ui/db";
 
 /**
  * API 路由的共用外壳。
@@ -24,11 +24,19 @@ export function err(status: number, message: string, extra?: unknown): NextRespo
   );
 }
 
-/** 库不存在 → 503，并把期望路径带出去，方便看是不是 PANTRADER_DATA_DIR 指错了 */
+/**
+ * 接不上库 → 503。
+ * 必须区分"库不在"和"库打不开"：前者看路径对不对，后者看环境（原生模块 ABI、权限）。
+ * 混成一句"数据库不存在或无法读取"会把人引到错的方向去。
+ */
 export function withDb<T>(fn: (db: NonNullable<ReturnType<typeof readDb>>) => T): T | NextResponse {
-  const db = readDb();
-  if (!db) return err(503, `数据库不存在或无法读取：${dbPath()}`);
-  return fn(db);
+  const r = openRead();
+  if (!r.ok) {
+    return r.why.kind === "missing"
+      ? err(503, `数据库不存在：${r.why.path}`)
+      : err(503, `数据库打不开（文件存在）：${r.why.path} —— ${r.why.detail}`);
+  }
+  return fn(r.db);
 }
 
 /** 解析 + 校验查询参数 */

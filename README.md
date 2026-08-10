@@ -12,7 +12,11 @@ A 股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 
 ## 一键安装
 
-需要 **Node ≥ 22**（`node -v` 检查；没有就去 [nodejs.org](https://nodejs.org) 或 `nvm install 22`）。
+需要 **Node 22**（不是"≥ 22"，上界也卡死：`node -v` 检查；没有就 `nvm install 22 && nvm use 22`，仓库根目录有 `.nvmrc`）。
+
+> 为什么不许更高版本：`better-sqlite3` 是原生模块，预编译的 `.node` 绑定 Node ABI，换大版本就装载失败；
+> 而 `install-launchd` / `install-schtasks` 写进定时任务的解释器，是**安装当时那个 Node 的绝对路径**。
+> 用两个 Node 会出现"采集在写库、网页说连不上库"这种撕裂状态。`node scripts/setup.mjs --check` 会当场拦住。
 
 ```bash
 git clone <仓库地址> pantrader

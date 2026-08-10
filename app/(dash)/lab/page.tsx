@@ -1,28 +1,32 @@
 import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
+import { ParamPanel } from "@/components/ParamPanel";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { LabRunner } from "@/components/LabRunner";
-import { dbPath, readDb } from "@/lib/ui/db";
+import { SweepRunner } from "@/components/SweepRunner";
+import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
 import { calendarRange, strategies, tableCounts } from "@/lib/ui/queries";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
+import { SWEEP_MAX_POINTS } from "@/lib/ui/adapters/engines";
 
 export const dynamic = "force-dynamic";
 
 /**
  * 回测实验室。spec §13：选策略 + 调参 → 跑回测 → 净值/回撤/参数热力图/覆盖率。
  *
- * 回测器（lib/backtest）还不存在，所以"跑"这个动作现在是禁用的，
- * 并且**不渲染任何示例净值曲线**。假的净值曲线是这套系统里最危险的产物：
- * 它会被直接当成策略成绩，而策略成绩决定投多少钱。
+ * 四块都是活的：调参走 ParamPanel 写回 YAML、回测走 LabRunner、
+ * 参数扫描走 SweepRunner（每点一次完整回测，上限 SWEEP_MAX_POINTS）。
  *
- * 但可以先把跑回测的前置条件摆清楚：可用区间、覆盖率原料、约束默认值。
+ * 唯一不许出现的是**示例数据**：假的净值曲线与补出来的热力图格子，
+ * 是这套系统里最危险的产物 —— 它们会被当成策略成绩读，而策略成绩决定投多少钱。
+ * 所以拿不到合法配置时按钮禁用、格子没评估过就画破折号，不插值不补零。
  */
 export default function LabPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const cfg = readStrategyConfig();
   const strats = strategies(db);
@@ -77,30 +81,17 @@ export default function LabPage() {
             <EmptyState u={cfg} compact />
           ) : (
             <>
-              <p className="text-warn text-[11px] mb-2">
-                只读展示。写回需 lib/strategy/loader.ts（未就绪）—— 现在请直接编辑{" "}
-                <code className="text-ink-2">{strategyYamlRel()}</code>，它本身就是真相源。
+              {/*
+                用 ParamPanel 而不是在这里另写一张只读表：同一份数据两套渲染，
+                迟早有一套落后于事实 —— 这里原先就挂着一句"写回需 loader（未就绪）"，
+                而 loader 早就实装了，那句话把人赶去手改 YAML。
+              */}
+              <p className="text-ink-2 text-[11px] mb-2">
+                改动直接写回 <code className="text-ink">{strategyYamlRel()}</code>：
+                原文上替换纯量（保留注释）→ 写前备份成带时间戳的副本 → 整份重新校验 → 通过才落盘。
+                列表与整段规则用设置页的「策略原文编辑」。
               </p>
-              <div className="max-h-60 overflow-y-auto">
-                <table className="dense">
-                  <thead>
-                    <tr>
-                      <th>参数路径</th>
-                      <th className="text-right">当前值</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {flattenConfig(cfg.config).map((p) => (
-                      <tr key={p.path}>
-                        <td className="text-ink-2">{p.path}</td>
-                        <td className="num text-ink">
-                          {Array.isArray(p.value) ? p.value.join(", ") : String(p.value)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ParamPanel params={flattenConfig(cfg.config)} />
             </>
           )}
         </Panel>
@@ -158,14 +149,23 @@ export default function LabPage() {
           </p>
         </Panel>
 
-        <Panel title="参数热力图">
-          <EmptyState
-            u={unavailable(
-              "契约 BacktestReport 里没有参数扫描结果字段",
-              "寻优层已有 optimize()/heatmap() 与 Heatmap 类型（lib/backtest/optimizer.ts），但那不是 BacktestReport 的一部分，也没有对应的 API/契约类型。要画热力图需先在契约里定一个 sweep 结果类型，前端不自己发明一个"
-            )}
-            compact
-          />
+        <Panel
+          title="参数热力图"
+          hint="目标是 Calmar（spec §10.4）。峰陡 = 过拟合信号，比最优点更该看"
+          right={`上限 ${SWEEP_MAX_POINTS} 点`}
+        >
+          {cfg.available ? (
+            <SweepRunner
+              // 轴只给纯量路径：非纯量扫不了，让人手打路径等于打错了要跑完才知道
+              paramPaths={flattenConfig(cfg.config)
+                .filter((p) => p.kind === "scalar" && p.path !== "id" && p.path !== "version")
+                .map((p) => p.path)}
+              defaultRange={{ from: cal.from ?? "", to: cal.to ?? "" }}
+              maxPoints={SWEEP_MAX_POINTS}
+            />
+          ) : (
+            <EmptyState u={cfg} compact />
+          )}
         </Panel>
 
         <Panel title="回测可用区间" hint="这些是真实数据，现在就能看">

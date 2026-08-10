@@ -543,25 +543,31 @@ export interface PositionRow extends Position {
 export function positions(db: Db): PositionRow[] {
   const rows = db
     .prepare(
-      `SELECT p.account_id, a.type AS acc_type, p.code, p.cost, p.qty,
+      `SELECT p.account_id, p.code, p.cost, p.qty,
               p.open_date, p.stop_px, p.thesis
-       FROM position p LEFT JOIN account a ON a.id = p.account_id
-       ORDER BY a.type, p.code`
+       FROM position p
+       ORDER BY p.account_id, p.code`
     )
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({
     accountId: r.account_id as string,
     /**
-     * account 表缺行时**回落到账户 id 本身**，绝不编一个账户名出来。
+     * account **就是 account_id**，不是 account.type。
      *
-     * 这里原先写的是 `?? "价值"` —— 一个内置账户名。注释当时还写着"不猜账户类型"，
-     * 但代码干的正是猜：持仓归到那个账户，下游 accountRule 就按它的段套止损，
-     * 于是一笔仓位被套上**另一个账户的止损线**，而界面看不出任何异常。
+     * 全系统只有一个账户键空间 = `AccountId`（契约里 `AccountType` 已标 deprecated）：
+     * 持仓页按 `account.id` 分组、`ManualFillForm` 传 id、YAML 的 `持仓:` 段键名
+     * 按 README 第 2 步就该写成 id、`rulesWithoutAccount` 也是拿 id 去比。
      *
-     * 用 id 的好处是两种情况都诚实：YAML 里有以该 id 为键的段 → 规则正确命中；
-     * 没有 → accountRule 返回空对象，持仓页照原样提示"该账户硬线告警不生效"。
+     * 这里原先取的是 `a.type`。内置账户时代 type 恰好就是 YAML 键（卫星/核心），
+     * 所以一直没暴露；用户自建账户（id=hj-main、type=短线 这种自由文本标签）之后，
+     * 持仓页按 id 过滤就一行都匹配不上 —— 表里有 2 行持仓，页面显示"无持仓"。
+     * 更坏的是 accountRule 会拿"短线"去查 YAML，查不到就静默无规则，
+     * 于是**硬线告警对该账户悄悄失效**，而界面看不出任何异常。
+     *
+     * type 是自由文本的展示标签（README 原话："仅用于分组展示"），
+     * 不能当键用：改一次标签就会让所有规则脱靶。
      */
-    account: (r.acc_type as AccountType) ?? (r.account_id as AccountType),
+    account: r.account_id as AccountType,
     code: r.code as string,
     qty: Number(r.qty),
     cost: Number(r.cost),

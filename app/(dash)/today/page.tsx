@@ -3,7 +3,7 @@ import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { DailyChart } from "@/components/DailyChart";
-import { readDb, dbPath } from "@/lib/ui/db";
+import { readDb, dbUnavailable } from "@/lib/ui/db";
 import { fmtAmount, fmtPct, fmtTs, dirClass } from "@/lib/ui/format";
 import { ztStats, unavailable } from "@/lib/ui/derive";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
@@ -37,7 +37,7 @@ export const dynamic = "force-dynamic";
  */
 export default function TodayPage() {
   const db = readDb();
-  if (!db) return <NoDatabase path={dbPath()} />;
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const now = new Date();
   const today = shanghaiParts(now).date;

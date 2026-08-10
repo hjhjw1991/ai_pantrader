@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { StrategyConfig, AccountType } from "@/lib/contracts/strategy";
+import { getConfig } from "@/lib/config";
 import { unavailable, type Avail } from "@/lib/ui/derive";
 import {
   StrategyConfigError,
@@ -10,8 +12,14 @@ import {
   writeStrategyParam as loaderWriteParam,
   type ParamValue,
 } from "@/lib/strategy/loader";
-import { normalizeAccountKey } from "@/lib/strategy/schema";
-import { activeStrategyPath } from "@/lib/strategy/registry";
+import {
+  formatIssue,
+  normalizeAccountKey,
+  validateStrategyConfig,
+  validateStrategyYaml,
+} from "@/lib/strategy/schema";
+import { activeStrategyPath, strategyPath } from "@/lib/strategy/registry";
+import { BACKUP_DIR_NAME, backupFile, listBackups, stampOf, type BackupResult } from "@/lib/backup/strategy-file";
 
 /**
  * strategy.yaml 适配器 —— 参数面板与策略层之间唯一的一层。
@@ -101,6 +109,23 @@ export interface WriteResult {
   reason?: string;
   /** 校验失败时的逐条问题（带行号） */
   issues?: unknown;
+  /** 写前备份落在哪。界面要显示出来，否则用户不知道退路在哪 */
+  backupPath?: string;
+}
+
+/** 备份目录：dataDir/strategy-backups。为什么落这儿见 lib/backup/strategy-file.ts 顶部 */
+export function backupDir(): string {
+  return path.join(getConfig().dataDir, BACKUP_DIR_NAME);
+}
+
+/**
+ * 写前备份。**任何改动 YAML 的路径都要先过这里**，包括只改一个纯量的参数面板 ——
+ * "只改一个数"照样能把 0.05 改成 5 然后关掉窗口，那时唯一能救的就是这份副本。
+ *
+ * 备份失败即中止写入，不"尽力而为地继续"：留不下退路的改动不该发生。
+ */
+function backupBeforeWrite(filePath: string, now: Date): BackupResult {
+  return backupFile(filePath, backupDir(), now);
 }
 
 /**
@@ -111,7 +136,11 @@ export interface WriteResult {
  * 注释记着每个阈值的由来；不校验就等于允许面板把唯一真相源改成非法状态；
  * 不用 rename 就可能留下半份被截断的配置。
  */
-export function writeStrategyParam(paramPath: string[], value: unknown): WriteResult {
+export function writeStrategyParam(
+  paramPath: string[],
+  value: unknown,
+  now: Date = new Date()
+): WriteResult {
   if (paramPath.length === 0) return { ok: false, reason: "参数路径为空" };
   if (typeof value !== "number" && typeof value !== "boolean" && typeof value !== "string") {
     return {
@@ -119,15 +148,189 @@ export function writeStrategyParam(paramPath: string[], value: unknown): WriteRe
       reason: "只支持写纯量（数字/布尔/字符串）。列表与整段规则请直接编辑 YAML —— 自动改写需要猜缩进与注释归属",
     };
   }
+  const p = strategyYamlPath();
+  let backup: BackupResult;
   try {
-    loaderWriteParam(strategyYamlPath(), paramPath, value as ParamValue);
-    return { ok: true };
+    backup = backupBeforeWrite(p, now);
+  } catch (e) {
+    return { ok: false, reason: `写前备份失败，已中止写入：${(e as Error).message}` };
+  }
+  try {
+    loaderWriteParam(p, paramPath, value as ParamValue);
+    return { ok: true, backupPath: backup.path };
   } catch (e) {
     if (e instanceof StrategyConfigError) {
       return { ok: false, reason: "写入后校验不通过，已回滚（未落盘）", issues: e.issues };
     }
     return { ok: false, reason: (e as Error).message };
   }
+}
+
+export interface RawReadResult {
+  id: string;
+  filePath: string;
+  raw: string;
+  /** 原文摘要。编辑器保存时带回来做乐观并发校验 */
+  hash: string;
+  mtime: string;
+  backups: Array<{ name: string; bytes: number; mtime: string }>;
+}
+
+/** 原文摘要。只用于"我编辑的还是不是我读到的那一份"，不做安全用途 */
+export function rawHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * 读某个策略的**原文**（不校验，校验不过也要能读到 —— 正是那种时候才需要编辑器）。
+ */
+export function readStrategyRawById(id: string): RawReadResult | { error: string } {
+  let p: string;
+  try {
+    p = strategyPath(id);
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  if (!fs.existsSync(p)) return { error: `策略不存在：${id}（${p}）` };
+  const raw = fs.readFileSync(p, "utf8");
+  const st = fs.statSync(p);
+  return {
+    id,
+    filePath: p,
+    raw,
+    hash: rawHash(raw),
+    mtime: new Date(st.mtimeMs).toISOString(),
+    backups: listBackups(backupDir(), path.basename(p)).map(({ name, bytes, mtime }) => ({ name, bytes, mtime })),
+  };
+}
+
+export interface RawWriteResult {
+  ok: boolean;
+  reason?: string;
+  issues?: unknown;
+  /** 落盘用的备份路径；dryRun 时是"将会写到哪" */
+  backupPath?: string;
+  hash?: string;
+  /** 409 语义：磁盘上的原文已经不是编辑器读到的那份 */
+  conflict?: boolean;
+}
+
+/**
+ * 整份原文写回。P0 的核心：一屏文本覆盖新增键 / 改列表 / 改整段规则，
+ * 而**注释保全是天然的** —— 是人在改文本，没有任何程序去猜缩进与注释归属。
+ *
+ * 落盘顺序（任一环节失败都不写）：
+ *   1. id 一致性  —— 文件名是 id，正文 `id:` 必须与之相同，否则 registry 读到的
+ *                    id 和文件名分叉，界面上"生效中"指的是谁就说不清了；
+ *   2. 乐观并发   —— baseHash 对不上说明磁盘上那份已经被改过（手工编辑 / 另一个标签页），
+ *                    直接覆盖等于静默吃掉别人的改动；
+ *   3. 整份校验   —— 带行号返回，非法就一个字节都不落盘；
+ *   4. 写前备份   —— 见 backupBeforeWrite；
+ *   5. 临时文件 + rename —— 半份 YAML 落盘会让系统下次读配置直接失败。
+ */
+export function writeStrategyRaw(
+  id: string,
+  text: string,
+  baseHash: string,
+  opts: { dryRun?: boolean; now?: Date } = {}
+): RawWriteResult {
+  const now = opts.now ?? new Date();
+  let p: string;
+  try {
+    p = strategyPath(id);
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
+  if (!fs.existsSync(p)) return { ok: false, reason: `策略不存在：${id}（${p}）` };
+
+  const current = fs.readFileSync(p, "utf8");
+  if (rawHash(current) !== baseHash) {
+    return {
+      ok: false,
+      conflict: true,
+      reason:
+        "磁盘上的原文已经变了（有人手工改过文件，或另一个标签页保存过）。" +
+        "为避免覆盖掉那次改动，这里不写 —— 请重新载入原文，把你的修改重做一遍。",
+      hash: rawHash(current),
+    };
+  }
+
+  const v = validateStrategyYaml(text, p);
+  if (!v.ok) {
+    return { ok: false, reason: `校验不通过（${v.issues.length} 处），未落盘`, issues: v.issues };
+  }
+  if (v.config.id !== id) {
+    return {
+      ok: false,
+      reason:
+        `正文里的 id 是 ${JSON.stringify(v.config.id)}，与文件名 ${id} 不一致。` +
+        "文件名就是策略 id，两者分叉会让「现在跑的是哪个策略」说不清 —— " +
+        "要改 id 请用「新建策略（复制自）」，再删掉旧的。",
+    };
+  }
+
+  if (opts.dryRun === true) {
+    return {
+      ok: true,
+      backupPath: path.join(backupDir(), `${path.basename(p)}.${stampOf(now)}`),
+      hash: rawHash(text),
+    };
+  }
+
+  let backup: BackupResult;
+  try {
+    backup = backupBeforeWrite(p, now);
+  } catch (e) {
+    return { ok: false, reason: `写前备份失败，已中止写入：${(e as Error).message}` };
+  }
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, text, "utf8");
+  fs.renameSync(tmp, p);
+  return { ok: true, backupPath: backup.path, hash: rawHash(text) };
+}
+
+/**
+ * 在配置的**深拷贝**上按点路径覆盖若干纯量，并整份重新校验。
+ *
+ * 给参数扫描用：一个网格点 = 一组覆盖。三条不能省 ——
+ *   1. 深拷贝：直接改传进来的 config，会让同一次扫描里前一个网格点污染后一个，
+ *      而症状是"热力图数字不对"，几乎查不出来；
+ *   2. 路径必须已存在：不存在就是用户写错了轴名，静默新建一个键等于扫了个
+ *      引擎根本不读的参数，图还照画；
+ *   3. 覆盖后整份走 schema：`择时.仓位档位.进攻 = 5` 这种越界值必须当场拒，
+ *      否则回测会拿一份非法配置跑出一条看起来正常的净值曲线。
+ */
+export function overrideConfigParams(
+  config: StrategyConfig,
+  overrides: Record<string, unknown>
+): { ok: true; config: StrategyConfig } | { ok: false; reason: string } {
+  const next = JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  for (const [dotted, value] of Object.entries(overrides)) {
+    const segs = dotted.split(".");
+    let node: Record<string, unknown> = next;
+    for (const s of segs.slice(0, -1)) {
+      const child = node[s];
+      if (child === null || typeof child !== "object" || Array.isArray(child)) {
+        return { ok: false, reason: `参数路径不存在：${dotted}（在 ${s} 处断了）` };
+      }
+      node = child as Record<string, unknown>;
+    }
+    const leaf = segs[segs.length - 1];
+    if (!(leaf in node)) return { ok: false, reason: `参数路径不存在：${dotted}` };
+    const cur = node[leaf];
+    if (cur !== null && typeof cur === "object") {
+      return { ok: false, reason: `${dotted} 不是纯量，扫描只支持纯量轴` };
+    }
+    node[leaf] = value;
+  }
+  const v = validateStrategyConfig(next);
+  if (!v.ok) {
+    return {
+      ok: false,
+      reason: `覆盖后配置非法（${v.issues.length} 处）：${v.issues.map(formatIssue).join("；")}`,
+    };
+  }
+  return { ok: true, config: v.config };
 }
 
 /** 把嵌套配置摊平成 "择时.仓位档位.进攻" 这样的路径，面板按行渲染 */
