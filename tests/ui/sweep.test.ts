@@ -13,7 +13,8 @@ import path from "node:path";
  * 这几道任一失守，热力图就会画出一张"看起来正常但不是你以为的那次实验"的图。
  */
 
-const REAL = path.resolve(__dirname, "..", "..", "config", "strategies", "default.yaml");
+// 用 .example：实文件已 gitignore（含用户账户 id），新克隆下来只有模板
+const REAL = path.resolve(__dirname, "..", "..", "config", "strategies", "default.yaml.example");
 const base = (() => {
   const v = validateStrategyYaml(fs.readFileSync(REAL, "utf8"), REAL);
   if (!v.ok) throw new Error(`仓库里的 default.yaml 校验不过：${v.message}`);

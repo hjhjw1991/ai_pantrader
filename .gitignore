@@ -8,3 +8,12 @@ node_modules/
 tmp/
 .DS_Store
 *.tsbuildinfo
+
+# 策略实文件不进 git：`持仓:` 段的键就是用户自己的账户 id，那是个人数据。
+# 仓库只跟踪去个人化的 config/strategies/*.yaml.example（不匹配下面这条），
+# 实文件由 `pnpm seed-strategies` 从模板播种。
+#
+# 代价是策略的演化史不再能用 git diff 看 —— 载体换成了
+# ~/PanTraderData/strategy-backups/：每次写回都留一份 <文件名>.YYYYMMDD-HHmmss，
+# 而且天然在 git 之外、随 DB 一起备份，不会被 git clean 或重装项目连带删掉。
+config/strategies/*.yaml

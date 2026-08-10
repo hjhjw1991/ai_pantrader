@@ -15,7 +15,7 @@
  *   node scripts/setup.mjs --check      只检查环境，什么都不改
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -142,6 +142,21 @@ ok(`数据目录 ${dataDir}`);
 info("数据库刻意放在仓库之外：免费数据源随时会封，攒下的历史是不可再生资产，");
 info("必须能独立备份、且不会被 git clean / 重装项目连带删掉。");
 
+// 策略实文件在不在。--check 只报不改，所以这里不播种，只说清现状与补法
+{
+  const sdir = path.join(ROOT, "config", "strategies");
+  const files = existsSync(sdir) ? readdirSync(sdir) : [];
+  const real = files.filter((f) => f.endsWith(".yaml"));
+  const examples = files.filter((f) => f.endsWith(".yaml.example"));
+  if (real.length > 0) {
+    ok(`策略实文件 ${real.length} 个（模板 ${examples.length} 个）`);
+  } else if (examples.length > 0) {
+    warn(`只有模板没有实文件 —— 系统没有参数可用。跑：${PM} run seed-strategies`);
+  } else {
+    warn("config/strategies 下既无实文件也无模板，策略层拿不到任何配置");
+  }
+}
+
 if (flag("--check")) {
   console.log(`\n${C.green}环境检查通过，未做任何修改。${C.off}`);
   process.exit(0);
@@ -164,6 +179,20 @@ say("建库与迁移");
 mkdirSync(dataDir, { recursive: true });
 run(PM, ["run", "migrate"]);
 ok("schema 已是最新");
+
+// ────────────────────── 3.5 策略实文件 ──────────────────────
+
+/**
+ * 策略实文件不进 git（`持仓:` 段的键是用户自己的账户 id = 个人数据），
+ * 仓库只带 `config/strategies/*.yaml.example`。新克隆下来一个策略都没有，
+ * 而没有策略 = 系统没有参数，所以这一步必须在装完就跑。
+ *
+ * 幂等：已存在的实文件一律跳过不覆盖，重跑 setup 不会动你改过的阈值。
+ */
+say("播种策略实文件");
+info("模板 config/strategies/*.yaml.example 进 git；实文件不进，因为里面有你的账户 id");
+run(PM, ["run", "seed-strategies"]);
+ok("策略就绪");
 
 // ─────────────────────────── 4. 基础数据 ───────────────────────────
 
@@ -209,8 +238,10 @@ ${C.green}${C.bold}装好了。${C.off}
 下一步：
   1. 打开 http://localhost:${PORT}/settings   看数据源健康、缺口、当前策略
   2. 打开 http://localhost:${PORT}/positions  建自己的账户（系统不预置任何账户）
-  3. 在 config/strategies/default.yaml 里把 ${C.bold}持仓${C.off} 段的键名改成你的账户 id
-     —— 键名对不上，那个账户就没有止损规则（界面会明确提示，不会静默失效）
+  3. 把 ${C.bold}持仓${C.off} 段的键名改成你的账户 id
+     —— 在 /settings 的「策略原文编辑」里改（自动备份 + 校验），或直接编辑
+        config/strategies/default.yaml（该文件不进 git，模板是同名 .yaml.example）
+     —— 键名对不上，那个账户就没有止损规则（持仓页会红字点名，不会静默失效）
 
 ${C.yellow}这套系统不会自动下单。${C.off}下单在券商 App 手敲，回来在持仓页回填成交。
 `);

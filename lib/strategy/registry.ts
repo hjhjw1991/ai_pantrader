@@ -279,6 +279,67 @@ export function readStrategyRaw(id: string): { raw: string; version: string } | 
   }
 }
 
+/** 模板后缀。`<id>.yaml.example` 进 git，`<id>.yaml` 是本地实文件、被 gitignore */
+export const EXAMPLE_SUFFIX = ".yaml.example";
+
+export interface SeedResult {
+  /** 由模板新建出来的策略 id */
+  created: string[];
+  /** 模板存在但实文件已在，跳过（绝不覆盖用户已有的策略） */
+  skipped: string[];
+  /** 本次是否顺手写了 ACTIVE 指针，以及指向谁 */
+  activeSet: string | null;
+}
+
+/**
+ * 从 `<id>.yaml.example` 播种出 `<id>.yaml`。
+ *
+ * 为什么需要它：策略实文件里会出现用户自己的账户 id（`持仓:` 段的键就是账户 id），
+ * 那是个人数据，不该进发行源；所以仓库只跟踪去个人化的 `.example`，实文件 gitignore。
+ * 代价是新克隆下来一个策略都没有 —— 系统就没有参数可用。这个函数把那一步补上。
+ *
+ * **显式动作，和 migrateLegacy 同样的道理**：不在读取路径上偷偷生成。
+ * 读路径悄悄造出一份配置，会让"我改的 YAML 怎么没生效"变成查不出的问题。
+ * 由 `pnpm seed-strategies`（setup.mjs 会调）触发。
+ *
+ * 已存在的实文件一律跳过、不覆盖、不合并：那是用户攒下来的阈值和注释。
+ */
+export function seedFromExamples(): SeedResult {
+  const dir = strategiesDir();
+  const out: SeedResult = { created: [], skipped: [], activeSet: null };
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  for (const f of fs.readdirSync(dir).sort()) {
+    if (!f.endsWith(EXAMPLE_SUFFIX)) continue;
+    const id = f.slice(0, -EXAMPLE_SUFFIX.length);
+    let target: string;
+    try {
+      target = strategyPath(id);
+    } catch {
+      continue;   // 模板名不合法当 id 用，跳过而不是抛 —— 一个坏模板不该让播种整体失败
+    }
+    if (fs.existsSync(target)) {
+      out.skipped.push(id);
+      continue;
+    }
+    atomicWrite(target, fs.readFileSync(path.join(dir, f), "utf8"));
+    out.created.push(id);
+  }
+  // 播种后如果还没有指针、而现在正好只有一个策略，把指针写实。
+  // 不猜多选一：多个策略却没有指针是"未决"状态，必须让用户自己选（见 activeStrategyId）
+  const pointer = path.join(dir, ACTIVE_POINTER);
+  if (!fs.existsSync(pointer)) {
+    const yamls = fs.readdirSync(dir).filter((f) => f.endsWith(".yaml")).sort();
+    if (yamls.length === 1) {
+      const id = yamls[0].slice(0, -".yaml".length);
+      setActiveStrategy(id);
+      out.activeSet = id;
+    }
+  }
+  return out;
+}
+
 /**
  * 把老的 config/strategy.yaml 搬进 config/strategies/default.yaml 并写好指针。
  * 显式动作 —— 搬用户的唯一真相源不该在读取路径上偷偷发生。

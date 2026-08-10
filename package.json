@@ -16,6 +16,7 @@
     "test:live": "PANTRADER_LIVE=1 vitest run --config vitest.live.config.ts",
     "job": "tsx scripts/job.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
+    "seed-strategies": "tsx scripts/seed-strategies.ts",
     "install-launchd": "tsx scripts/install-launchd.ts",
     "migrate": "tsx scripts/migrate-cli.ts",
     "db:export": "tsx scripts/export.ts",

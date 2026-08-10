@@ -516,7 +516,11 @@ export function StrategyManager({
 
       {rows.length === 0 ? (
         <p className="text-ink-3 text-[12px]">
-          {dirRel} 下没有任何策略文件。系统没有参数可用 —— 放一份 YAML 进去。
+          {dirRel} 下没有任何策略文件，系统没有参数可用。
+          跑 <code className="text-ink-2">pnpm seed-strategies</code> 从
+          <code className="text-ink-2">{dirRel}/&lt;id&gt;.yaml.example</code> 播种一份 ——
+          实文件不进 git（里面的 <code className="text-ink-2">持仓:</code> 段键名是你的账户 id），
+          所以新克隆下来确实是空的。
         </p>
       ) : (
         <div className="overflow-x-auto">

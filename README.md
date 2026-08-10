@@ -42,12 +42,17 @@ Windows 一样这条命令，PowerShell 或 CMD 都行——脚本是纯 Node，
 ### 手动安装（想逐步看清每一步）
 
 ```bash
-pnpm install          # 装依赖
-pnpm run migrate      # 建库 + 跑迁移（数据库落在 ~/PanTraderData/）
-pnpm run bootstrap    # 灌证券清单 + 交易日历。可中断，重跑自动续拉
-pnpm build            # 构建
-pnpm start            # 启动 → http://localhost:3111
+pnpm install            # 装依赖
+pnpm run migrate        # 建库 + 跑迁移（数据库落在 ~/PanTraderData/）
+pnpm run seed-strategies # 从 config/strategies/*.yaml.example 播种策略实文件
+pnpm run bootstrap      # 灌证券清单 + 交易日历。可中断，重跑自动续拉
+pnpm build              # 构建
+pnpm start              # 启动 → http://localhost:3111
 ```
+
+`seed-strategies` 不能省：**策略实文件不进 git**，仓库里只有 `.yaml.example` 模板。
+原因是 `持仓:` 段的键名就是你自己的账户 id，那是个人数据，不该躺在发行源里。
+这一步幂等 —— 实文件已存在就跳过，不会覆盖你改过的阈值。
 
 `pnpm` 没装就 `npm i -g pnpm`。用 npm 也能跑，但仓库带 `pnpm-lock.yaml`，npm 会忽略锁文件里的确定版本。
 
@@ -63,7 +68,15 @@ pnpm start            # 启动 → http://localhost:3111
 
 **2. 把策略里的账户键名改成你的 id** → `config/strategies/default.yaml` 的 `持仓:` 段
 
-每账户的止损规则来自这一段，**按账户 id 作键**。键名对不上，那个账户就没有硬线规则——界面会明确提示"该账户硬线告警不生效"，不会静默失效。
+每账户的止损规则来自这一段，**按账户 id 作键**。键名对不上，那个账户就没有硬线规则——
+持仓页会用一个红色面板点名"这些 YAML 键在 account 表里不存在"并列出真正拿到规则的账户，不会静默失效。
+
+改法有两条：直接编辑那个文件，或用 http://localhost:3111/settings 的「策略原文编辑」——
+后者保存前会做 schema 校验、给 diff、并把原文备份成 `~/PanTraderData/strategy-backups/<文件名>.YYYYMMDD-HHmmss`。
+
+> 这个文件被 `.gitignore` 忽略（模板 `default.yaml.example` 才进 git），所以你改它不会让 `git status` 变脏。
+> 代价是策略演化史不能用 `git diff` 看了 —— 载体换成上面那个备份目录，每次写回都留一份带时间戳的全文，
+> 且随 `~/PanTraderData` 一起备份，不会被 `git clean` 或重装项目连带删掉。
 
 **3. 看一眼数据健康** → http://localhost:3111/settings
 
@@ -132,9 +145,14 @@ pnpm run install-schtasks   # Windows
 策略是文件，不是数据库行：
 
 ```
-config/strategies/<id>.yaml   可编辑的真相源，可增可删
-config/strategies/ACTIVE      单行文本，当前生效的是哪个
+config/strategies/<id>.yaml           可编辑的真相源，可增可删。**不进 git**
+config/strategies/<id>.yaml.example   去个人化模板，进 git，供 seed-strategies 播种
+config/strategies/ACTIVE              单行文本，当前生效的是哪个
 ```
+
+实文件不进 git 是因为 `持仓:` 段的键名是你自己的账户 id。历史版本靠
+`~/PanTraderData/strategy-backups/<文件名>.YYYYMMDD-HHmmss` 留存：每次写回（含面板改一个数）
+都先备份，同一秒内连续保存加 `-2` 后缀，不做自动清理。
 
 **YAML 是参数的唯一真相源。** 参数面板只是它的投影，不存第二份状态。面板改一个数字 = 在原文上替换一个纯量，注释与排版一个字节不动——那些注释记着每个阈值的由来，比面板改参的便利更值钱。
 
@@ -175,6 +193,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm test` | 单元测试（**不打网络**） |
 | `pnpm test:live` | 打真实接口的 smoke 测试 |
 | `pnpm run migrate` | 跑迁移 |
+| `pnpm run seed-strategies` | 从 `*.yaml.example` 播种策略实文件（幂等，不覆盖已有） |
 
 > `pnpm import` / `pnpm export` 是 pnpm 内置命令，会劫持同名 script。所以叫 `db:import` / `db:export`。
 

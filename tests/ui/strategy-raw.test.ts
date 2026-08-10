@@ -20,8 +20,12 @@ let dataDir: string;
 let realYaml: string;
 const savedEnv = { cfg: process.env.PANTRADER_CONFIG_ROOT, data: process.env.PANTRADER_DATA_DIR };
 
-/** 仓库里那份真实策略当夹具：它是唯一能保证通过全部跨字段校验的样本 */
-const REAL = path.resolve(__dirname, "..", "..", "config", "strategies", "default.yaml");
+/**
+ * 仓库里那份真实策略当夹具：它是唯一能保证通过全部跨字段校验的样本。
+ * 读 `.example` —— 实文件已 gitignore（`持仓:` 段键名是用户的账户 id），新克隆下来只有模板。
+ * 临时目录里写出的文件仍叫 `default.yaml`，因为那测的是**实文件**的读写语义。
+ */
+const REAL = path.resolve(__dirname, "..", "..", "config", "strategies", "default.yaml.example");
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-raw-"));

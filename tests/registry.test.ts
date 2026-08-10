@@ -16,8 +16,11 @@ let dir: string, db: any;
  * 夹具直接用仓库里那份真策略，不手写简化版 ——
  * 手写的夹具只要漏一个必填字段就测不到真实路径，而且会随 schema 演进悄悄失效。
  * 用真文件还顺带守住一条：**随源码发布的默认策略必须校验通过**。
+ *
+ * 指的是 `.yaml.example` 而不是 `.yaml`：实文件已被 .gitignore 忽略（里面有用户的账户 id），
+ * 新克隆下来只有模板。而"随源码发布的那份"现在正是模板，所以这里指它才名副其实。
  */
-const REAL_DEFAULT = path.resolve(process.cwd(), "config/strategies/default.yaml");
+const REAL_DEFAULT = path.resolve(process.cwd(), "config/strategies/default.yaml.example");
 const BASE = fs.readFileSync(REAL_DEFAULT, "utf8");
 
 beforeEach(async () => {
@@ -267,5 +270,86 @@ describe("老单文件兼容", () => {
     const { migrateLegacy } = await reg();
     expect(migrateLegacy().moved).toBe(false);
     expect(readFile("default")).toContain("# 用户已有的这份不能被覆盖");
+  });
+});
+
+/**
+ * 播种：`<id>.yaml.example` → `<id>.yaml`。
+ *
+ * 存在的理由是实文件被 gitignore（`持仓:` 段键名 = 用户账户 id = 个人数据），
+ * 新克隆下来一个策略都没有 = 系统没有参数。这组测试守两件事：
+ * 播种真能让空目录变可用，以及**已有实文件绝不被模板覆盖**（那里面是攒下来的阈值与注释）。
+ */
+describe("seedFromExamples", () => {
+  const writeExample = (id: string, text = BASE) =>
+    fs.writeFileSync(path.join(dir, "config", "strategies", `${id}.yaml.example`), text, "utf8");
+
+  it("空目录 + 一个模板 → 建出实文件并写好 ACTIVE 指针", async () => {
+    writeExample("default");
+    const { seedFromExamples, listStrategies, activeStrategyId } = await reg();
+    const r = seedFromExamples();
+    expect(r.created).toEqual(["default"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.activeSet).toBe("default");
+    expect(listStrategies().map((s) => s.id)).toEqual(["default"]);
+    expect(activeStrategyId()).toBe("default");
+  });
+
+  it("实文件内容与模板逐字节相同（注释一并带过来）", async () => {
+    writeExample("default");
+    const { seedFromExamples } = await reg();
+    seedFromExamples();
+    expect(readFile("default")).toBe(BASE);
+  });
+
+  it("实文件已存在 → 跳过，绝不覆盖用户改过的阈值", async () => {
+    writeExample("default");
+    write("default", `# 我自己改的，不许被模板盖掉\n${BASE}`);
+    const { seedFromExamples } = await reg();
+    const r = seedFromExamples();
+    expect(r.created).toEqual([]);
+    expect(r.skipped).toEqual(["default"]);
+    expect(readFile("default")).toContain("# 我自己改的，不许被模板盖掉");
+  });
+
+  it("幂等：连跑两次，第二次全是 skipped", async () => {
+    writeExample("default");
+    const { seedFromExamples } = await reg();
+    expect(seedFromExamples().created).toEqual(["default"]);
+    expect(seedFromExamples()).toMatchObject({ created: [], skipped: ["default"] });
+  });
+
+  it("多个模板都播种；但多策略且无指针时不替用户猜 active", async () => {
+    writeExample("default");
+    writeExample("aggressive", BASE.replace(/^id: .*$/m, "id: aggressive"));
+    const { seedFromExamples, activeStrategyId } = await reg();
+    const r = seedFromExamples();
+    expect(r.created.sort()).toEqual(["aggressive", "default"]);
+    // 两个策略、没有指针 = 未决状态，必须让用户自己选（界面会红字要求选一个）
+    expect(r.activeSet).toBeNull();
+    expect(activeStrategyId()).toBeNull();
+  });
+
+  it("已有指针时不动它", async () => {
+    writeExample("default");
+    write("keep", BASE.replace(/^id: .*$/m, "id: keep"));
+    const { setActiveStrategy, seedFromExamples, activeStrategyId } = await reg();
+    setActiveStrategy("keep");
+    const r = seedFromExamples();
+    expect(r.created).toEqual(["default"]);
+    expect(r.activeSet).toBeNull();
+    expect(activeStrategyId()).toBe("keep");
+  });
+
+  it("没有任何模板 → 什么都不做，不抛错", async () => {
+    const { seedFromExamples } = await reg();
+    expect(seedFromExamples()).toEqual({ created: [], skipped: [], activeSet: null });
+  });
+
+  it("模板名当 id 非法时跳过该模板，不让一个坏文件毁掉整次播种", async () => {
+    writeExample("default");
+    fs.writeFileSync(path.join(dir, "config", "strategies", "..evil.yaml.example"), BASE, "utf8");
+    const { seedFromExamples } = await reg();
+    expect(seedFromExamples().created).toEqual(["default"]);
   });
 });
