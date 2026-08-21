@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { SweepReport } from "@/lib/contracts/backtest";
+import { DateInput } from "@/components/DateInput";
 
 /**
  * 参数扫描 + 热力图（spec §10.4）。
@@ -151,11 +152,24 @@ export function SweepRunner({
       <div className="flex flex-wrap items-end gap-2">
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">起</span>
-          <input className={`${inputCls} w-24`} value={from} onChange={(e) => setFrom(e.target.value)} />
+          {/* 与 LabRunner 同一个控件：扫描的每个点都是一次完整回测，区间选错的代价一样 */}
+          <DateInput
+            className="w-36"
+            value={from}
+            onChange={setFrom}
+            min={defaultRange.from}
+            max={to || defaultRange.to}
+          />
         </label>
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">止</span>
-          <input className={`${inputCls} w-24`} value={to} onChange={(e) => setTo(e.target.value)} />
+          <DateInput
+            className="w-36"
+            value={to}
+            onChange={setTo}
+            min={from || defaultRange.from}
+            max={defaultRange.to}
+          />
         </label>
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">初始资金</span>

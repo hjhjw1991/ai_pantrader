@@ -39,6 +39,12 @@
 
 html,
 body {
+  /*
+   * 告诉浏览器这页是暗色的。原生控件（date 选择器、下拉、日历弹层）不读我们的
+   * CSS 变量，只看 color-scheme —— 不声明就会在深色输入框里弹出一个白底日历，
+   * 而日期输入框右侧那个日历图标会是黑的，在 #161c25 上基本看不见。
+   */
+  color-scheme: dark;
   background: var(--color-bg);
   color: var(--color-ink);
   font-family: var(--font-sans);

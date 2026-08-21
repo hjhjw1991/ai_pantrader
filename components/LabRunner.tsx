@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { BacktestReport } from "@/lib/contracts/backtest";
 import { BacktestReportView } from "@/components/BacktestReportView";
+import { DateInput } from "@/components/DateInput";
 
 /**
  * 回测执行控件。只在回测层就绪时才被渲染（见 lab 页）。
@@ -71,11 +72,26 @@ export function LabRunner({
         </label>
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">起始日</span>
-          <input className={`${inputCls} w-28`} value={from} onChange={(e) => setFrom(e.target.value)} />
+          {/* 上下界卡在库里真有交易日历的区间；再用 to 卡住 from，反过来的区间在控件上就选不出来 */}
+          <DateInput
+            className="w-36"
+            value={from}
+            onChange={setFrom}
+            min={defaultRange.from}
+            max={to || defaultRange.to}
+            required
+          />
         </label>
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">结束日</span>
-          <input className={`${inputCls} w-28`} value={to} onChange={(e) => setTo(e.target.value)} />
+          <DateInput
+            className="w-36"
+            value={to}
+            onChange={setTo}
+            min={from || defaultRange.from}
+            max={defaultRange.to}
+            required
+          />
         </label>
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">初始资金（元，必填）</span>
