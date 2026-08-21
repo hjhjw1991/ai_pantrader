@@ -132,7 +132,10 @@ if (invokedDirectly) {
 
   for (const s of JOB_SCHEDULE) {
     const xml = buildPlist({
-      label: s.label, script: "scripts/job.ts", jobArgs: [s.job],
+      // --runner=launchd：job.ts 认领 job_run 时据此记录是谁跑的。
+      // 认领本身与标签无关（去重看的是 (date, job, slot) 主键），
+      // 标签是为了日后能分清"自动跑的"和"人手补的"
+      label: s.label, script: "scripts/job.ts", jobArgs: [s.job, "--runner=launchd"],
       calendar: s.calendar, workdir, logDir, nodeBin,
     });
     const dest = path.join(agents, `${s.label}.plist`);

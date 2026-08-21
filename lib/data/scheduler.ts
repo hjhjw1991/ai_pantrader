@@ -64,8 +64,11 @@ function claimed(db: Db, date: string, job: string, slot: string): boolean {
 /**
  * 抢占一个时点。靠主键冲突做原子占位 —— 两个进程同时抢，只有一个 INSERT 成功。
  * 返回 false 表示别人已经拿到了，本进程直接放手。
+ *
+ * 导出是给 scripts/job.ts 用的：OS 级定时任务走的是那条路径，不经过本调度器，
+ * 必须认领同一张表里的同一个坑，两套机制才看得见对方。
  */
-function claim(db: Db, date: string, job: string, slot: string, runner: Runner): boolean {
+export function claimSlot(db: Db, date: string, job: string, slot: string, runner: Runner): boolean {
   try {
     db.prepare(
       `INSERT INTO job_run (date, job, slot, status, started_at, runner)
@@ -77,7 +80,8 @@ function claim(db: Db, date: string, job: string, slot: string, runner: Runner):
   }
 }
 
-function finish(
+/** 落执行结果。同样导出给 scripts/job.ts —— 只认领不回填，时点会永远卡在 running */
+export function finishSlot(
   db: Db, date: string, job: string, slot: string,
   status: "done" | "failed", stats?: unknown, error?: string
 ): void {
@@ -168,20 +172,20 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
       emit({ kind: "skip", job, slot, reason: "今天已成功跑过，无需补偿" });
       return;
     }
-    if (!claim(o.db, date, job, slot, runner)) return;
+    if (!claimSlot(o.db, date, job, slot, runner)) return;
     try {
       const result = await runJob(job, { db: o.db, clients: o.clients, now: at });
       const outcome = jobOutcome(job, result.stats);
       if (outcome.ok) {
-        finish(o.db, date, job, slot, "done", result.stats);
+        finishSlot(o.db, date, job, slot, "done", result.stats);
         emit({ kind: "run", job, slot, result });
       } else {
-        finish(o.db, date, job, slot, "failed", result.stats, outcome.reason);
+        finishSlot(o.db, date, job, slot, "failed", result.stats, outcome.reason);
         emit({ kind: "fail", job, slot, error: outcome.reason! });
       }
     } catch (e: any) {
       const msg = String(e?.message ?? e);
-      finish(o.db, date, job, slot, "failed", undefined, msg);
+      finishSlot(o.db, date, job, slot, "failed", undefined, msg);
       emit({ kind: "fail", job, slot, error: msg });
     }
   }
@@ -228,7 +232,7 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
           continue;
         }
 
-        if (!claim(o.db, date, d.job, d.slot, runner)) {
+        if (!claimSlot(o.db, date, d.job, d.slot, runner)) {
           emit({ kind: "skip", job: d.job, slot: d.slot, reason: "已被其他 runner 执行" });
           continue;
         }
@@ -238,15 +242,15 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
           // 没抛错 ≠ 成功：采集器批次失败时记 gap 后继续，全军覆没也会正常返回
           const outcome = jobOutcome(d.job, result.stats);
           if (outcome.ok) {
-            finish(o.db, date, d.job, d.slot, "done", result.stats);
+            finishSlot(o.db, date, d.job, d.slot, "done", result.stats);
             emit({ kind: "run", job: d.job, slot: d.slot, result });
           } else {
-            finish(o.db, date, d.job, d.slot, "failed", result.stats, outcome.reason);
+            finishSlot(o.db, date, d.job, d.slot, "failed", result.stats, outcome.reason);
             emit({ kind: "fail", job: d.job, slot: d.slot, error: outcome.reason! });
           }
         } catch (e: any) {
           const msg = String(e?.message ?? e);
-          finish(o.db, date, d.job, d.slot, "failed", undefined, msg);
+          finishSlot(o.db, date, d.job, d.slot, "failed", undefined, msg);
           emit({ kind: "fail", job: d.job, slot: d.slot, error: msg });
           // 单个 job 失败不能中断整轮：后面的时点还得照跑
         }

@@ -1,4 +1,5 @@
 import type { JobName } from "@/lib/data/jobs";
+import { shanghaiTs } from "@/lib/data/clock";
 
 /**
  * 采集时刻表。**平台无关的唯一真相源**，随源码走。
@@ -89,6 +90,43 @@ export const SCHEDULE: JobSlot[] = [
   { job: "night", slots: ["22:00"], catchUp: "all", backfillsAcrossDays: true,
     durationMin: 40, desc: "全量日线 + 缺口回补" },
 ];
+
+/**
+ * OS 级任务允许迟到多久，仍算作它那个时点。
+ *
+ * 需要余量是因为 launchd / schtasks **只保证不早于**日历时间触发：机器休眠期间
+ * 时点不会到点执行，唤醒后才补一次。半小时之内补上，做的还是那个时点该做的事。
+ * 超过就不认了 —— 14:55 的盘口在 16:30 拿到的是收盘价，把它记成 14:55 跑过，
+ * 等于用一份假数据把覆盖率填满，比留个 missed 缺口还糟。
+ */
+const SLOT_LATE_TOLERANCE_MIN = 60;
+
+/**
+ * 把"现在几点"反查成时刻表里的时点，供 OS 级任务认领 job_run 用。
+ *
+ * 取的是**刚过去的那个**时点，不是最近的那个：10:09 属于 10:05，不属于还没发生的
+ * 10:10。所以这里不给"提前触发"留余量 —— 留了就会把 10:09 认成 10:10，
+ * 抢占一个尚未发生的坑。
+ *
+ * 返回 null 表示这次执行不落在任何时点上（人手敲的临时执行，或迟到太多），
+ * 调用方应当照跑但**不认领**，别去占调度器的位置。
+ */
+export function slotForNow(job: JobName, at: Date): string | null {
+  const j = SCHEDULE.find(x => x.job === job);
+  if (j === undefined) return null;
+
+  const hm = shanghaiTs(at).slice(11, 16);
+  const nowMin = hmToMinutes(hm);
+
+  let best: string | null = null;
+  for (const s of j.slots) {
+    const t = hmToMinutes(s);
+    if (t > nowMin) continue;                          // 还没到，不认
+    if (nowMin - t > SLOT_LATE_TOLERANCE_MIN) continue; // 迟到太多，不认
+    if (best === null || t > hmToMinutes(best)) best = s;
+  }
+  return best;
+}
 
 /** 时刻表里所有 job 的所有时点，升序展开，用于装 OS 级任务 */
 export function allSlots(): Array<{ job: JobName; slot: string }> {

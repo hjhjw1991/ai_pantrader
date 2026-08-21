@@ -32,7 +32,11 @@ export function buildTasks(nodeBin: string, workdir: string): TaskDef[] {
         time: slot,
         schedule: "DAILY",
         // 用 path.win32：这些天生是 Windows 路径，在别的宿主上生成任务清单也该是反斜杠
-        argv: [nodeBin, "--import=tsx", path.win32.join(workdir, "scripts", "job.ts"), j.job],
+        // --runner=schtasks 与 launchd 侧同理：job.ts 靠它在 job_run 里标明身份
+        argv: [
+          nodeBin, "--import=tsx", path.win32.join(workdir, "scripts", "job.ts"),
+          j.job, "--runner=schtasks",
+        ],
       });
     }
   }
