@@ -16,7 +16,11 @@ A 股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 
 > 为什么不许更高版本：`better-sqlite3` 是原生模块，预编译的 `.node` 绑定 Node ABI，换大版本就装载失败；
 > 而 `install-launchd` / `install-schtasks` 写进定时任务的解释器，是**安装当时那个 Node 的绝对路径**。
-> 用两个 Node 会出现"采集在写库、网页说连不上库"这种撕裂状态。`node scripts/setup.mjs --check` 会当场拦住。
+> 用两个 Node 会出现"采集在写库、网页说连不上库"这种撕裂状态。
+>
+> 拦截分三层：`.npmrc` 里的 `engine-strict=true` 让**任何 `pnpm` 入口**在版本不对时启动即失败（不再是一行 WARN 照跑）；
+> `node scripts/setup.mjs --check` 会额外真装载一次 `.node`，把"版本号对但 ABI 不匹配"也探出来；
+> 万一还是漏到了运行时，网页的 503 会把 ABI 号翻成"换回 Node 几"的具体动作。
 
 ```bash
 git clone <仓库地址> pantrader

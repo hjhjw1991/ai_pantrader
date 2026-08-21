@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ZodType } from "zod";
 import { readDb, openRead } from "@/lib/ui/db";
+import { abiHint } from "@/lib/platform/node-abi";
 
 /**
  * API 路由的共用外壳。
@@ -32,9 +33,15 @@ export function err(status: number, message: string, extra?: unknown): NextRespo
 export function withDb<T>(fn: (db: NonNullable<ReturnType<typeof readDb>>) => T): T | NextResponse {
   const r = openRead();
   if (!r.ok) {
-    return r.why.kind === "missing"
-      ? err(503, `数据库不存在：${r.why.path}`)
-      : err(503, `数据库打不开（文件存在）：${r.why.path} —— ${r.why.detail}`);
+    if (r.why.kind === "missing") return err(503, `数据库不存在：${r.why.path}`);
+    // 原始报错原样带上（ABI 号/errno 是唯一线索），后面再追一句处置 ——
+    // 只有正文说得出"下一步敲什么"，这条 503 才算真的把人送到了终点
+    const hint = abiHint(r.why.detail);
+    return err(
+      503,
+      `数据库打不开（文件存在）：${r.why.path} —— ${r.why.detail}`
+        + (hint === null ? "" : `\n\n${hint}`)
+    );
   }
   return fn(r.db);
 }
