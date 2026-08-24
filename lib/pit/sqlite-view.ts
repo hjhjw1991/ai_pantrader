@@ -176,11 +176,41 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
   const one = (sql: string, ...params: unknown[]): Record<string, unknown> | null =>
     (db.prepare(sql).get(...(params as never[])) as Record<string, unknown> | undefined) ?? null;
 
+  /**
+   * 视图内记忆化。
+   *
+   * 实测跑一次今日信号卡，engine 调了 dailyBars 29,558 次，去重后只有 5,951 个
+   * (code, n) 组合 —— 同一个问题平均问了五遍，1.6 秒全在重复查询上。
+   * 因子层各自独立地"我要这只票近 9 根日线"，谁也不知道隔壁刚问过，
+   * 这是因子该有的样子；去重是视图的责任。
+   *
+   * 语义上安全，因为这就是 point-in-time 视图的定义：同一个 asOf、同样的参数，
+   * 答案按契约必须相同。顺带消掉撕裂读 —— 采集进程正在往库里写，
+   * 同一次渲染里前后两次问同一个问题本来可能拿到不同的行，
+   * 那会让同一张页面上两个面板各说各的，而且极难查。
+   *
+   * 生命周期跟着视图实例：一次渲染 / 回测里的一个 asOf 用完就整个丢掉，不跨请求。
+   * 上限是防回测跑飞：一次 sweep 会建成百上千个视图，单个视图的缓存无上限增长
+   * 会把内存吃穿。到顶之后退化成不缓存，只是慢，不会错。
+   */
+  const memo = new Map<string, unknown>();
+  const MEMO_MAX = 50_000;
+  function cached<T>(key: string, compute: () => T): T {
+    const hit = memo.get(key);
+    if (hit !== undefined) return hit as T;
+    const v = compute();
+    if (memo.size < MEMO_MAX) memo.set(key, v);
+    return v;
+  }
+  /** 数组结果统一浅拷贝再交出去：调用方 reverse/sort/pop 不能反过来改坏缓存 */
+  const cachedList = <T>(key: string, compute: () => T[]): T[] => cached(key, compute).slice();
+
   return {
     asOf,
 
     dailyBars(code: string, n: number): DailyBar[] {
       if (n <= 0) return [];
+      return cachedList(`daily|${code}|${n}`, () => {
       const rs = rows(
         `SELECT code, date, o, h, l, c, vol, amount, adj_factor
            FROM kline_daily
@@ -197,6 +227,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         // NULL 复权因子按 1（spec R1：2022-05~2023-12 无复权参照），读的人靠 adjFactor===1 判断
         adjFactor: num(r["adj_factor"], 1),
       }));
+      });
     },
 
     minuteBars(code: string, period: number, n: number): MinuteBar[] {
@@ -219,6 +250,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
     },
 
     quote(code: string): Quote | null {
+      return cached(`quote|${code}`, () => {
       const expr = tsLocalExpr("ts");
       // price > 0 直接写进 WHERE：停牌时 gtimg 回 0 价，返回 0 会被因子读成崩盘。
       // 契约明写"不许返回 0 价"，所以宁可退回更早的一条正常快照。
@@ -237,6 +269,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         price: num(r["price"], 0), pct: num(r["pct"], 0),
         turnover: num(r["turnover"], 0), amplitude: num(r["amplitude"], 0),
       };
+      });
     },
 
     ztPool(date: string): ZtRow[] {
@@ -351,6 +384,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
     },
 
     universe(): SecurityRow[] {
+      return cachedList("universe", () => {
       // spec §10.2：用当前在市清单回测 2022 年 = 假装当年买的没一只退市，收益系统性高估。
       // list_date IS NULL 放行 —— bootstrap 的 clist 不带上市日期，
       // 若把未知当"未上市"排除，这个方法在真库上会返回空池（静默的灾难性失败）。
@@ -363,6 +397,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
           ORDER BY code`,
         asOfDate, asOfDate
       ).map(r => mapSecurity(r, asOfDate));
+      });
     },
 
     security(code: string): SecurityRow | null {

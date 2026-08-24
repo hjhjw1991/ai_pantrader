@@ -14,7 +14,7 @@ import {
   advisorOutputs,
   calendarRange,
   getMetaValue,
-  tableCounts,
+  tableCountsCached,
   unresolvedGaps,
 } from "@/lib/ui/queries";
 import {
@@ -46,7 +46,9 @@ export default function SettingsPage() {
   const st = storageInfo();
   const sched = scheduleStatus();
   const migs = appliedMigrations(db);
-  const counts = tableCounts(db);
+  // 22 张表一轮 COUNT(*) 实测 4.4 秒（kline_daily 5.75M + quote_snapshot 7.13M），
+  // 而本页每 60 秒自刷一次。取最近一分钟内数过的那份，并把统计时刻显示出来
+  const { counts, at: countsAt } = tableCountsCached(db);
   const cal = calendarRange(db);
   const gaps = unresolvedGaps(db);
   const cfg = readStrategyConfig();
@@ -373,7 +375,7 @@ export default function SettingsPage() {
       <Panel
         title="各表行数"
         hint="空态文案指的就是这张表。行数 -1 = 表不存在（migration 未跑）"
-        right={`日历 ${cal.from ?? "—"} → ${cal.to ?? "—"}（${cal.openDays} 交易日）`}
+        right={`统计于 ${countsAt.slice(11, 19)} · 日历 ${cal.from ?? "—"} → ${cal.to ?? "—"}（${cal.openDays} 交易日）`}
       >
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-x-4">
           {counts.map((c) => (

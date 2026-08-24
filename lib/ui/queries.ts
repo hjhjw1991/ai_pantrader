@@ -14,6 +14,7 @@ import type { AccountType } from "@/lib/contracts/strategy";
 import type { Position } from "@/lib/contracts/execution";
 import type { Outcome, Prediction, Verdict, ErrorType } from "@/lib/contracts/ledger";
 import type { Phase, Action, EnvGear } from "@/lib/contracts/strategy";
+import { shanghaiTs } from "@/lib/data/clock";
 
 /**
  * 前端的 DB 读层。所有页面只经过这里读库。
@@ -78,6 +79,48 @@ export function tableCounts(db: Db): TableCount[] {
     }
   }
   return out;
+}
+
+export interface CachedTableCounts {
+  counts: TableCount[];
+  /** 这批数字是什么时候数出来的（上海挂钟），页面必须显示，不能假装是此刻 */
+  at: string;
+}
+
+/**
+ * 带时效的行数统计。
+ *
+ * COUNT(*) 在 SQLite 里没有 O(1) 写法。kline_daily 已经在扫最窄的索引
+ * （idx_kline_daily_date）了，5,750,482 行仍要 1.87s；quote_snapshot 7,133,734 行 0.69s；
+ * 22 张表一轮实测 4.4 秒。而 LiveBar 在根 layout 里每 60 秒 router.refresh() 一次，
+ * 设置页和回测实验室都在显示这些数字 —— 于是只要那两个页面开着，
+ * 就每分钟把 1300 万行重扫一遍，纯粹为了刷新几个几乎不变的数。
+ *
+ * 缓存挂在 globalThis 上而不是模块作用域：dev 下 HMR 会反复重新求值模块，
+ * 挂模块里等于没有缓存（和 lib/ui/db 的只读连接同一个理由）。
+ *
+ * tableCounts 本身保持每次真数，不动 —— 导出/校验依赖它说实话。
+ * 需要省的是页面，那就让页面显式说要多旧的数，并把 at 显示出来：
+ * 屏幕上是一分钟前的数字没问题，假装它是此刻的才有问题。
+ */
+export function tableCountsCached(
+  db: Db,
+  maxAgeMs = 60_000,
+  now: number = Date.now()
+): CachedTableCounts {
+  const g = globalThis as unknown as {
+    __pantraderCounts?: Map<string, { at: number; result: CachedTableCounts }>;
+  };
+  const cache = (g.__pantraderCounts ??= new Map());
+  // 按库文件分桶：测试里每个用例一个临时库，不能互相看见对方的计数
+  const key = (db as unknown as { name?: string }).name ?? "";
+
+  const hit = cache.get(key);
+  if (hit !== undefined && maxAgeMs > 0 && now - hit.at < maxAgeMs) return hit.result;
+
+  const result: CachedTableCounts = { counts: tableCounts(db), at: shanghaiTs(new Date(now)) };
+  cache.set(key, { at: now, result });
+  return result;
 }
 
 export function getMetaValue(db: Db, key: string): string | null {

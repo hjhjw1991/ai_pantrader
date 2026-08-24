@@ -287,3 +287,67 @@ describe("hasGap", () => {
     expect(gapKinds(t.db, "2026-08-03").sort()).toEqual(["kline_min:600183", "zt_pool"]);
   });
 });
+
+/**
+ * 同一个视图实例内的记忆化。
+ *
+ * 起因是实测：跑一次今日信号卡，engine 调了 dailyBars **29,558 次**，
+ * 而去重后只有 5,951 个 (code, n) 组合 —— 其中 29,440 次是同一个 n=9。
+ * 一次请求里同样的问题问了五遍，1.6 秒全花在重复查询上，/today 因此要 0.9~1.6 秒。
+ *
+ * 缓存在语义上是安全的，因为这**就是** point-in-time 视图的定义：
+ * 同一个 asOf、同样的参数，答案按契约必须相同。顺带还消掉了撕裂读 ——
+ * 采集进程正在往库里写，同一次渲染里前后两次问同一个问题本来可能拿到不同的行。
+ */
+describe("视图内记忆化", () => {
+  it("同参数重复调用返回相同内容", () => {
+    insDaily(t.db, "600183", "2026-08-03", 13);
+    insDaily(t.db, "600183", "2026-08-04", 14);
+    const v = createSqliteView(t.db, "2026-08-04");
+    expect(v.dailyBars("600183", 2)).toEqual(v.dailyBars("600183", 2));
+    expect(v.dailyBars("600183", 2)).toHaveLength(2);
+  });
+
+  it("同一个视图内看到的是同一份快照：建视图之后写进去的行不会中途冒出来", () => {
+    insDaily(t.db, "600183", "2026-08-03", 13);
+    const v = createSqliteView(t.db, "2026-08-04");
+    expect(v.dailyBars("600183", 5)).toHaveLength(1);
+    insDaily(t.db, "600183", "2026-08-04", 14);
+    // 渲染到一半突然多出一根 K 线，比"少一根"更难查：同一张页面上两个面板会各说各的
+    expect(v.dailyBars("600183", 5)).toHaveLength(1);
+  });
+
+  it("不同参数各自独立，不会把 n 小的答案当成 n 大的", () => {
+    insDaily(t.db, "600183", "2026-08-03", 13);
+    insDaily(t.db, "600183", "2026-08-04", 14);
+    const v = createSqliteView(t.db, "2026-08-04");
+    expect(v.dailyBars("600183", 1)).toHaveLength(1);
+    expect(v.dailyBars("600183", 2)).toHaveLength(2);
+    expect(v.dailyBars("600183", 1)).toHaveLength(1);
+  });
+
+  it("调用方改动拿到的数组，不会污染下一次调用", () => {
+    insDaily(t.db, "600183", "2026-08-03", 13);
+    insDaily(t.db, "600183", "2026-08-04", 14);
+    const v = createSqliteView(t.db, "2026-08-04");
+    const first = v.dailyBars("600183", 2);
+    first.reverse();
+    first.pop();
+    const second = v.dailyBars("600183", 2);
+    expect(second).toHaveLength(2);
+    expect(second[0].date).toBe("2026-08-03");
+  });
+
+  it("universe / quote 同样只问一次库", () => {
+    insSecurity(t.db, "600183", { listDate: "2020-01-01" });
+    insQuote(t.db, "600183", "2026-08-04 09:40:00.000", 13);
+    const v = createSqliteView(t.db, "2026-08-04 10:00:00");
+    expect(v.universe().map((s) => s.code)).toEqual(["600183"]);
+    insSecurity(t.db, "600999", { listDate: "2020-01-01" });
+    expect(v.universe().map((s) => s.code)).toEqual(["600183"]);
+
+    const q1 = v.quote("600183");
+    insQuote(t.db, "600183", "2026-08-04 09:50:00.000", 99);
+    expect(v.quote("600183")).toEqual(q1);
+  });
+});

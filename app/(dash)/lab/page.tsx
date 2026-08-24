@@ -8,7 +8,7 @@ import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
-import { calendarRange, strategies, tableCounts } from "@/lib/ui/queries";
+import { calendarRange, strategies, tableCountsCached } from "@/lib/ui/queries";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { SWEEP_MAX_POINTS } from "@/lib/ui/adapters/engines";
 
@@ -31,7 +31,8 @@ export default function LabPage() {
   const cfg = readStrategyConfig();
   const strats = strategies(db);
   const cal = calendarRange(db);
-  const counts = tableCounts(db);
+  // 见 settings 页：整轮 COUNT(*) 要几秒，而页面每 60 秒自刷
+  const { counts, at: countsAt } = tableCountsCached(db);
   const count = (t: string) => counts.find((c) => c.table === t)?.rows ?? -1;
 
   return (
@@ -168,7 +169,7 @@ export default function LabPage() {
           )}
         </Panel>
 
-        <Panel title="回测可用区间" hint="这些是真实数据，现在就能看">
+        <Panel title="回测可用区间" hint="这些是真实数据，现在就能看" right={`行数统计于 ${countsAt.slice(11, 19)}`}>
           <KV label="交易日历区间">
             {cal.from ?? "—"} → {cal.to ?? "—"}
           </KV>

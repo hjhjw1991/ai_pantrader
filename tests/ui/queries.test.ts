@@ -25,6 +25,7 @@ import {
   sourceHealth,
   strategies,
   tableCounts,
+  tableCountsCached,
   trades,
   unresolvedGaps,
   watchpool,
@@ -494,5 +495,59 @@ describe("源健康：挂钟串口径（线上真实形态）", () => {
     expect(sourceHealth(db4, SINCE).map((r) => r.source)).toEqual(
       ["eastmoney", "sina", "tencent"]
     );
+  });
+});
+
+/**
+ * 行数统计的缓存。
+ *
+ * COUNT(*) 在 SQLite 里没有 O(1) 写法：kline_daily 已经在扫最窄的那个索引
+ * （idx_kline_daily_date），5,750,482 行仍要 1.87s，quote_snapshot 7,133,734 行 0.69s，
+ * 22 张表一轮实测 4.4 秒。而 LiveBar 在根 layout 里每 60 秒 router.refresh() 一次，
+ * 设置页和回测实验室都显示这些数字 —— 于是只要开着那两个页面，就每分钟全扫 1300 万行。
+ *
+ * 所以缓存这件事必须显式：tableCounts 保持每次真数（导出/校验依赖它说实话），
+ * 页面改用 tableCountsCached 并把统计时刻一起显示出来 —— 屏幕上是几分钟前的数字没问题，
+ * 假装它是此刻的才有问题。
+ */
+describe("tableCountsCached", () => {
+  let d5: string, db5: Database.Database;
+  beforeAll(() => {
+    d5 = fs.mkdtempSync(path.join(os.tmpdir(), "pantrader-counts-"));
+    db5 = new Database(path.join(d5, "t.db"));
+    runMigrations(db5);
+  });
+  afterAll(() => { db5.close(); fs.rmSync(d5, { recursive: true, force: true }); });
+
+  const addSec = (code: string) =>
+    db5.prepare("INSERT INTO security (code, name, board) VALUES (?,?,?)").run(code, code, "主板");
+  const secCount = (r: { counts: Array<{ table: string; rows: number }> }) =>
+    r.counts.find((c) => c.table === "security")!.rows;
+
+  it("窗口内重复调用返回同一份，不重新数", () => {
+    addSec("600001");
+    const first = tableCountsCached(db5, 60_000, 1_000);
+    expect(secCount(first)).toBe(1);
+    addSec("600002");
+    const second = tableCountsCached(db5, 60_000, 30_000);
+    expect(secCount(second)).toBe(1);
+    expect(second.at).toBe(first.at);
+  });
+
+  it("过了窗口就重新数", () => {
+    const fresh = tableCountsCached(db5, 60_000, 120_000);
+    expect(secCount(fresh)).toBe(2);
+  });
+
+  it("带回统计时刻，页面要能显示这是什么时候数的", () => {
+    const r = tableCountsCached(db5, 60_000, 500_000);
+    expect(r.at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+  });
+
+  it("maxAgeMs=0 等于不缓存 —— 导出/校验那种场合必须每次真数", () => {
+    addSec("600003");
+    expect(secCount(tableCountsCached(db5, 0, 500_001))).toBe(3);
+    addSec("600004");
+    expect(secCount(tableCountsCached(db5, 0, 500_002))).toBe(4);
   });
 });
