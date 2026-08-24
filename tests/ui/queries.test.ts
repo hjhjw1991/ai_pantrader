@@ -360,3 +360,73 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
     expect(positions(db).find((x) => x.code === "601700")!.account).toBe("zw");
   });
 });
+
+
+/**
+ * latestQuoteTs 单独开一个库：本文件其它 describe 用的是共享库、逐条累积，
+ * 而"最新时间戳"这种全表聚合的断言一旦依赖前面测试插了什么，就变成顺序相关的假绿。
+ */
+describe("latestQuoteTs：最新快照时点", () => {
+  let d2: string, db2: Database.Database;
+  beforeAll(() => {
+    d2 = fs.mkdtempSync(path.join(os.tmpdir(), "pantrader-lqts-"));
+    db2 = new Database(path.join(d2, "t.db"));
+    runMigrations(db2);
+  });
+  afterAll(() => { db2.close(); fs.rmSync(d2, { recursive: true, force: true }); });
+
+  const put = (ts: string, code: string, price: number) =>
+    db2.prepare(
+      "INSERT INTO quote_snapshot (ts, code, price, pct, turnover, amplitude) VALUES (?,?,?,?,?,?)"
+    ).run(ts, code, price, 0, 0, 0);
+
+  it("空表返回 null，不返回空串", () => {
+    expect(latestQuoteTs(db2)).toBeNull();
+  });
+
+  /**
+   * 这条盯的是**性能塌方**，不只是取值对不对。
+   *
+   * 原实现是 `MAX(wall(ts))` —— 把列包进 CASE/strftime，主键 (ts, code) 的索引就用不上了。
+   * 实测生产库 7,133,734 行：包了是 1.54 秒全扫，裸 MAX(ts) 走索引是 0.015 秒，同一个答案。
+   * 而这个函数在根 layout 的 StatusRail、观察池页、持仓页都调，SSE 心跳还每 3 秒
+   * 对每个连着的标签页调一次 —— 于是点完"加入观察池"，router.refresh() 要 2.2~8.1 秒
+   * 才回，界面看起来就是"没刷新"。
+   *
+   * 所以全是挂钟串时必须走得到快路径；混合口径仍要退回归一比较保证取值正确。
+   */
+  it("全是挂钟串时取真正最新的那条", () => {
+    put("2026-08-03 09:35:00.000", "600519", 1400);
+    put("2026-08-03 15:05:00.000", "600519", 1450);
+    put("2026-08-03 14:00:00.000", "300613", 30);
+    expect(latestQuoteTs(db2)).toBe("2026-08-03 15:05:00.000");
+  });
+
+  it("混合口径：ISO 行更新时，归一成挂钟串再交出去", () => {
+    // 08-03T08:00Z = 挂钟 16:00，比上面的 15:05 新
+    put("2026-08-03T08:00:00Z", "600519", 1470);
+    expect(latestQuoteTs(db2)).toBe("2026-08-03 16:00:00.000");
+  });
+
+  it("挂钟最大值早于 08:00 时不敢走快路径 —— 那时 ISO 行可能更新", () => {
+    const d3 = fs.mkdtempSync(path.join(os.tmpdir(), "pantrader-lqts2-"));
+    const db3 = new Database(path.join(d3, "t.db"));
+    runMigrations(db3);
+    const q = db3.prepare(
+      "INSERT INTO quote_snapshot (ts, code, price, pct, turnover, amplitude) VALUES (?,?,?,?,?,?)"
+    );
+    // 挂钟 07:00（早于 08:00）；ISO 前一日 23:30Z = 挂钟当日 07:30，比它新，
+    // 但字符串序里 '2026-08-02T…' < '2026-08-03 …'，裸 MAX 会取错
+    q.run("2026-08-03 07:00:00.000", "600519", 1400, 0, 0, 0);
+    q.run("2026-08-02T23:30:00Z", "600519", 1410, 0, 0, 0);
+    expect(latestQuoteTs(db3)).toBe("2026-08-03 07:30:00.000");
+    db3.close();
+    fs.rmSync(d3, { recursive: true, force: true });
+  });
+
+  it("混合口径：ISO 行更旧时，不该把挂钟行顶掉", () => {
+    put("2026-08-04 09:40:00.000", "600519", 1480);
+    // 库里仍留着上一条 08-03T08:00Z（= 08-03 16:00），比 08-04 09:40 旧
+    expect(latestQuoteTs(db2)).toBe("2026-08-04 09:40:00.000");
+  });
+});

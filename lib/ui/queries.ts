@@ -179,7 +179,41 @@ export function sourceHealth(db: Db, sinceIso: string): SourceHealthRow[] {
 // ═══════════════════════════ 行情 ═══════════════════════════
 
 /** 快照最新时点。页面顶栏必须显示它 —— 用户要知道自己看的是几点的价 */
+/** 挂钟串的第 11 位是空格，ISO 串那一位是 'T'。用位置判定，不用正则扫全串 */
+function isWallClock(ts: string): boolean {
+  return ts.length >= 11 && ts[10] === " ";
+}
+
+/**
+ * 最新快照时点。
+ *
+ * 这个函数是全站最热的查询之一：根 layout 的 StatusRail 每次渲染调一次，
+ * 观察池页、持仓页各再调一次，SSE 心跳还每 3 秒对**每个连着的标签页**调一次。
+ * 所以它必须是索引查找，不能是全表扫描。
+ *
+ * 原实现写的是 `MAX(wall(ts))`。wall() 把列包进 CASE/strftime，主键 (ts, code)
+ * 的索引就用不上了 —— 生产库 7,133,734 行实测 **1.54 秒**，而裸 `MAX(ts)`
+ * 走索引末端查找是 **0.015 秒**，同一个答案。代价是页面渲染被拖到 2~8 秒，
+ * 表现出来是"点了加入观察池，列表半天不刷新"。
+ *
+ * 但裸 MAX 是字符串序，混合口径下字符串序 ≠ 时间序（migration 006 之前的行是
+ * UTC ISO，'T'(0x54) > ' '(0x20)）。所以快路径要有个**能证明的**成立条件：
+ *
+ *   设裸 MAX 取到的是挂钟串 M（日期 D、时刻 t）。若存在某条 ISO 行 L 比 M 更新，
+ *   则 L 的字符串必然 > M，否则 L 的 ISO 日期前缀 ≤ D-1；而 ISO 前缀 D-1 的行
+ *   换算成挂钟最晚是 D 的 07:59:59（UTC+8）。所以只要 t ≥ 08:00，就不存在这样的 L，
+ *   M 就是真正最新的那条。
+ *
+ * 快照只在 09:35–15:05 采集，t ≥ 08:00 恒成立，快路径永远命中。
+ * 条件不满足时（空表以外只可能是脏数据）如实退回归一比较，宁可慢也不给错时间。
+ */
 export function latestQuoteTs(db: Db): string | null {
+  const raw = (
+    db.prepare("SELECT MAX(ts) AS m FROM quote_snapshot").get() as { m: string | null }
+  ).m;
+  if (raw === null) return null;
+  if (isWallClock(raw) && raw.slice(11, 16) >= "08:00") return raw;
+
   const r = db
     .prepare(`SELECT MAX(${wall("ts")}) AS m FROM quote_snapshot`)
     .get() as { m: string | null };

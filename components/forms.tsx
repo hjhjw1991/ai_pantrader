@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, useTransition } from "react";
 
 /**
  * 所有写操作的表单。
@@ -18,6 +18,13 @@ const btnCls =
 
 function useSubmit() {
   const router = useRouter();
+  /**
+   * router.refresh() 是**不能 await** 的（返回 void），刷新完成的时刻只能靠
+   * useTransition 的 pending 拿到。不包这一层的话，写入成功的那一刻就会显示"已保存"，
+   * 而表格要等服务端重渲染完才更新 —— 中间这段时间界面没有任何进行中的迹象，
+   * 看起来就是"点了没反应/列表没刷新"，于是人会去重复提交。
+   */
+  const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
@@ -37,7 +44,7 @@ function useSubmit() {
         throw new Error(`${j?.error ?? `HTTP ${r.status}`}${detail}`);
       }
       setMsg({ kind: "ok", text: "已保存" });
-      router.refresh();
+      startTransition(() => router.refresh());
       return true;
     } catch (e) {
       setMsg({ kind: "err", text: (e as Error).message });
@@ -68,7 +75,7 @@ function useSubmit() {
       const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
       if (!r.ok) throw new Error(String(j?.error ?? `HTTP ${r.status}`));
       setMsg({ kind: "ok", text: String(j.note ?? "已完成") });
-      router.refresh();
+      startTransition(() => router.refresh());
       return j;
     } catch (e) {
       setMsg({ kind: "err", text: (e as Error).message });
@@ -78,10 +85,19 @@ function useSubmit() {
     }
   }
 
-  return { busy, msg, send, call };
+  // busy 把刷新也算进去：写入回来了但列表还没重画，此时按钮不该重新可点
+  return { busy: busy || pending, pending, msg, send, call };
 }
 
-function Msg({ msg }: { msg: { kind: "ok" | "err"; text: string } | null }) {
+function Msg({
+  msg,
+  pending = false,
+}: {
+  msg: { kind: "ok" | "err"; text: string } | null;
+  /** 服务端重渲染还在路上。写入已成功，但屏幕上的数据还是旧的 */
+  pending?: boolean;
+}) {
+  if (pending) return <span className="text-ink-3">刷新中…</span>;
   if (!msg) return null;
   return (
     <span className={msg.kind === "ok" ? "text-down" : "text-danger"}>{msg.text}</span>
@@ -91,7 +107,7 @@ function Msg({ msg }: { msg: { kind: "ok" | "err"; text: string } | null }) {
 // ─────────────────────────── 观察池 ───────────────────────────
 
 export function WatchpoolForm({ accountIds = [] }: { accountIds?: string[] }) {
-  const { busy, msg, send } = useSubmit();
+  const { busy, pending, msg, send } = useSubmit();
   const [f, setF] = useState({
     code: "",
     name: "",
@@ -183,7 +199,7 @@ export function WatchpoolForm({ accountIds = [] }: { accountIds?: string[] }) {
       <button className={btnCls} disabled={busy} type="submit">
         加入观察池
       </button>
-      <Msg msg={msg} />
+      <Msg msg={msg} pending={pending} />
     </form>
   );
 }
@@ -205,7 +221,7 @@ export function WatchpoolRemoveButton({ code }: { code: string }) {
 // ─────────────────────────── 手工成交回填 ───────────────────────────
 
 export function ManualFillForm({ accountIds }: { accountIds: string[] }) {
-  const { busy, msg, send } = useSubmit();
+  const { busy, pending, msg, send } = useSubmit();
   const [f, setF] = useState({
     accountId: accountIds[0] ?? "",
     code: "",
@@ -319,7 +335,7 @@ export function ManualFillForm({ accountIds }: { accountIds: string[] }) {
       <button className={btnCls} disabled={busy} type="submit">
         回填成交
       </button>
-      <Msg msg={msg} />
+      <Msg msg={msg} pending={pending} />
     </form>
   );
 }
@@ -327,7 +343,7 @@ export function ManualFillForm({ accountIds }: { accountIds: string[] }) {
 // ─────────────────────────── 账户 ───────────────────────────
 
 export function AccountForm() {
-  const { busy, msg, send } = useSubmit();
+  const { busy, pending, msg, send } = useSubmit();
   const [f, setF] = useState({ id: "", name: "", type: "" });
   return (
     <form
@@ -375,7 +391,7 @@ export function AccountForm() {
       <button className={btnCls} disabled={busy} type="submit">
         保存账户
       </button>
-      <Msg msg={msg} />
+      <Msg msg={msg} pending={pending} />
     </form>
   );
 }
@@ -396,7 +412,7 @@ export interface AccountManagerRow {
  * 界面写死一套规则、服务端另一套，早晚对不上。
  */
 export function AccountManager({ rows }: { rows: AccountManagerRow[] }) {
-  const { busy, msg, call } = useSubmit();
+  const { busy, pending, msg, call } = useSubmit();
   if (rows.length === 0) {
     return (
       <p className="text-ink-3 text-[12px]">
@@ -466,7 +482,7 @@ export function AccountManager({ rows }: { rows: AccountManagerRow[] }) {
           </tbody>
         </table>
       </div>
-      <Msg msg={msg} />
+      <Msg msg={msg} pending={pending} />
       <p className="text-ink-3 text-[11px]">
         有台账记录的账户只能停用：硬删会让那些持仓/成交行的 account_id 指向不存在的账户，
         持仓页显示不出归属、按账户分组的胜率统计凭空少一组，且没有任何提示。
@@ -502,7 +518,7 @@ export function StrategyManager({
   dirRel: string;
   undecided: boolean;
 }) {
-  const { busy, msg, call } = useSubmit();
+  const { busy, pending, msg, call } = useSubmit();
   const [newId, setNewId] = useState("");
   const [from, setFrom] = useState("");
 
@@ -616,7 +632,7 @@ export function StrategyManager({
         <button className={btnCls} disabled={busy || rows.length === 0} type="submit">
           新建策略
         </button>
-        <Msg msg={msg} />
+        <Msg msg={msg} pending={pending} />
       </form>
 
       <p className="text-ink-3 text-[11px]">
