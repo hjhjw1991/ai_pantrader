@@ -430,3 +430,69 @@ describe("latestQuoteTs：最新快照时点", () => {
     expect(latestQuoteTs(db2)).toBe("2026-08-04 09:40:00.000");
   });
 });
+
+
+/**
+ * 源健康：生产形态（挂钟串）下的行为。
+ *
+ * 上面那组"源健康聚合"喂的是 migration 006 之前的 UTC ISO 串，而线上写入侧
+ * 一律 shanghaiTs()、调用方（lib/ui/status.ts）传进来的 since 也是挂钟串 ——
+ * 两组口径都得跑得对，否则改查询时会有一组无人看守。
+ *
+ * 这组同时是性能改造的看守：sourceHealth 原来把 wall(ts) 写进三个相关子查询的
+ * WHERE 里，34 万行的表每次渲染扫三遍（实测 340ms，而它在根 layout 里）。
+ * 改成对裸列做范围扫之后，下面这些断言必须一字不变地还成立。
+ */
+describe("源健康：挂钟串口径（线上真实形态）", () => {
+  let d4: string, db4: Database.Database;
+  beforeAll(() => {
+    d4 = fs.mkdtempSync(path.join(os.tmpdir(), "pantrader-health-"));
+    db4 = new Database(path.join(d4, "t.db"));
+    runMigrations(db4);
+    const h = db4.prepare(
+      "INSERT INTO source_health (source, ts, ok, latency_ms, err) VALUES (?,?,?,?,?)"
+    );
+    // 窗口外（更早）：不该被计入 windowN，但仍可能是"最后一次"
+    h.run("tencent", "2026-08-01 09:00:00.000", 1, 50, null);
+    // 窗口内
+    h.run("sina", "2026-08-03 09:35:00.000", 1, 100, null);
+    h.run("sina", "2026-08-03 09:40:00.000", 0, 900, "timeout");
+    h.run("sina", "2026-08-03 09:45:00.000", 1, 300, null);
+    h.run("eastmoney", "2026-08-03 09:40:00.000", 1, 200, null);
+  });
+  afterAll(() => { db4.close(); fs.rmSync(d4, { recursive: true, force: true }); });
+
+  const SINCE = "2026-08-02 00:00:00.000";
+
+  it("每个源取最后一次的状态，不是窗口里随便一条", () => {
+    const sina = sourceHealth(db4, SINCE).find((r) => r.source === "sina")!;
+    expect(sina.lastTs).toBe("2026-08-03 09:45:00.000");
+    expect(sina.lastOk).toBe(true);
+    expect(sina.lastErr).toBeNull();
+    expect(sina.lastLatencyMs).toBe(300);
+  });
+
+  it("窗口成功率按窗口内全部样本算", () => {
+    const sina = sourceHealth(db4, SINCE).find((r) => r.source === "sina")!;
+    expect(sina.windowN).toBe(3);
+    expect(sina.windowOk).toBe(2);
+    expect(sina.okRate).toBeCloseTo(2 / 3, 10);
+    // 平均延迟只算成功的：把 timeout 的 900ms 混进来会掩盖真实延迟
+    expect(sina.avgLatencyMs).toBe(200);
+  });
+
+  it("最后一次在窗口之外的源仍要出现，但窗口统计是空的", () => {
+    const t = sourceHealth(db4, SINCE).find((r) => r.source === "tencent")!;
+    expect(t.lastTs).toBe("2026-08-01 09:00:00.000");
+    expect(t.windowN).toBe(0);
+    // 无样本时成功率是 null 而不是 0 —— 0 会被读成"全挂了"
+    expect(t.okRate).toBeNull();
+    expect(t.avgLatencyMs).toBeNull();
+  });
+
+  it("按源名升序，界面上的顺序不能每次刷新都变", () => {
+    expect(sourceHealth(db4, SINCE).map((r) => r.source)).toEqual(
+      ["eastmoney", "sina", "tencent"]
+    );
+  });
+});

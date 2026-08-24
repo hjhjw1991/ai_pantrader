@@ -140,22 +140,57 @@ export interface SourceHealthRow {
   avgLatencyMs: number | null;
 }
 
+/**
+ * 源健康：每个源的最后一次结果 + 最近窗口的成功率/延迟。
+ *
+ * 这个查询在根 layout 的 StatusRail 里，**每个页面每次渲染都跑一遍**，所以形状很要紧。
+ *
+ * 原来的写法把 `wall(ts)` 写进了三个相关子查询的 WHERE，再加一个对全表做
+ * ROW_NUMBER 的 CTE。wall() 把列包进 CASE/strftime，主键 (source, ts) 的索引就用不上，
+ * 34 万行的表每次渲染要扫四遍 —— 实测 340ms，是 latestQuoteTs 修好之后剩下的最大头。
+ *
+ * 现在每一步都吃得下索引：
+ *   last —— 每个源一次 MAX(ts)，索引末端查找；
+ *   窗口统计 —— 仍是相关子查询，但谓词是 `s.source = ? AND s.ts >= ?` 两个裸列，
+ *              正好是主键前缀 + 范围，每个源只扫自己那一天的行。
+ *              （子查询本身从来不是问题，问题一直是 wall() 把列包起来了。）
+ * 归一只留在**输出**上（每源一行，代价可忽略），界面拿到的仍是挂钟串。
+ *
+ * 代价说清楚：过滤与取最后一条现在用裸字符串序，因此要求 source_health 的 ts
+ * 口径一致。migration 006 之后写入侧一律 shanghaiTs()，实测这张表 344,123 行里
+ * 旧 ISO 行为 0、最早一行是 006 之后的 2026-08-03。调用方传进来的 since 必须与
+ * 库里同口径（lib/ui/status.ts 传的是 shanghaiTs()）—— 参数名保留 sinceIso 是历史，
+ * 实际语义是"与库同口径的时间戳串"。
+ */
 export function sourceHealth(db: Db, sinceIso: string): SourceHealthRow[] {
   const rows = db
     .prepare(
-      `WITH ranked AS (
-         SELECT source, ${wall("ts")} AS ts, ok, latency_ms, err,
-                ROW_NUMBER() OVER (PARTITION BY source ORDER BY ${wall("ts")} DESC) AS rn
-         FROM source_health
+      `WITH RECURSIVE
+       -- 源清单。SELECT DISTINCT source / GROUP BY source 都会让 SQLite 把整个
+       -- 主键索引扫一遍（实测 344k 行 ≈ 20ms，而这张表每天涨 1.6 万行，一年就是六百万，
+       -- 这个成本会随时间烂掉）。这里用跳跃扫描：每次只问"下一个比它大的 source 是谁"，
+       -- 每问一次是一趟索引查找，总代价跟**源的个数**走，不跟行数走。
+       srcs(source) AS (
+         SELECT MIN(source) FROM source_health
+         UNION ALL
+         SELECT (SELECT MIN(s.source) FROM source_health s WHERE s.source > srcs.source)
+         FROM srcs WHERE srcs.source IS NOT NULL
+       ),
+       last AS (
+         SELECT source, (SELECT MAX(s.ts) FROM source_health s WHERE s.source = srcs.source) AS ts
+         FROM srcs WHERE source IS NOT NULL
        )
-       SELECT r.source, r.ts, r.ok, r.latency_ms, r.err,
+       SELECT l.source, ${wall("h.ts")} AS ts, h.ok, h.latency_ms, h.err,
               (SELECT COUNT(*) FROM source_health s
-                WHERE s.source = r.source AND ${wall("s.ts")} >= ?) AS n_win,
+                WHERE s.source = l.source AND s.ts >= ?) AS n_win,
               (SELECT COALESCE(SUM(s.ok), 0) FROM source_health s
-                WHERE s.source = r.source AND ${wall("s.ts")} >= ?) AS ok_win,
+                WHERE s.source = l.source AND s.ts >= ?) AS ok_win,
+              -- 平均延迟只算成功的请求：把超时的耗时混进来会掩盖真实延迟
               (SELECT AVG(s.latency_ms) FROM source_health s
-                WHERE s.source = r.source AND ${wall("s.ts")} >= ? AND s.ok = 1) AS lat_win
-       FROM ranked r WHERE r.rn = 1 ORDER BY r.source`
+                WHERE s.source = l.source AND s.ts >= ? AND s.ok = 1) AS lat_win
+       FROM last l
+       JOIN source_health h ON h.source = l.source AND h.ts = l.ts
+       ORDER BY l.source`
     )
     .all(sinceIso, sinceIso, sinceIso) as Array<Record<string, unknown>>;
 
