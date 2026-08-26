@@ -170,7 +170,31 @@ function decisionsFrom(
   return out;
 }
 
-export function runBacktest(o: RunBacktestOptions): ReplayOutcome {
+/** 回放进度。一天一条，够画进度条也够显示"跑到哪一天了" */
+export interface ReplayProgress {
+  /** 已回放完的交易日数（含被跳过的缺口日，进度条要单调递增） */
+  done: number;
+  total: number;
+  /** 刚跑完的那个交易日 */
+  date: string;
+}
+
+/**
+ * 回放的**唯一**实现，写成 generator：每跑完一个交易日 yield 一次进度。
+ *
+ * 为什么是 generator 而不是"同步版 + 异步版两份"：这段循环有十几个跨天累积的局部状态
+ * （现金、持仓、待执行决策、跳过日…），复制一份必然漂移，而漂移的那一份只在少用的
+ * 那个入口上错 —— 回测算错的表现是一条看起来很正常的净值曲线，最难发现。
+ *
+ * 两个驱动器共用它：
+ *   runBacktest       —— 一路 next() 到底，行为与从前完全一致（sweep / walkforward / 测试都走这条）
+ *   runBacktestAsync  —— 每天让出一次事件循环，顺便报进度、查取消
+ *
+ * 让出事件循环这件事不是锦上添花：实测 0.38 秒/交易日，四年约 968 天 ≈ 6 分钟，
+ * 而 Node 是单线程的 —— 同步跑满 6 分钟意味着这 6 分钟里整个网站（包括所有页面和
+ * SSE 心跳）全部冻住。
+ */
+export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, ReplayOutcome> {
   const c = o.constraints ?? DEFAULT_CONSTRAINTS;
   const fillOpts = o.fill ?? DEFAULT_FILL_OPTIONS;
   const phase: Phase = o.phase ?? "盘后";
@@ -200,6 +224,8 @@ export function runBacktest(o: RunBacktestOptions): ReplayOutcome {
       skippedDays.push(date);
       droppedDecisions += pending.length;
       pending = [];
+      // 缺口日也报进度：连着几个缺口日不报，进度条会停住，看起来像卡死了
+      yield { done: replayedDays.length + skippedDays.length, total: calendar.length, date };
       continue;
     }
     const view = probe;
@@ -317,6 +343,8 @@ export function runBacktest(o: RunBacktestOptions): ReplayOutcome {
       })),
     });
     pending = decisionsFrom([...card.holdings, ...card.candidates], view, date, positions, total, blocked);
+
+    yield { done: replayedDays.length + skippedDays.length, total: calendar.length, date };
   }
 
   const unexecutedDecisions = pending.length;
@@ -371,4 +399,66 @@ export function runBacktest(o: RunBacktestOptions): ReplayOutcome {
       generatedAt: o.generatedAt ?? null,
     },
   };
+}
+
+/**
+ * 同步驱动器。一路 next() 到底，行为与改成 generator 之前逐字节一致。
+ * sweep / walkforward / 全部现有测试都走这条，签名没动。
+ */
+export function runBacktest(o: RunBacktestOptions): ReplayOutcome {
+  const it = replaySteps(o);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+
+export interface AsyncReplayOptions {
+  onProgress?: (p: ReplayProgress) => void;
+  /** 取消信号。中断只发生在两个交易日之间，不会留下跑了一半的当日状态 */
+  signal?: { aborted: boolean };
+  /**
+   * 每多少个交易日让出一次事件循环。
+   *
+   * 默认 1（每天让一次）：单日实测约 0.38 秒，这已经是 Node 单线程能给出的最细粒度 ——
+   * 其它请求最多排队等这么久。调大只会让页面更卡，唯一的收益是省下 setImmediate 的开销，
+   * 而那点开销相对 0.38 秒可以忽略。
+   */
+  yieldEvery?: number;
+}
+
+/** 回测被取消时抛这个，调用方据此区分"用户取消"和"真的出错了" */
+export class ReplayAborted extends Error {
+  constructor(public readonly done: number, public readonly total: number) {
+    super(`回测已取消（已回放 ${done}/${total} 个交易日）`);
+    this.name = "ReplayAborted";
+  }
+}
+
+/**
+ * 异步驱动器：每天让出一次事件循环，报进度，并在两天之间检查取消。
+ *
+ * 让出用 setImmediate 而不是 await Promise.resolve()：后者是微任务，
+ * 排在同一轮事件循环里，I/O 回调根本轮不上 —— 页面照样冻住，只是多了层看起来在让的假象。
+ */
+export async function runBacktestAsync(
+  o: RunBacktestOptions,
+  a: AsyncReplayOptions = {}
+): Promise<ReplayOutcome> {
+  const every = Math.max(1, a.yieldEvery ?? 1);
+  const it = replaySteps(o);
+  let n = 0;
+  let last: ReplayProgress | null = null;
+
+  for (;;) {
+    if (a.signal?.aborted) {
+      // 让 generator 跑完 finally（当前没有，但以后加了资源清理就靠这一步）
+      it.return(undefined as never);
+      throw new ReplayAborted(last?.done ?? 0, last?.total ?? 0);
+    }
+    const r = it.next();
+    if (r.done) return r.value;
+    last = r.value;
+    a.onProgress?.(r.value);
+    if (++n % every === 0) await new Promise<void>(res => setImmediate(res));
+  }
 }

@@ -1,7 +1,8 @@
-import { err, ok, parseBody, withDb } from "@/lib/ui/api";
+import { err, ok, parseBody } from "@/lib/ui/api";
 import { BacktestRunSchema } from "@/lib/ui/validate";
-import { runBacktest } from "@/lib/ui/adapters/engines";
+import { runBacktestAsync, ReplayAborted } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
+import { openRead } from "@/lib/ui/db";
 import { shanghaiTs } from "@/lib/ui/time";
 
 export const dynamic = "force-dynamic";
@@ -16,10 +17,22 @@ export function GET() {
 }
 
 /**
- * 跑回测。
+ * 同一时刻只允许一个回测在跑。
  *
- * 失败时返回 503 + 原因，**不返回部分结果**：一条不完整的净值曲线会被当成
- * 策略成绩读，而策略成绩决定投多少钱。
+ * 不是"防手滑"，是硬约束：实测 0.38 秒/交易日，四年跨度约 6 分钟，而 Node 单线程。
+ * 两个回测并行不会各自快一点，只会互相把 CPU 切碎、一起变慢，
+ * 同时把整个网站拖到更卡。跨进程不设防 —— 这是本机单进程应用，模块级标志够用。
+ */
+let inFlight: { startedAt: number; range: string; abort: { aborted: boolean } } | null = null;
+
+/**
+ * 跑回测，流式返回进度。
+ *
+ * 为什么是流：四年跨度 6 分钟。一个憋 6 分钟才回话的请求，用户无法判断它是在跑
+ * 还是已经挂了，也没有任何办法叫停。
+ *
+ * 失败时**不返回部分结果**：一条不完整的净值曲线会被当成策略成绩读，
+ * 而策略成绩决定投多少钱。
  *
  * A股约束不开放给请求参数：T+1 / 涨停买不进 / 跌停卖不出 / 停牌不成交 / 滑点 / 费率
  * 一律用回测层默认值。关掉任何一条都会让回测虚高。
@@ -32,17 +45,72 @@ export async function POST(req: Request) {
   const cfg = readStrategyConfig();
   if (!cfg.available) return err(503, cfg.reason, { needs: cfg.needs, issues: cfg.issues });
 
-  return withDb((db) => {
-    // generatedAt 由这里注入：重放路径内不许出现 Date.now()，否则同份输入两次跑出
-    // 的报告哈希不一致（spec §17 断言 4）
-    const r = runBacktest(db, {
-      from: b.value.from,
-      to: b.value.to,
-      config: cfg.config,
-      initialCash: b.value.initialCash,
-      generatedAt: shanghaiTs(),
-    });
-    if (!r.available) return err(503, r.reason, { needs: r.needs });
-    return ok({ report: r.report });
+  if (inFlight !== null) {
+    const sec = Math.round((Date.now() - inFlight.startedAt) / 1000);
+    return err(
+      409,
+      `已有一个回测在跑（${inFlight.range}，已跑 ${sec} 秒）。先取消它，或等它跑完。`
+    );
+  }
+
+  const r = openRead();
+  if (!r.ok) {
+    return r.why.kind === "missing"
+      ? err(503, `数据库不存在：${r.why.path}`)
+      : err(503, `数据库打不开（文件存在）：${r.why.path} —— ${r.why.detail}`);
+  }
+  const db = r.db;
+
+  const abort = { aborted: false };
+  inFlight = { startedAt: Date.now(), range: `${b.value.from} → ${b.value.to}`, abort };
+
+  // 客户端断开（点了取消 / 关了页面）就停：跑一个没人要的 6 分钟回测，
+  // 既白烧 CPU，又让下一个真要跑的人卡在 409 上
+  req.signal.addEventListener("abort", () => { abort.aborted = true; });
+
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const line = (o: unknown) => {
+        try { controller.enqueue(enc.encode(JSON.stringify(o) + "\n")); }
+        catch { abort.aborted = true; }   // 写不进去说明对面走了，没必要接着跑
+      };
+      try {
+        line({ phase: "start", from: b.value.from, to: b.value.to });
+        // generatedAt 由这里注入：重放路径内不许出现 Date.now()，否则同份输入两次跑出
+        // 的报告哈希不一致（spec §17 断言 4）
+        const out = await runBacktestAsync(db, {
+          from: b.value.from,
+          to: b.value.to,
+          config: cfg.config,
+          initialCash: b.value.initialCash,
+          generatedAt: shanghaiTs(),
+        }, {
+          signal: abort,
+          onProgress: p => line({ phase: "day", done: p.done, total: p.total, date: p.date }),
+        });
+        if (!out.available) line({ phase: "error", ok: false, reason: out.reason, needs: out.needs });
+        else line({ phase: "done", ok: true, report: out.report });
+      } catch (e) {
+        // 取消不是错误：报成失败会让用户以为是自己的策略配置有问题
+        if (e instanceof ReplayAborted) line({ phase: "aborted", ok: false, reason: e.message });
+        else line({ phase: "error", ok: false, reason: (e as Error).message });
+      } finally {
+        inFlight = null;
+        try { controller.close(); } catch { /* 已关闭 */ }
+      }
+    },
+    cancel() {
+      // 浏览器侧 AbortController 触发的取消也走同一条路
+      abort.aborted = true;
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Accel-Buffering": "no",
+    },
   });
 }

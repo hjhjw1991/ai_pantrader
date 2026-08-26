@@ -6,6 +6,7 @@ import { createSqliteView, universeQuality, type UniverseQuality } from "@/lib/p
 import { createStrategyEngine } from "@/lib/strategy/engine";
 import { defaultRegistry } from "@/lib/factors";
 import { runBacktest as replay } from "@/lib/backtest";
+import { runBacktestAsync as replayAsync, ReplayAborted, type ReplayProgress } from "@/lib/backtest/replay";
 import { gridPoints, heatmap, optimize, type ParamGrid } from "@/lib/backtest/optimizer";
 import { canonicalJson } from "@/lib/backtest/hash";
 import { overrideConfigParams } from "@/lib/ui/adapters/strategy";
@@ -74,6 +75,44 @@ export function todaySignalCard(
     return unavailable(
       `信号引擎执行失败：${(e as Error).message}`,
       "多半是当日截面数据缺失（zt_pool / sector_rank / macro）或视图越界。缺口明细见设置页；此处不显示部分结果 —— 半份候选池比空白危险"
+    );
+  }
+}
+
+export { ReplayAborted, type ReplayProgress };
+
+/**
+ * 异步版回测。与 runBacktest 同一段回放实现（generator 的两个驱动器），
+ * 区别只是每个交易日让出一次事件循环，顺便报进度、收取消。
+ *
+ * 页面上的回测必须走这条：实测 0.38 秒/交易日，四年约 968 个交易日 ≈ 6 分钟，
+ * 而 Node 是单线程 —— 同步跑意味着这 6 分钟里整个网站冻住。
+ *
+ * 取消不吞：ReplayAborted 原样抛出去，调用方要能把"用户主动取消"和"回测出错"
+ * 分开报 —— 把取消报成失败，用户会以为是自己的策略配置有问题。
+ */
+export async function runBacktestAsync(
+  db: Db,
+  i: BacktestRunInput,
+  a: { onProgress?: (p: ReplayProgress) => void; signal?: { aborted: boolean } } = {}
+): Promise<Avail<{ report: BacktestReport }>> {
+  try {
+    const out = await replayAsync({
+      from: i.from,
+      to: i.to,
+      viewFactory: (asOf: string) => createSqliteView(db, asOf),
+      strategy: engine,
+      config: i.config,
+      initialCash: i.initialCash,
+      ...(i.constraints ? { constraints: i.constraints } : {}),
+      generatedAt: i.generatedAt,
+    }, a);
+    return { available: true, report: out.report };
+  } catch (e) {
+    if (e instanceof ReplayAborted) throw e;
+    return unavailable(
+      `回测失败：${(e as Error).message}`,
+      "不返回部分净值曲线 —— 一条不完整的净值曲线会被当成策略成绩读"
     );
   }
 }

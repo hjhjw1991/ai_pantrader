@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { BacktestReport } from "@/lib/contracts/backtest";
 import { BacktestReportView } from "@/components/BacktestReportView";
 import { DateInput } from "@/components/DateInput";
@@ -27,6 +27,13 @@ export function LabRunner({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
+  /** 回放进度。total=0 表示还没收到第一天 */
+  const [prog, setProg] = useState<{ done: number; total: number; date: string }>(
+    { done: 0, total: 0, date: "" }
+  );
+  const startedAt = useRef(0);
+  // 取消靠中断请求：服务端收到 abort 就在下一个交易日之间停手，不会留下跑一半的报告
+  const abortRef = useRef<AbortController | null>(null);
 
   const inputCls = "num bg-panel-2 border border-line-2 rounded-sm px-2 py-1 text-ink";
 
@@ -36,21 +43,66 @@ export function LabRunner({
         className="flex flex-wrap items-end gap-2"
         onSubmit={async (e) => {
           e.preventDefault();
+          // 已有一个在跑就不开新的。服务端也挡（409），这里挡是为了不白发一次请求
+          if (abortRef.current !== null) return;
+          const ac = new AbortController();
+          abortRef.current = ac;
+          startedAt.current = Date.now();
           setBusy(true);
           setErr(null);
           setReport(null);
+          setProg({ done: 0, total: 0, date: "" });
           try {
             const r = await fetch("/api/backtest", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ strategyId, from, to, initialCash: Number(cash) }),
+              signal: ac.signal,
             });
-            const j = await r.json().catch(() => ({}));
-            if (!r.ok) throw new Error(j?.error ?? `HTTP ${r.status}`);
-            setReport(j.report as BacktestReport);
+
+            // 参数不合法 / 已有回测在跑 / 策略配置不可用：这些在开跑之前就返回，是普通 JSON
+            if (!r.headers.get("content-type")?.includes("ndjson")) {
+              const j = await r.json().catch(() => ({}));
+              throw new Error(j?.error ?? `HTTP ${r.status}`);
+            }
+            if (r.body === null) throw new Error("服务端没有返回可读流");
+
+            const reader = r.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            let last: Record<string, unknown> | null = null;
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              // 半行留着等下一个 chunk：切完的最后一段可能是残缺 JSON
+              buf = lines.pop() ?? "";
+              for (const ln of lines) {
+                if (ln.trim() === "") continue;
+                let ev: Record<string, unknown>;
+                try { ev = JSON.parse(ln); } catch { continue; }
+                last = ev;
+                if (ev.phase === "day") {
+                  setProg({
+                    done: Number(ev.done ?? 0),
+                    total: Number(ev.total ?? 0),
+                    date: String(ev.date ?? ""),
+                  });
+                }
+              }
+            }
+
+            // 结论只能从消息体里读：流式响应的状态码在第一个字节就定死了
+            if (last?.phase === "done") setReport(last.report as BacktestReport);
+            else if (last?.phase === "aborted") setErr(String(last.reason ?? "已取消"));
+            else throw new Error(String(last?.reason ?? "回测中断，未收到结束消息"));
           } catch (e2) {
-            setErr((e2 as Error).message);
+            // 自己点的取消不算错误
+            if ((e2 as Error).name === "AbortError") setErr("已取消");
+            else setErr((e2 as Error).message);
           } finally {
+            abortRef.current = null;
             setBusy(false);
           }
         }}
@@ -111,10 +163,70 @@ export function LabRunner({
         >
           {busy ? "回放中…" : "开始回测"}
         </button>
+        {busy ? (
+          <button
+            type="button"
+            onClick={() => abortRef.current?.abort()}
+            className="border border-danger/60 rounded-sm px-3 py-1 text-danger hover:bg-danger/10"
+          >
+            取消
+          </button>
+        ) : null}
         {err ? <span className="text-danger">{err}</span> : null}
       </form>
 
+      <BacktestProgress busy={busy} prog={prog} startedAt={startedAt.current} />
+
       {report ? <BacktestReportView report={report} /> : null}
+    </div>
+  );
+}
+
+/**
+ * 回测进度条。
+ *
+ * 显示剩余时间而不只是百分比：四年跨度实测约 6 分钟，人要的是"还要等多久"，
+ * 而不是"32%"。估算用**已跑出来的实际速度**外推，不用写死的每日耗时 ——
+ * 每日耗时取决于机器和标的池大小，写死的数字换台机器就开始撒谎。
+ *
+ * 头几天不给估算：样本太少时外推出来的剩余时间会剧烈跳动，
+ * 一会儿 2 分钟一会儿 20 分钟，比不显示更让人烦躁。
+ */
+function BacktestProgress({
+  busy,
+  prog,
+  startedAt,
+}: {
+  busy: boolean;
+  prog: { done: number; total: number; date: string };
+  startedAt: number;
+}) {
+  if (!busy) return null;
+
+  const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : null;
+  const elapsedMs = startedAt > 0 ? Date.now() - startedAt : 0;
+  const perDay = prog.done > 0 ? elapsedMs / prog.done : 0;
+  const leftSec = prog.done >= 5 && prog.total > 0
+    ? Math.round((perDay * (prog.total - prog.done)) / 1000)
+    : null;
+  const fmtLeft = (s: number) =>
+    s >= 60 ? `约 ${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒` : `约 ${s} 秒`;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="h-1 w-full rounded-sm bg-panel-2 overflow-hidden">
+        <div
+          className={pct === null ? "h-full w-1/4 bg-info animate-pulse" : "h-full bg-info"}
+          style={pct === null ? undefined : { width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-ink-3 text-[11px] num">
+        {pct === null
+          ? "正在取交易日历…"
+          : `回放 ${prog.done}/${prog.total} 个交易日（${pct}%）`
+            + (prog.date ? ` · 当前 ${prog.date}` : "")
+            + (leftSec !== null ? ` · 预计还需${fmtLeft(leftSec)}` : "")}
+      </span>
     </div>
   );
 }
