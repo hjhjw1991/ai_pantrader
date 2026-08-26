@@ -3,6 +3,7 @@ import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { DailyChart } from "@/components/DailyChart";
+import { CandidateScanButton } from "@/components/CollectScan";
 import { readDb, dbUnavailable } from "@/lib/ui/db";
 import { fmtAmount, fmtPct, fmtTs, dirClass } from "@/lib/ui/format";
 import { ztStats, unavailable } from "@/lib/ui/derive";
@@ -25,6 +26,7 @@ import {
 import { positionsView } from "@/lib/ui/views";
 import { shanghaiParts } from "@/lib/ui/status";
 import { shanghaiTs } from "@/lib/ui/time";
+import { intradayIntervalMin } from "@/lib/data/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +44,8 @@ export default function TodayPage() {
   const now = new Date();
   const today = shanghaiParts(now).date;
   const tradeDay = lastTradingDay(db, today);
+  // 候选池的变化节奏 = 采集轮次，从时刻表推出来
+  const scanMin = intradayIntervalMin();
   const cfg = readStrategyConfig();
   // asOf 显式传入：因子层禁用 Date.now，同一次渲染里所有因子必须看到同一个"现在"
   const card = cfg.available
@@ -115,10 +119,25 @@ export default function TodayPage() {
       {card.available ? <CardWarnings card={card.card} /> : null}
 
       {/* ── 候选池 ── */}
+      {/*
+        hint 里的节奏取自时刻表（intradayIntervalMin），不是手打的"5 分钟"：
+        候选池是渲染时现算的，真正让它变化的是采集轮次 ——
+        时刻表改成 1 分钟一轮，这句话必须跟着变，否则界面在说一个不成立的节奏。
+      */}
       <Panel
         title="候选池"
-        hint="策略引擎的当日买入候选。到触发价才动手，不是市价追"
-        right={card.available ? `${card.phase} · asOf ${fmtTs(card.asOf)}` : "不可用"}
+        hint={
+          `策略引擎的当日买入候选，每次打开/刷新页面现算。到触发价才动手，不是市价追。`
+          + `最快 ${scanMin} 分钟变一次 —— 采集${scanMin}分钟一轮，两轮之间行情没变，重算结果相同`
+        }
+        right={
+          <span className="flex items-start gap-2">
+            <span className="pt-0.5">
+              {card.available ? `${card.phase} · asOf ${fmtTs(card.asOf)}` : "不可用"}
+            </span>
+            <CandidateScanButton intervalMin={scanMin} />
+          </span>
+        }
       >
         {!card.available ? (
           <EmptyState u={card} />

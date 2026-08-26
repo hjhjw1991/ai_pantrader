@@ -64,6 +64,27 @@ export function intradaySlots(): string[] {
   return out;
 }
 
+/**
+ * 盘中采集的轮次间隔（分钟），**从时刻表推出来**。
+ *
+ * 界面上要告诉用户"候选池多久变一次"。那个数字不能手打：作战台的候选池是渲染时
+ * 现算的，真正让它变化的是采集轮次，所以时刻表一改、界面上那句话必须跟着改。
+ * 手打的常数不会跟着改，于是界面会一直说一个已经不成立的节奏 —— 比不说更糟。
+ *
+ * 取**最小**相邻间隔而不是平均：时点里夹着午休那段 90 分钟的空档，
+ * 平均会被它拉成十几分钟，而实际节奏是 5 分钟。
+ */
+export function intradayIntervalMin(): number {
+  const slots = SCHEDULE.find(j => j.job === "intraday")?.slots ?? [];
+  if (slots.length < 2) return 0;
+  let min = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < slots.length; i++) {
+    const gap = hmToMinutes(slots[i]) - hmToMinutes(slots[i - 1]);
+    if (gap > 0 && gap < min) min = gap;
+  }
+  return Number.isFinite(min) ? min : 0;
+}
+
 export const SCHEDULE: JobSlot[] = [
   // 自检是对一个日期区间出报告，今天跑一次就把暗日一并算进去了
   { job: "selfcheck", slots: ["08:50"], catchUp: "all", backfillsAcrossDays: true,

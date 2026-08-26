@@ -17,6 +17,21 @@ export interface JobDeps {
   db: Db;
   clients: { sina: SourceClient; tencent: SourceClient; eastmoney: SourceClient };
   now: Date;
+  /**
+   * 批次级进度回调，可选。只有手动采集（页面按钮）会传 ——
+   * 一轮全市场约 45 秒，不报进度用户只能盯着转圈猜是不是卡死了。
+   * 定时任务不传：没人看着，回调只是白开销。
+   */
+  onProgress?: (p: JobProgress) => void;
+}
+
+/** 进度事件。phase 是当前在做哪一步，done/total 是该步的批次进度 */
+export interface JobProgress {
+  phase: "snapshot" | "minute";
+  done: number;
+  total: number;
+  written: number;
+  failedBatches: number;
 }
 
 export interface JobResult {
@@ -124,7 +139,7 @@ export function jobOutcome(
 
 export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   if (!KNOWN.includes(name)) throw new Error(`unknown job: ${name}`);
-  const { db, clients, now } = deps;
+  const { db, clients, now, onProgress } = deps;
   const date = shanghaiDate(now);
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
@@ -171,7 +186,8 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
 
   switch (name) {
     case "intraday": {
-      const snap = await collectMarketSnapshot(db, clients.tencent, allCodes(db));
+      const snap = await collectMarketSnapshot(db, clients.tencent, allCodes(db),
+        onProgress === undefined ? undefined : p => onProgress({ phase: "snapshot", ...p }));
       stats.snapshotWritten = snap.written;
       stats.snapshotFailedBatches = snap.failedBatches;
       const wc = watchCodes(db);

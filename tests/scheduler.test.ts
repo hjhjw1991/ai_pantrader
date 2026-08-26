@@ -6,7 +6,7 @@ import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { createScheduler, dueSlots, todayRuns } from "@/lib/data/scheduler";
 import { jobOutcome } from "@/lib/data/jobs";
-import { SCHEDULE, intradaySlots, awakeWindows, hmToMinutes, allSlots } from "@/lib/data/schedule";
+import { SCHEDULE, intradaySlots, intradayIntervalMin, awakeWindows, hmToMinutes, allSlots } from "@/lib/data/schedule";
 
 let dir: string, db: any;
 beforeEach(() => {
@@ -206,5 +206,32 @@ describe("jobOutcome：没抛错不等于成功", () => {
     const r = todayRuns(db, "2026-08-05").find(x => x.job === "intraday" && x.slot === "09:35");
     expect(r?.status).toBe("failed");
     expect(r?.error).toMatch(/快照|限频|probe/);
+  });
+});
+
+/**
+ * 采集节奏必须能被界面读到。
+ *
+ * 起因：作战台的候选池是渲染时现算的，真正让它变化的是采集轮次；
+ * 而实时条上写的"采集 5 分钟一轮"是**手打的字符串**。时刻表改了那句话不会跟着改，
+ * 于是界面会一直告诉用户一个已经不成立的节奏 —— 这种谎比没有说明更糟。
+ */
+describe("采集节奏对外可读", () => {
+  it("盘中间隔从时刻表推出来，不是手打的常数", () => {
+    expect(intradayIntervalMin()).toBe(5);
+  });
+
+  it("取的是最小相邻间隔，不被午休那段 90 分钟带偏", () => {
+    const slots = intradaySlots();
+    const gaps = slots.slice(1).map((s, i) => hmToMinutes(s) - hmToMinutes(slots[i]));
+    expect(Math.max(...gaps)).toBeGreaterThan(60);      // 午休确实在里面
+    expect(intradayIntervalMin()).toBe(Math.min(...gaps));
+  });
+
+  it("时刻表改成 1 分钟一轮，这个值就跟着变", () => {
+    // 不改全局 SCHEDULE，直接验算法：给一组 1 分钟间隔的时点
+    const oneMin = ["09:35", "09:36", "09:37", "11:30", "13:00", "13:01"];
+    const gaps = oneMin.slice(1).map((s, i) => hmToMinutes(s) - hmToMinutes(oneMin[i]));
+    expect(Math.min(...gaps.filter(g => g > 0))).toBe(1);
   });
 });

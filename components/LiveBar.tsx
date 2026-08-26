@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { intradayIntervalMin } from "@/lib/data/schedule";
+import { useCollectScan, CollectProgress } from "@/components/CollectScan";
 
 /**
  * 实时条：1 分钟自动刷新 + SSE 推送 + 桌面通知 + 立即采集按钮。
@@ -17,6 +19,8 @@ import { useRouter } from "next/navigation";
  */
 
 const REFRESH_MS = 60_000;
+/** 采集节奏取自时刻表，不手打 —— 时刻表改了这行字必须跟着改 */
+const SCAN_MIN = intradayIntervalMin();
 
 type Notice = {
   id: number; ts: string; kind: string;
@@ -29,7 +33,6 @@ export function LiveBar() {
   const [live, setLive] = useState(false);
   const [lastEvent, setLastEvent] = useState<string | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
-  const [collecting, setCollecting] = useState(false);
   const [collectMsg, setCollectMsg] = useState<string | null>(null);
   const [notifyOn, setNotifyOn] = useState(false);
   const lastIdRef = useRef(0);
@@ -85,23 +88,9 @@ export function LiveBar() {
     if (p !== "granted") setCollectMsg("桌面通知未授权，关键信号只会显示在页面上");
   }, []);
 
-  const collectNow = useCallback(async () => {
-    setCollecting(true);
-    setCollectMsg(null);
-    try {
-      const r = await fetch("/api/collect", { method: "POST" });
-      const j = await r.json();
-      setCollectMsg(j.ok
-        ? `采集完成：快照 ${j.stats?.snapshotWritten ?? 0} 条` +
-          `${j.stats?.snapshotFailedBatches ? `，失败批次 ${j.stats.snapshotFailedBatches}` : ""}`
-        : j.reason ?? "采集失败");
-      router.refresh();
-    } catch (e: any) {
-      setCollectMsg(`采集请求失败：${String(e?.message ?? e)}`);
-    } finally {
-      setCollecting(false);
-    }
-  }, [router]);
+  // 采集逻辑与候选池那个按钮共用一份：/api/collect 现在是 NDJSON 流，
+  // 两处各写一遍解析必然漂移，而漂移的那一份只在少用的入口上炸
+  const scan = useCollectScan();
 
   const btn = "border border-line-2 rounded-sm px-2 py-0.5 text-[11px] hover:bg-panel-2 disabled:opacity-50";
 
@@ -115,11 +104,13 @@ export function LiveBar() {
           />
           {live ? "实时推送已连接" : "推送未连接（页面仍每分钟刷新）"}
         </span>
-        <span>页面 1 分钟自刷 · 采集 5 分钟一轮</span>
+        <span>页面 1 分钟自刷 · 采集 {SCAN_MIN} 分钟一轮</span>
         {lastEvent ? <span>最新快照 {lastEvent.slice(11, 19)}</span> : null}
 
-        <button className={btn} disabled={collecting} onClick={collectNow} type="button">
-          {collecting ? "采集中…（约 45 秒）" : "立即采集"}
+        <button className={btn} disabled={scan.busy} onClick={scan.run} type="button">
+          {scan.busy
+            ? (scan.total > 0 ? `采集中 ${scan.done}/${scan.total} 批` : "采集中…")
+            : "立即采集"}
         </button>
         {!notifyOn ? (
           <button className={btn} onClick={enableNotify} type="button">
@@ -129,6 +120,7 @@ export function LiveBar() {
           <span className="text-down">桌面通知已开</span>
         )}
         {collectMsg ? <span className="text-ink-2">{collectMsg}</span> : null}
+        <span className="w-56"><CollectProgress s={scan} /></span>
       </div>
 
       {notices.length > 0 ? (

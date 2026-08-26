@@ -50,6 +50,35 @@ export async function POST(): Promise<Response> {
   }
 
   inFlight = true;
+  // 流式 NDJSON：一轮 45 秒，等它整个跑完再回一个 JSON，用户中间只能盯着转圈。
+  // 每批推一行，前端边读边画。守卫失败（429）仍走普通 JSON —— 那时还没开始跑。
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const line = (o: unknown) => {
+        try { controller.enqueue(enc.encode(JSON.stringify(o) + "\n")); }
+        catch { /* 客户端断开：不影响采集继续跑完，数据仍然入库 */ }
+      };
+      await runCollect(line);
+      try { controller.close(); } catch { /* 已关闭 */ }
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      // 关掉中间层缓冲，否则进度会攒到最后一起吐出来
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+/**
+ * 真正干活的那段。把结果**逐行**交给 line()，最后一行一定是 phase:"done" 或 "error"，
+ * 前端靠它判断成败 —— 流式响应的 HTTP 状态码在第一个字节就定死了，
+ * 中途失败没法改状态码，所以成败必须写在消息体里。
+ */
+async function runCollect(line: (o: unknown) => void): Promise<void> {
   const db = openDb(getConfig().dbPath);
   try {
     runMigrations(db);
@@ -68,7 +97,12 @@ export async function POST(): Promise<Response> {
     ).run(ts.slice(0, 10), slot, ts);
 
     try {
-      const result = await runJob("intraday", { db, clients, now: at });
+      line({ phase: "start", slot, at: ts });
+      const result = await runJob("intraday", {
+        db, clients, now: at,
+        onProgress: p => line({ phase: p.phase, done: p.done, total: p.total,
+                                written: p.written, failedBatches: p.failedBatches }),
+      });
       // 没抛错 ≠ 成功：0 条写入 + 99 个批次失败也会正常返回，记成 done 就是撒谎
       const outcome = jobOutcome("intraday", result.stats);
       db.prepare(
@@ -81,9 +115,10 @@ export async function POST(): Promise<Response> {
           kind: "collect_failed", severity: "warn",
           title: "手动采集未取到数据", body: outcome.reason,
         });
-        return Response.json({ ok: false, slot, reason: outcome.reason, ...result }, { status: 502 });
+        line({ phase: "error", ok: false, slot, reason: outcome.reason, stats: result.stats });
+        return;
       }
-      return Response.json({ ok: true, slot, ...result });
+      line({ phase: "done", ok: true, slot, stats: result.stats });
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       db.prepare(
@@ -95,7 +130,7 @@ export async function POST(): Promise<Response> {
         kind: "collect_failed", severity: "warn",
         title: "手动采集失败", body: msg,
       });
-      return Response.json({ ok: false, reason: msg }, { status: 502 });
+      line({ phase: "error", ok: false, reason: msg });
     }
   } finally {
     inFlight = false;

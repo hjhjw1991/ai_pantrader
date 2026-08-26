@@ -300,3 +300,62 @@ describe("collectWatchMinute 的无序列处理", () => {
       "SELECT COUNT(*) n FROM data_gap WHERE resolved_at IS NULL").get() as any).n).toBe(0);
   });
 });
+
+/**
+ * 批次进度回调。
+ *
+ * 手动采集一轮全市场约 99 个批次、实测 45 秒，界面要画进度条。
+ * 三条要求都是从"进度条骗人会怎样"倒推出来的：
+ *   done 单调递增（失败批次也要计数，否则失败一批进度就永远卡在那里，看起来像挂了）；
+ *   total 一开始就是最终值（中途变大的话进度条会倒退）；
+ *   最后一次回调的 written / failedBatches 必须与返回值一致（结尾数字对不上会让人以为丢了数据）。
+ */
+describe("collectMarketSnapshot 的进度回调", () => {
+  const codes = Array.from({ length: 130 }, (_, i) => String(600000 + i));
+
+  it("每批一次回调，done 单调递增到 total", async () => {
+    const text = gtimgLine("601012", "隆基绿能", "13.0");
+    const seen: Array<{ done: number; total: number }> = [];
+    const r = await collectMarketSnapshot(
+      db, clientReturning(text) as any, codes,
+      p => seen.push({ done: p.done, total: p.total })
+    );
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.every((p, i) => i === 0 || p.done === seen[i - 1].done + 1)).toBe(true);
+    expect(seen[seen.length - 1].done).toBe(seen[0].total);
+    expect(r.written).toBeGreaterThan(0);
+  });
+
+  it("total 从第一条起就是最终值 —— 中途变大会让进度条倒退", async () => {
+    const seen: number[] = [];
+    await collectMarketSnapshot(
+      db, clientReturning(gtimgLine("601012", "x", "13.0")) as any, codes,
+      p => seen.push(p.total)
+    );
+    expect(new Set(seen).size).toBe(1);
+  });
+
+  it("批次失败也报进度，并把失败数带出来 —— 卡住的进度条会被当成程序死了", async () => {
+    const failing = {
+      source: "tencent",
+      breaker: { isOpen: () => false, record() {}, reset() {} },
+      async get() { return { ok: false as const, error: "boom", latencyMs: 1 }; },
+    };
+    const seen: Array<{ done: number; failedBatches: number }> = [];
+    const r = await collectMarketSnapshot(
+      db, failing as any, codes,
+      p => seen.push({ done: p.done, failedBatches: p.failedBatches })
+    );
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen[seen.length - 1].done).toBe(seen.length);
+    expect(seen[seen.length - 1].failedBatches).toBe(r.failedBatches);
+    expect(r.failedBatches).toBeGreaterThan(0);
+  });
+
+  it("不传回调也照常工作 —— 定时任务没人看着，不该为进度付开销", async () => {
+    const r = await collectMarketSnapshot(
+      db, clientReturning(gtimgLine("601012", "x", "13.0")) as any, ["601012"]
+    );
+    expect(r.written).toBe(1);
+  });
+});
