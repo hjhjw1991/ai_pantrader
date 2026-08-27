@@ -154,6 +154,125 @@ export interface SweepRunInput extends BacktestRunInput {
  *      不能边跑边跳过非法点：跳过会让网格悄悄变小，而热力图上的空洞
  *      看起来和"这里成绩差"没有区别。
  */
+/** 扫描进度：第几个网格点、该点跑到第几个交易日 */
+export interface SweepProgress {
+  point: number;
+  points: number;
+  day: number;
+  days: number;
+  date: string;
+  params: Record<string, unknown>;
+}
+
+/**
+ * 异步版参数扫描。
+ *
+ * 每个网格点是一次**完整回测**：36 点 × 四年跨度 ≈ 3.7 小时（实测 0.38 秒/交易日）。
+ * 同步跑意味着这几个小时里整个网站冻住，而且没有任何办法叫停 —— 这比单次回测那 6 分钟
+ * 严重一个数量级。
+ *
+ * 结构上没有动 lib/backtest/optimizer.ts：先异步把所有网格点跑完存进 metrics 表，
+ * 再把一个**纯查表**的 evaluate 交给现有的 optimize()。这样敏感度/峰值/警告那套逻辑
+ * 仍然只有一份实现。refineRounds 默认 0，optimize 要的点恰好就是预先跑过的那些；
+ * 万一将来开了 refine 而问到没跑过的点，就按契约破了抛错，不悄悄补一个空格子。
+ */
+export async function runSweepAsync(
+  db: Db,
+  i: SweepRunInput,
+  a: { onProgress?: (p: SweepProgress) => void; signal?: { aborted: boolean } } = {}
+): Promise<Avail<{ report: SweepReport }>> {
+  const axes = Object.keys(i.grid);
+  for (const ax of [i.axisX, i.axisY]) {
+    if (!axes.includes(ax)) return unavailable(`轴 ${ax} 不在扫描网格里`, "只能画扫过的轴");
+  }
+  const points = gridPoints(i.grid as ParamGrid);
+  if (points.length > SWEEP_MAX_POINTS) {
+    return unavailable(
+      `网格 ${points.length} 点，超过上限 ${SWEEP_MAX_POINTS}`,
+      "每个点是一次完整回测。减少取值个数，或分两次扫"
+    );
+  }
+
+  // 先把所有点的配置都校验出来，一次性失败，别跑到一半才发现
+  const configs = new Map<string, StrategyConfig>();
+  for (const p of points) {
+    const r = overrideConfigParams(i.config, p);
+    if (!r.ok) {
+      return unavailable(
+        `网格点 ${JSON.stringify(p)} 非法：${r.reason}`,
+        "整体拒绝而不是跳过该点 —— 跳过会让网格悄悄变小，热力图上的空洞和'成绩差'看起来一样"
+      );
+    }
+    configs.set(canonicalJson(p), r.config);
+  }
+
+  const reports = new Map<string, BacktestReport>();
+  const metricsByKey = new Map<string, BacktestReport["metrics"]>();
+
+  try {
+    for (let n = 0; n < points.length; n++) {
+      const key = canonicalJson(points[n]);
+      const out = await replayAsync({
+        from: i.from,
+        to: i.to,
+        viewFactory: (asOf: string) => createSqliteView(db, asOf),
+        strategy: engine,
+        config: configs.get(key)!,
+        initialCash: i.initialCash,
+        ...(i.constraints ? { constraints: i.constraints } : {}),
+        generatedAt: i.generatedAt,
+      }, {
+        signal: a.signal,
+        onProgress: d => a.onProgress?.({
+          point: n + 1, points: points.length,
+          day: d.done, days: d.total, date: d.date, params: points[n],
+        }),
+      });
+      reports.set(key, out.report);
+      metricsByKey.set(key, out.report.metrics);
+    }
+
+    const result = optimize({
+      grid: i.grid as ParamGrid,
+      evaluate: (params) => {
+        const k = canonicalJson(params);
+        const m = metricsByKey.get(k);
+        // 预跑覆盖了全部网格点；问到别的说明 refine 被打开了，那是契约变更，不是可以吞掉的意外
+        if (!m) throw new Error(`网格点未预跑：${k}（refine 不该在此启用）`);
+        return m;
+      },
+    });
+
+    const bestReport = reports.get(canonicalJson(result.best.params));
+    if (!bestReport) throw new Error("最优点没有对应报告，覆盖率无从取得");
+
+    return {
+      available: true,
+      report: {
+        strategyId: bestReport.strategyId,
+        strategyVersion: bestReport.strategyVersion,
+        range: bestReport.range,
+        constraints: bestReport.constraints,
+        grid: i.grid,
+        evaluated: result.evaluations.length,
+        best: { params: result.best.params, metrics: result.best.metrics },
+        heatmap: heatmap(result.evaluations, i.axisX, i.axisY),
+        sensitivity: result.sensitivity,
+        peak: result.peak,
+        coverage: bestReport.coverage,
+        warnings: result.warnings,
+        generatedAt: i.generatedAt,
+      },
+    };
+  } catch (e) {
+    if (e instanceof ReplayAborted) throw e;
+    return unavailable(
+      `参数扫描失败：${(e as Error).message}`,
+      "不返回部分热力图 —— 缺格的热力图会被当成'那片参数不好'读"
+    );
+  }
+}
+
 export function runSweep(db: Db, i: SweepRunInput): Avail<{ report: SweepReport }> {
   const axes = Object.keys(i.grid);
   for (const a of [i.axisX, i.axisY]) {

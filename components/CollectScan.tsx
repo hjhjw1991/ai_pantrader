@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { readNdjson } from "@/components/ndjson";
 
 /**
  * 手动重扫候选池 = 先采一轮全市场行情，再让页面重算候选。
@@ -41,47 +42,24 @@ export function useCollectScan(): CollectState & { run: () => void } {
     setS({ ...IDLE, busy: true });
     try {
       const r = await fetch("/api/collect", { method: "POST" });
-
-      // 守卫失败（间隔保护 / 已有一轮在跑）走的是普通 JSON，不是流
-      if (!r.headers.get("content-type")?.includes("ndjson")) {
-        const j = await r.json().catch(() => ({}));
-        setS({ ...IDLE, msg: { kind: "err", text: j?.reason ?? `HTTP ${r.status}` } });
-        return;
-      }
-      if (r.body === null) {
-        setS({ ...IDLE, msg: { kind: "err", text: "服务端没有返回可读流" } });
-        return;
-      }
-
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      let last: Record<string, unknown> | null = null;
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        // 半行留在缓冲里等下一个 chunk：按行切之后最后一段可能是残缺 JSON
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const ln of lines) {
-          if (ln.trim() === "") continue;
-          let ev: Record<string, unknown>;
-          try { ev = JSON.parse(ln); } catch { continue; }
-          last = ev;
-          if (ev.phase === "snapshot" || ev.phase === "minute") {
-            setS(prev => ({
-              ...prev,
-              busy: true,
-              done: Number(ev.done ?? 0),
-              total: Number(ev.total ?? 0),
-              written: Number(ev.written ?? 0),
-              failedBatches: Number(ev.failedBatches ?? 0),
-            }));
-          }
+      const outcome = await readNdjson(r, ev => {
+        if (ev.phase === "snapshot" || ev.phase === "minute") {
+          setS(prev => ({
+            ...prev,
+            busy: true,
+            done: Number(ev.done ?? 0),
+            total: Number(ev.total ?? 0),
+            written: Number(ev.written ?? 0),
+            failedBatches: Number(ev.failedBatches ?? 0),
+          }));
         }
+      });
+      if (outcome.kind === "rejected") {
+        // 间隔保护 / 已有一轮在跑：还没开跑就被拒，走的是普通 JSON
+        setS({ ...IDLE, msg: { kind: "err", text: outcome.error } });
+        return;
       }
+      const last = outcome.last;
 
       // 最后一行是成败判定。流式响应的状态码在第一个字节就定了，
       // 中途失败改不了状态码，所以结论只能从消息体里读

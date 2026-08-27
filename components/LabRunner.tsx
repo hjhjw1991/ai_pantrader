@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import type { BacktestReport } from "@/lib/contracts/backtest";
 import { BacktestReportView } from "@/components/BacktestReportView";
+import { readNdjson } from "@/components/ndjson";
 import { DateInput } from "@/components/DateInput";
 
 /**
@@ -60,38 +61,18 @@ export function LabRunner({
               signal: ac.signal,
             });
 
-            // 参数不合法 / 已有回测在跑 / 策略配置不可用：这些在开跑之前就返回，是普通 JSON
-            if (!r.headers.get("content-type")?.includes("ndjson")) {
-              const j = await r.json().catch(() => ({}));
-              throw new Error(j?.error ?? `HTTP ${r.status}`);
-            }
-            if (r.body === null) throw new Error("服务端没有返回可读流");
-
-            const reader = r.body.getReader();
-            const dec = new TextDecoder();
-            let buf = "";
-            let last: Record<string, unknown> | null = null;
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += dec.decode(value, { stream: true });
-              const lines = buf.split("\n");
-              // 半行留着等下一个 chunk：切完的最后一段可能是残缺 JSON
-              buf = lines.pop() ?? "";
-              for (const ln of lines) {
-                if (ln.trim() === "") continue;
-                let ev: Record<string, unknown>;
-                try { ev = JSON.parse(ln); } catch { continue; }
-                last = ev;
-                if (ev.phase === "day") {
-                  setProg({
-                    done: Number(ev.done ?? 0),
-                    total: Number(ev.total ?? 0),
-                    date: String(ev.date ?? ""),
-                  });
-                }
+            const outcome = await readNdjson(r, ev => {
+              if (ev.phase === "day") {
+                setProg({
+                  done: Number(ev.done ?? 0),
+                  total: Number(ev.total ?? 0),
+                  date: String(ev.date ?? ""),
+                });
               }
-            }
+            });
+            // 参数不合法 / 已有重活在跑 / 策略配置不可用：这些在开跑之前就返回，是普通 JSON
+            if (outcome.kind === "rejected") throw new Error(outcome.error);
+            const last = outcome.last;
 
             // 结论只能从消息体里读：流式响应的状态码在第一个字节就定死了
             if (last?.phase === "done") setReport(last.report as BacktestReport);

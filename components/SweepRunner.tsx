@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { SweepReport } from "@/lib/contracts/backtest";
 import { DateInput } from "@/components/DateInput";
+import { readNdjson } from "@/components/ndjson";
 
 /**
  * 参数扫描 + 热力图（spec §10.4）。
@@ -68,6 +69,13 @@ export function SweepRunner({
   const [report, setReport] = useState<SweepReport | null>(null);
   /** 实测单点耗时（毫秒）。null = 还没测 */
   const [perPointMs, setPerPointMs] = useState<number | null>(null);
+  /** 扫描进度：第几个点 / 该点第几个交易日 */
+  const [prog, setProg] = useState<{ point: number; points: number; day: number; days: number; date: string }>(
+    { point: 0, points: 0, day: 0, days: 0, date: "" }
+  );
+  const startedAt = useRef(0);
+  // 取消靠中断请求：服务端在两个交易日之间停手，不会留下跑一半的热力图
+  const abortRef = useRef<AbortController | null>(null);
 
   const parsed = useMemo(
     () => axes.map((a) => ({ path: a.path, r: parseValues(a.values) })),
@@ -100,10 +108,19 @@ export function SweepRunner({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ from, to, initialCash: Number(cash) }),
       });
+      // 测速这一次本身就是一次真回测，同样走流；进度顺便显示出来
+      const outcome = await readNdjson(r, ev => {
+        if (ev.phase === "day") {
+          setProg({ point: 1, points: 1, day: Number(ev.done ?? 0), days: Number(ev.total ?? 0), date: String(ev.date ?? "") });
+        }
+      });
       const ms = performance.now() - t0;
-      const j = (await r.json()) as Record<string, unknown>;
-      if (!r.ok) {
-        setMsg({ kind: "err", text: `测速失败：${String(j.error ?? r.status)}` });
+      if (outcome.kind === "rejected") {
+        setMsg({ kind: "err", text: `测速失败：${outcome.error}` });
+        return;
+      }
+      if (outcome.last?.phase !== "done") {
+        setMsg({ kind: "err", text: `测速失败：${String(outcome.last?.reason ?? "未收到结束消息")}` });
         return;
       }
       setPerPointMs(ms);
@@ -116,9 +133,15 @@ export function SweepRunner({
   }
 
   async function run() {
+    // 已有一个在跑就不开新的。服务端也挡（409，回测与扫描共用一把锁），这里挡是为了不白发请求
+    if (abortRef.current !== null) return;
+    const ac = new AbortController();
+    abortRef.current = ac;
+    startedAt.current = Date.now();
     setBusy(true);
     setMsg(null);
     setReport(null);
+    setProg({ point: 0, points: 0, day: 0, days: 0, date: "" });
     const grid: Record<string, Array<number | boolean>> = {};
     for (const p of parsed) if (p.r.ok) grid[p.path] = p.r.values;
     try {
@@ -132,17 +155,36 @@ export function SweepRunner({
           axisX: axes[0].path,
           axisY: axes[1].path,
         }),
+        signal: ac.signal,
       });
-      const j = (await r.json()) as Record<string, unknown>;
-      if (!r.ok) {
-        setMsg({ kind: "err", text: String(j.error ?? `HTTP ${r.status}`) });
+      const outcome = await readNdjson(r, ev => {
+        if (ev.phase === "point") {
+          setProg({
+            point: Number(ev.point ?? 0), points: Number(ev.points ?? 0),
+            day: Number(ev.day ?? 0), days: Number(ev.days ?? 0), date: String(ev.date ?? ""),
+          });
+        }
+      });
+      if (outcome.kind === "rejected") {
+        setMsg({ kind: "err", text: outcome.error });
         return;
       }
-      setReport(j.report as SweepReport);
-      setMsg({ kind: "ok", text: `扫完 ${(j.report as SweepReport).evaluated} 个点` });
+      const last = outcome.last;
+      // 结论只能从消息体里读：流式响应的状态码在第一个字节就定死了
+      if (last?.phase === "done") {
+        const rep = last.report as SweepReport;
+        setReport(rep);
+        setMsg({ kind: "ok", text: `扫完 ${rep.evaluated} 个点` });
+      } else if (last?.phase === "aborted") {
+        setMsg({ kind: "err", text: String(last.reason ?? "已取消") });
+      } else {
+        setMsg({ kind: "err", text: String(last?.reason ?? "扫描中断，未收到结束消息") });
+      }
     } catch (e) {
-      setMsg({ kind: "err", text: (e as Error).message });
+      // 自己点的取消不算错误
+      setMsg({ kind: "err", text: (e as Error).name === "AbortError" ? "已取消" : (e as Error).message });
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }
@@ -219,15 +261,25 @@ export function SweepRunner({
           onClick={() => {
             if (estMs !== null && estMs > 5 * 60_000) {
               if (!confirm(
-                `预计 ${fmtDur(estMs)}，这段时间页面会一直卡着（同步跑，刷新即白跑）。继续？\n` +
-                `想更快就缩短区间或减少取值个数。`
+                `预计 ${fmtDur(estMs)}。期间可以随时点"取消"停下来，但刷新页面会丢掉进度条`
+                + `（扫描本身仍在服务端跑，得回来再取消）。继续？\n`
+                + `想更快就缩短区间或减少取值个数。`
               )) return;
             }
             void run();
           }}
         >
-          {busy ? "扫描中（同步跑，别刷新）…" : "开始扫描"}
+          {busy ? "扫描中…" : "开始扫描"}
         </button>
+        {busy ? (
+          <button
+            type="button"
+            onClick={() => abortRef.current?.abort()}
+            className="border border-danger/60 rounded-sm px-2 py-1 text-[12px] text-danger hover:bg-danger/10"
+          >
+            取消
+          </button>
+        ) : null}
         <span className={overCap ? "text-danger text-[11px]" : "text-ink-3 text-[11px]"}>
           {points} 个网格点 / 上限 {maxPoints}
           {overCap ? " —— 超了，减少取值个数" : "，每点一次完整回测"}
@@ -248,8 +300,11 @@ export function SweepRunner({
         ) : null}
       </div>
 
+      <SweepProgress busy={busy} prog={prog} startedAt={startedAt.current} />
+
       <p className="text-ink-3 text-[11px]">
-        扫描同步跑在请求线程里，{maxPoints} 点上限就是为此设的 —— 中途刷新页面等于白跑。
+        扫描在服务端逐个交易日跑，随时可以取消；{maxPoints} 点上限仍在 —— 每点是一次完整回测。
+        刷新页面会丢掉进度条，但扫描还在服务端跑着（回来再点取消）。
         非法参数组合（越界值等）会在开跑**之前**整体拒绝，不会跑一半留下缺格的图。
       </p>
 
@@ -385,6 +440,58 @@ function SweepResult({ r }: { r: SweepReport }) {
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * 扫描进度。两层：第几个网格点、该点跑到第几个交易日。
+ *
+ * 只报点序是不够的：单点四年跨度就要 6 分钟，只看"第 3/36 点"会有六分钟一动不动，
+ * 和卡死没有区别。剩余时间按**已完成的点**外推，不按天 ——
+ * 每个点的天数相同，用点做单位的估算稳得多。
+ */
+function SweepProgress({
+  busy,
+  prog,
+  startedAt,
+}: {
+  busy: boolean;
+  prog: { point: number; points: number; day: number; days: number; date: string };
+  startedAt: number;
+}) {
+  if (!busy) return null;
+
+  // 总进度 = 已完成的点 + 当前点内的进度
+  const frac = prog.points > 0 && prog.days > 0
+    ? ((prog.point - 1) + prog.day / prog.days) / prog.points
+    : null;
+  const pct = frac === null ? null : Math.round(frac * 100);
+  const elapsed = startedAt > 0 ? Date.now() - startedAt : 0;
+  const leftSec = frac !== null && frac > 0.02
+    ? Math.round((elapsed / frac - elapsed) / 1000)
+    : null;
+  const fmtLeft = (s: number) =>
+    s >= 3600 ? `约 ${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`
+      : s >= 60 ? `约 ${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒`
+      : `约 ${s} 秒`;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="h-1 w-full rounded-sm bg-panel-2 overflow-hidden">
+        <div
+          className={pct === null ? "h-full w-1/4 bg-info animate-pulse" : "h-full bg-info"}
+          style={pct === null ? undefined : { width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-ink-3 text-[11px] num">
+        {pct === null
+          ? "正在校验网格与取交易日历…"
+          : `第 ${prog.point}/${prog.points} 个网格点 · 回放 ${prog.day}/${prog.days} 天`
+            + (prog.date ? ` · ${prog.date}` : "")
+            + ` · 总进度 ${pct}%`
+            + (leftSec !== null ? ` · 预计还需${fmtLeft(leftSec)}` : "")}
+      </span>
     </div>
   );
 }

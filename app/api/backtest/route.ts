@@ -3,6 +3,7 @@ import { BacktestRunSchema } from "@/lib/ui/validate";
 import { runBacktestAsync, ReplayAborted } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { openRead } from "@/lib/ui/db";
+import { tryAcquire, release } from "@/lib/ui/heavy";
 import { shanghaiTs } from "@/lib/ui/time";
 
 export const dynamic = "force-dynamic";
@@ -15,15 +16,6 @@ export function GET() {
     ...(cfg.available ? {} : { reason: cfg.reason, needs: cfg.needs }),
   });
 }
-
-/**
- * 同一时刻只允许一个回测在跑。
- *
- * 不是"防手滑"，是硬约束：实测 0.38 秒/交易日，四年跨度约 6 分钟，而 Node 单线程。
- * 两个回测并行不会各自快一点，只会互相把 CPU 切碎、一起变慢，
- * 同时把整个网站拖到更卡。跨进程不设防 —— 这是本机单进程应用，模块级标志够用。
- */
-let inFlight: { startedAt: number; range: string; abort: { aborted: boolean } } | null = null;
 
 /**
  * 跑回测，流式返回进度。
@@ -45,14 +37,6 @@ export async function POST(req: Request) {
   const cfg = readStrategyConfig();
   if (!cfg.available) return err(503, cfg.reason, { needs: cfg.needs, issues: cfg.issues });
 
-  if (inFlight !== null) {
-    const sec = Math.round((Date.now() - inFlight.startedAt) / 1000);
-    return err(
-      409,
-      `已有一个回测在跑（${inFlight.range}，已跑 ${sec} 秒）。先取消它，或等它跑完。`
-    );
-  }
-
   const r = openRead();
   if (!r.ok) {
     return r.why.kind === "missing"
@@ -61,11 +45,27 @@ export async function POST(req: Request) {
   }
   const db = r.db;
 
-  const abort = { aborted: false };
-  inFlight = { startedAt: Date.now(), range: `${b.value.from} → ${b.value.to}`, abort };
+  // 与参数扫描共用同一把锁：它们抢的是同一个 CPU，分成两把只会让
+  // "回测跑着的时候还能开扫描"这种最坏组合合法化
+  const lock = tryAcquire("backtest", `${b.value.from} → ${b.value.to}`);
+  if (!lock.ok) return err(409, lock.reason);
+  const { job } = lock;
+  const abort = job.abort;
 
   // 客户端断开（点了取消 / 关了页面）就停：跑一个没人要的 6 分钟回测，
   // 既白烧 CPU，又让下一个真要跑的人卡在 409 上
+  /**
+   * 客户端断开（点了取消 / 关了页面）就停：跑一个没人要的长任务，
+   * 既白烧 CPU，又让下一个真要跑的人卡在 409 上。
+   *
+   * 承重的是下面那个流的 cancel()，不是这里的 req.signal。浏览器 abort 掉 fetch 之后
+   * 响应体的流会被 cancel，那条路实测可靠（3 秒取消，服务端当场停在第 1 个网格点、锁随即释放）。
+   *
+   * req.signal 只是加一道保险，**不能只靠它**：Node 里派生 AbortSignal 的监听是弱引用，
+   * parseBody 之后本函数不再用到 req，运行时若也没别处持有，signal 会被 GC 掉，
+   * abort 事件从此不再送达。实测过这种情形 —— 取消点了没反应，任务一路跑到底。
+   * 试过把 signal 绑进流闭包里强引用，没有救回来，所以不要在这上面加设计假设。
+   */
   req.signal.addEventListener("abort", () => { abort.aborted = true; });
 
   const enc = new TextEncoder();
@@ -76,6 +76,8 @@ export async function POST(req: Request) {
         catch { abort.aborted = true; }   // 写不进去说明对面走了，没必要接着跑
       };
       try {
+        // 兜住"注册监听之前请求就已经断了"的竞态
+        if (req.signal.aborted) abort.aborted = true;
         line({ phase: "start", from: b.value.from, to: b.value.to });
         // generatedAt 由这里注入：重放路径内不许出现 Date.now()，否则同份输入两次跑出
         // 的报告哈希不一致（spec §17 断言 4）
@@ -96,7 +98,7 @@ export async function POST(req: Request) {
         if (e instanceof ReplayAborted) line({ phase: "aborted", ok: false, reason: e.message });
         else line({ phase: "error", ok: false, reason: (e as Error).message });
       } finally {
-        inFlight = null;
+        release(job);
         try { controller.close(); } catch { /* 已关闭 */ }
       }
     },
