@@ -277,3 +277,133 @@ export async function fetchLhbSeats(
     buyerTimes3d: orNull(x.TOTAL_BUYER_SALESTIMES_3DAY),
   }));
 }
+
+/* ─────────────────────────── 板块涨幅榜 ─────────────────────────── */
+
+export interface SectorRankEntry {
+  /** 东财板块代码，如 BK1340。库里不存，仅用于排错 */
+  bk: string;
+  sector: string;
+  /** 涨幅，**百分数**（6.39 表示 6.39%），与 quote_snapshot.pct 同口径 */
+  pct: number;
+  leaderCode: string | null;
+}
+
+/**
+ * 行业板块涨幅榜（`fs=m:90+t:2`）。
+ *
+ * 只取行业板块，不取概念板块（t:3）：概念板块高度重叠且随东财随时增删，
+ * 拿它做"主线识别"会让同一波行情在榜上出现四五次，把 TopN 挤满。
+ *
+ * f3 的单位是 **万分之一**（639 = 6.39%），这里除以 100 归一成百分数 ——
+ * 库里 pct 一律百分数，混着存迟早会有一处按错口径比阈值。
+ */
+export async function fetchSectorRank(
+  client: SourceClient, o: RotationOpts & { top?: number } = {}
+): Promise<SectorRankEntry[]> {
+  const pz = o.top ?? 100;
+  const r = await getWithHostRotation(
+    client,
+    // EM_PUSH2_HOSTS 存的是短名（"82.push2"），域名要在这里补齐 —— 与 fetchAllSecurities 一致
+    host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=1&pz=${pz}&po=1&fid=f3` +
+      // f128（领涨股名称）必须一起要：实测只要 f12,f14,f3,f140 时，f140 不会回来；
+      // 加上 f128 之后两个都有。我们只存代码，f128 纯粹是为了把 f140 带出来。
+      `&fs=m%3A90%2Bt%3A2&fields=f12%2Cf14%2Cf3%2Cf128%2Cf140&ut=${UT}`,
+    "sector rank", o
+  );
+
+  const j = JSON.parse(r.text);
+  const diff = j?.data?.diff;
+  if (diff === undefined || diff === null) throw new Error("eastmoney sector rank unexpected payload");
+  // 东财这个接口的 diff 有时是数组、有时是以序号为键的对象，两种都要认
+  const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
+
+  return list
+    .filter(x => x !== null && typeof x === "object" && typeof x.f14 === "string")
+    // f3 缺失时整条丢掉，不补 0：0% 会被当成"这个板块今天没动"读
+    .filter(x => typeof x.f3 === "number" && Number.isFinite(x.f3))
+    .map(x => ({
+      bk: String(x.f12 ?? ""),
+      sector: String(x.f14),
+      pct: x.f3 / 100,
+      leaderCode: typeof x.f140 === "string" && x.f140.length > 0 ? x.f140 : null,
+    }));
+}
+
+/* ─────────────────────────── 跌停池 ─────────────────────────── */
+
+export interface DtEntry { code: string; name: string; sealAmt: number }
+
+/**
+ * 跌停池。与涨停池同一个接口族，实测 **date 参数同样无效** ——
+ * 传 20260826 返回的 qdate 是 20260827。所以它和涨停池一样是纯增量资产，
+ * 错过当天就永久没有，失败必须显式记 gap。
+ *
+ * 空池是**合法结果**（今天没有跌停），不能当成失败：把"0 家跌停"报成错误，
+ * 会让择时那边永远读不到"今天很稳"这个真实信号。
+ */
+export async function fetchDtPool(client: SourceClient, date: string): Promise<DtEntry[]> {
+  const url = `https://push2ex.eastmoney.com/getTopicDTPool?ut=${UT}` +
+    `&dpt=wz.ztzt&Pageindex=0&pagesize=600&sort=fund%3Aasc&date=${date}`;
+  const r = await client.get(url, { referer: EM_REFERER });
+  if (!r.ok) throw new Error(`eastmoney dtpool failed for ${date}: ${r.error}`);
+
+  const j = JSON.parse(r.text);
+  const pool = j?.data?.pool;
+  // pool 为空数组 = 今天没有跌停；pool 缺失 = 报文变了，那是错误
+  if (pool === undefined || pool === null) {
+    throw new Error(`eastmoney dtpool unexpected payload for ${date}`);
+  }
+  if (!Array.isArray(pool)) throw new Error(`eastmoney dtpool pool is not an array for ${date}`);
+
+  return pool.map((x: any) => ({
+    code: String(x.c), name: String(x.n), sealAmt: Number(x.fund ?? 0),
+  }));
+}
+
+/* ─────────────────────────── 外围标的 ─────────────────────────── */
+
+/**
+ * 外围标的 → 东财 secid。secid 全部实地验证过，不是照猜的：
+ *   A50  104.CN00Y  A50期指当月连续（用期指而非现货 100.XIN9：A 股开盘前它就在动，
+ *                   而"外围传导"要的正是隔夜到盘前这段的风险偏好）
+ *   SOX  251.SOX    费城半导体指数
+ *   XAU  101.GC00Y  COMEX黄金
+ *   OIL  102.CL00Y  NYMEX原油
+ * 键名与 lib/factors/macro.ts 的 DEFAULT_MACRO_SYMBOLS 对齐，改一边必须改另一边。
+ */
+export const MACRO_SECIDS: Record<string, string> = {
+  A50: "104.CN00Y",
+  SOX: "251.SOX",
+  XAU: "101.GC00Y",
+  OIL: "102.CL00Y",
+};
+
+export interface MacroEntry { symbol: string; price: number; pct: number }
+
+/**
+ * 单个外围标的的最新报价。f43 现价、f170 涨跌幅（百分数）、f58 名称。
+ * 一个标的一个请求：这个接口不接受多 secid，而标的只有四个，不值得为它做批量。
+ */
+export async function fetchMacroQuote(
+  client: SourceClient, symbol: string
+): Promise<MacroEntry> {
+  const secid = MACRO_SECIDS[symbol];
+  if (secid === undefined) throw new Error(`未知外围标的 ${symbol}（不在 MACRO_SECIDS 里）`);
+
+  const r = await client.get(
+    `https://push2.eastmoney.com/api/qt/stock/get?ut=${UT}&fltt=2&invt=2` +
+    `&secid=${secid}&fields=f57%2Cf58%2Cf43%2Cf170`,
+    { referer: EM_REFERER }
+  );
+  if (!r.ok) throw new Error(`eastmoney macro ${symbol}(${secid}) failed: ${r.error}`);
+
+  const d = JSON.parse(r.text)?.data;
+  if (d === null || d === undefined) throw new Error(`eastmoney macro ${symbol}(${secid}) 无数据`);
+  const price = Number(d.f43), pct = Number(d.f170);
+  // 停市时东财会回 "-"，Number("-") 是 NaN。宁可报错也不落一个 0 —— 0% 会被读成"外围平稳"
+  if (!Number.isFinite(price) || !Number.isFinite(pct)) {
+    throw new Error(`eastmoney macro ${symbol}(${secid}) 报价不是数字：f43=${d.f43} f170=${d.f170}`);
+  }
+  return { symbol, price, pct };
+}

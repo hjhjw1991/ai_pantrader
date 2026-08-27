@@ -3,13 +3,16 @@ import type { SourceClient } from "@/lib/data/client";
 import { ensureTradingDay, syncCalendar, tradingDaysBetween } from "@/lib/data/calendar";
 import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
-import { collectZtPool } from "@/lib/data/collectors/cross-section";
+import {
+  collectZtPool, collectSectorRank, collectDtPool, collectMacro,
+} from "@/lib/data/collectors/cross-section";
 import { collectDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { deriveSecurityMeta } from "@/lib/data/security-meta";
+import { MACRO_SECIDS } from "@/lib/data/sources/eastmoney";
 
 export type JobName =
   | "selfcheck" | "preopen" | "plan" | "intraday" | "close" | "post" | "night";
@@ -191,6 +194,16 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   // 日历本来就是靠它补上的，被交易日门槛挡住就成了死锁（2026-08-04 就是这么丢了一上午）。
   if (name === "preopen") {
     stats.calendarRows = await syncCalendar(db, clients.sina, 60);
+    /**
+     * 外围标的的隔夜读数。放在盘前而不是盘中：A 股开盘时美股已经收盘，
+     * "外围传导"要的正是隔夜到盘前这一段的风险偏好，盘中再采只是重复同一个数。
+     * 逐标的独立成败，缺一个由因子按权重覆盖率自行降权（见 lib/factors/macro.ts）。
+     */
+    {
+      const m = await collectMacro(db, clients.eastmoney, Object.keys(MACRO_SECIDS));
+      stats.macroWritten = m.written;
+      stats.macroFailed = m.failed.length;
+    }
     return { name, skipped: false, stats };
   }
 
@@ -225,6 +238,14 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         stats.minuteNoData = min.noData.length;
       }
       /**
+       * 板块涨幅榜每轮都采。主线识别看的是"谁一直在榜上"，只留收盘那一张就看不出来了。
+       * 失败不上抛：板块榜没了不该让整轮盘中采集（全市场快照）算失败。
+       */
+      try {
+        stats.sectorRankRows = await collectSectorRank(db, clients.eastmoney, compact);
+      } catch { stats.sectorRankFailed = 1; }
+
+      /**
        * 采完就比一次信号。放在这里而不是另起一个 job：
        * 通知要的是"数据刚变，结论跟着变了没有"，而数据正好是这一步刚写进去的。
        * 另起 job 既要重算一遍，还会和这一轮之间隔出一个不必要的时间差。
@@ -239,6 +260,15 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       const snap = await collectMarketSnapshot(db, clients.tencent, allCodes(db));
       stats.snapshotWritten = snap.written;
       stats.ztPoolRows = await collectZtPool(db, clients.eastmoney, compact);
+      // 跌停池与涨停池同源同节奏：都是当日现场，date 参数无效，错过就没有
+      try {
+        stats.dtPoolRows = await collectDtPool(db, clients.eastmoney, compact);
+      } catch { stats.dtPoolFailed = 1; }
+      // 收盘也留一张板块榜：当天最后一个时点，是"今天主线是谁"的定论。
+      // 这次给足重试轮数 —— 盘中失败还有下一轮兜底，收盘失败就是永久没有
+      try {
+        stats.sectorRankRows = await collectSectorRank(db, clients.eastmoney, compact, { rounds: 3 });
+      } catch { stats.sectorRankFailed = 1; }
       break;
     }
     case "post": {
