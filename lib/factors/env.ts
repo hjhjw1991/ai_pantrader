@@ -11,7 +11,7 @@
  */
 import type { FactorResult, FactorSpec, PointInTimeView } from "@/lib/contracts";
 import {
-  adjClose, barsUpTo, clamp, mean, pbool, pctChange, pnum, pstr, round6, evalDate,
+  adjClose, barsUpTo, clamp, mean, pbool, pctChange, pnum, pstr, round6, evalDate
 } from "@/lib/factors/util";
 import {
   DEFAULT_LIMIT_THRESHOLDS, judgeBarLimitUp, limitDownCodes, limitUpCodes, proxyLbc,

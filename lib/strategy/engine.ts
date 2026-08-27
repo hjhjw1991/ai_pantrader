@@ -16,6 +16,8 @@ import type {
   AccountId, AccountType, Action, Candidate, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
   Phase, PointInTimeView, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput } from "@/lib/contracts";
 import { accountRule, takeProfitRules, unparsedTakeProfit } from "@/lib/strategy/loader";
+// 视图层的工具，不是因子实现 —— 引擎只依赖 PointInTimeView 这个契约
+import { completeDate } from "@/lib/pit/complete-date";
 import { normalizeAccountKey } from "@/lib/strategy/schema";
 
 /** 低置信线。spec §10.3：代理因子 ρ<0.8 要在回测报告首页标红，信号卡同一把尺子 */
@@ -118,13 +120,28 @@ function matchesMainline(sector: string | null, mainlines: string[]): string | n
   return null;
 }
 
-/** asOf 当日或之前最近的交易日。日历为空时退回 asOf 的日期部分 */
+/**
+ * 整张信号卡的评估日：asOf 当日或之前最近的交易日，**再回落到数据完整的那一天**。
+ *
+ * 回落这一步是必须的，而且必须在这里做一次、只做一次：
+ * 当天日线要夜间全量拉取（22:00）才落库，涨停池要 15:05 收盘后才有。
+ * 盘中拿「今天」去评估，横截面因子全体落空（盘面强度退回占位值 50，低于进攻阈值），
+ * 候选池的来源涨停池也是 0 行 —— 于是**整个交易日档位卡在中性、候选恒为空**。
+ * 实测：同一个库，asOf 落在昨天收盘后是「进攻 / 2 只候选」，落在今天任意时刻都是
+ * 「中性 / 0 候选」，分水岭是 09:35 那轮采集把今天写进日历的一刻。
+ *
+ * 放在这里而不是每个因子各自回落：`date` 同时喂给因子参数、涨停池选池、缺口告警，
+ * 分头回落迟早出现"档位算的是昨天、候选选的是今天"这种自相矛盾的卡片。
+ *
+ * 回放历史某天时它是恒等的（那天数据本来就完整），回测行为不变。
+ */
 function resolveDate(view: PointInTimeView): string {
   const asOfDate = view.asOf.slice(0, 10);
   const from = new Date(`${asOfDate}T00:00:00Z`);
   from.setUTCDate(from.getUTCDate() - 30);
   const days = view.tradingDays(from.toISOString().slice(0, 10), asOfDate);
-  return days.length === 0 ? asOfDate : days[days.length - 1];
+  const calendarDay = days.length === 0 ? asOfDate : days[days.length - 1];
+  return completeDate(view, calendarDay);
 }
 
 /** 去重且保序的告警收集器。顺序确定 = 同份输入两次结果哈希一致 */
@@ -184,7 +201,9 @@ function makeRunner(
 /* ------------------------------- 环境评估 ------------------------------- */
 
 function assessEnv(
-  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void
+  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void,
+  /** 日历认定的当前交易日。横截面因子实际评估的日期可能比它早，见下方说明 */
+  calendarDate: string
 ): { env: EnvAssessment; mainlines: string[] } {
   const facts = new Map<string, FactorResult<any>>();
   const need = (name: string, extra?: Record<string, unknown>): FactorResult<any> | null => {
@@ -255,6 +274,23 @@ function assessEnv(
   /* 档位 */
   const 档位 = config.择时.仓位档位;
   const 强度 = facts.get("盘面强度");
+  /**
+   * 横截面因子实际评估的是哪一天，必须写在卡片上。
+   *
+   * 当天日线要 22:00 才落库，所以盘中这些因子评估的是**昨天**（见 factors/util 的
+   * completeDate）。这是对的 —— 拿一个没有数据的今天去算，全市场都会落进 unknown，
+   * 档位会永远停在中性。但如果不说，人看到的就是一个像"今天的判断"的昨天判断，
+   * 而那两件事在盘中差别很大。
+   */
+  {
+    const evalOn = (强度?.inputs as { 日期?: unknown } | undefined)?.日期;
+    if (typeof evalOn === "string" && evalOn.length > 0 && evalOn !== calendarDate) {
+      warn(
+        `环境因子评估日 ${evalOn}，不是 ${calendarDate} —— 当日日线要夜间全量拉取后才有，` +
+        `盘中横截面读的是上一个完整交易日。个股价距（现价 vs 触发价）仍用实时快照。`
+      );
+    }
+  }
   const 强度值 = 强度 === undefined ? null : asNum(强度.value);
   const 外围 = facts.get("外围传导");
   const reasons: string[] = [];
@@ -621,7 +657,8 @@ export function createStrategyEngine(deps: EngineDeps): StrategyEngine {
     }
 
     const runner = makeRunner(deps.registry, config, view, date, warn);
-    const { env, mainlines } = assessEnv(config, runner, warn);
+    // 拿 asOf 的日期部分做对照：date 已经回落过，用它自己比自己永远相等
+    const { env, mainlines } = assessEnv(config, runner, warn, view.asOf.slice(0, 10));
 
     const heldCodes = new Set(input.positions.map(p => p.code));
     if (input.positions.length > 0) {

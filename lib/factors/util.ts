@@ -107,6 +107,7 @@ export function requireCode(params: Record<string, unknown>, factorName: string)
   return v;
 }
 
+/**
 /** 因子求值的日期：默认视图时点，允许参数指定更早的日期用于回放 */
 export function evalDate(view: PointInTimeView, params: Record<string, unknown>): string {
   const d = params["日期"];
