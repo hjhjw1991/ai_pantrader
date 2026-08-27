@@ -34,7 +34,20 @@ export function LiveBar() {
   const [lastEvent, setLastEvent] = useState<string | null>(null);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [collectMsg, setCollectMsg] = useState<string | null>(null);
-  const [notifyOn, setNotifyOn] = useState(false);
+  /**
+   * 桌面通知开关。
+   *
+   * 初值必须从 Notification.permission 读回来，不能写死 false ——
+   * 浏览器权限是持久的，而这个 state 不是：写死 false 的话，授权过的人**每刷新一次页面
+   * 就又关掉一次**，按钮还一直显示"开启桌面通知"，于是通知永远不弹。
+   * （实测就是这样：notification 表本来也是空的，两个 bug 叠在一起，从没响过。）
+   *
+   * 用惰性初值而不是 useEffect：服务端渲染没有 Notification，直接读会炸；
+   * 惰性初值在客户端首次渲染时求值，正好避开。
+   */
+  const [notifyOn, setNotifyOn] = useState(
+    () => typeof Notification !== "undefined" && Notification.permission === "granted"
+  );
   const lastIdRef = useRef(0);
 
   // ── 1 分钟软刷新 ──

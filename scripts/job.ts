@@ -19,6 +19,7 @@ import { claimSlot, finishSlot, type Runner } from "@/lib/data/scheduler";
 import { slotForNow } from "@/lib/data/schedule";
 import { shanghaiTs } from "@/lib/data/clock";
 import { runPreopenPlan } from "@/lib/plan/preopen";
+import { runSignalWatch } from "@/lib/plan/watch";
 
 const argv = process.argv.slice(2);
 const name = argv[0] as JobName;
@@ -68,7 +69,7 @@ const clients = {
 
 try {
   // 同 daemon：组装根负责把上层实现注进来
-  const r = await runJob(name, { db, clients, now, planPreopen: runPreopenPlan });
+  const r = await runJob(name, { db, clients, now, planPreopen: runPreopenPlan, signalWatch: runSignalWatch });
   // 认领了就必须回填，否则这个时点会永远卡在 running，
   // 下次唤醒补偿会把它当成残留回收，等于白跑一趟
   if (slot !== null) finishSlot(db, date, name, slot, "done", r.stats);

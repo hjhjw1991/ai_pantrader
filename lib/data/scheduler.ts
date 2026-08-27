@@ -42,6 +42,8 @@ export interface SchedulerOpts {
   onEvent?: (e: SchedulerEvent) => void;
   /** 盘前计划实现，见 lib/data/jobs.ts 的 JobDeps.planPreopen */
   planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
+  /** 盘中信号盯守，见 JobDeps.signalWatch */
+  signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
 }
 
 export type SchedulerEvent =
@@ -179,6 +181,7 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
       const result = await runJob(job, {
         db: o.db, clients: o.clients, now: at,
         ...(o.planPreopen ? { planPreopen: o.planPreopen } : {}),
+        ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
       });
       const outcome = jobOutcome(job, result.stats);
       if (outcome.ok) {
@@ -246,6 +249,8 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
           const result = await runJob(d.job, {
             db: o.db, clients: o.clients, now: at,
             ...(o.planPreopen ? { planPreopen: o.planPreopen } : {}),
+            ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
+        ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
           });
           // 没抛错 ≠ 成功：采集器批次失败时记 gap 后继续，全军覆没也会正常返回
           const outcome = jobOutcome(d.job, result.stats);

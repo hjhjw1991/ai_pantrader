@@ -34,6 +34,11 @@ export interface JobDeps {
    * 没注入时 job 如实 skip 并说明原因，而不是静默当成"跑过了"。
    */
   planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
+  /**
+   * 盘中信号盯守，同样由组装根注入（理由见 planPreopen）。
+   * 每轮盘中采集之后重算信号卡并与上次比对，产生档位切换 / 新候选 / 硬线告警通知。
+   */
+  signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
 }
 
 /** 进度事件。phase 是当前在做哪一步，done/total 是该步的批次进度 */
@@ -150,7 +155,7 @@ export function jobOutcome(
 
 export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   if (!KNOWN.includes(name)) throw new Error(`unknown job: ${name}`);
-  const { db, clients, now, onProgress, planPreopen } = deps;
+  const { db, clients, now, onProgress, planPreopen, signalWatch } = deps;
   const date = shanghaiDate(now);
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
@@ -218,6 +223,15 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         stats.minuteWritten = min.written;
         stats.minuteFailed = min.failed.length;
         stats.minuteNoData = min.noData.length;
+      }
+      /**
+       * 采完就比一次信号。放在这里而不是另起一个 job：
+       * 通知要的是"数据刚变，结论跟着变了没有"，而数据正好是这一步刚写进去的。
+       * 另起 job 既要重算一遍，还会和这一轮之间隔出一个不必要的时间差。
+       */
+      if (signalWatch !== undefined) {
+        const w = await signalWatch(db);
+        stats.notified = w.notified;
       }
       break;
     }
