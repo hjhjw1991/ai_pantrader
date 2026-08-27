@@ -2,7 +2,8 @@ import { err, ok, parseBody } from "@/lib/ui/api";
 import { SweepRunSchema } from "@/lib/ui/validate";
 import { SWEEP_MAX_POINTS, runSweepAsync, ReplayAborted } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
-import { openRead } from "@/lib/ui/db";
+import { openRead, writeDb } from "@/lib/ui/db";
+import { saveBacktestReport } from "@/lib/ui/mutations";
 import { tryAcquire, release } from "@/lib/ui/heavy";
 import { shanghaiTs } from "@/lib/ui/time";
 
@@ -99,8 +100,28 @@ export async function POST(req: Request) {
             day: p.day, days: p.days, date: p.date, params: p.params,
           }),
         });
-        if (!out.available) line({ phase: "error", ok: false, reason: out.reason, needs: out.needs });
-        else line({ phase: "done", ok: true, report: out.report });
+        if (!out.available) { line({ phase: "error", ok: false, reason: out.reason, needs: out.needs }); }
+        else {
+          let archivedId: string | null = null;
+          try {
+            const w = writeDb();
+            archivedId = saveBacktestReport(w, {
+              kind: "sweep",
+              strategyId: out.report.strategyId,
+              strategyVersion: out.report.strategyVersion,
+              from: b.value.from, to: b.value.to,
+              initialCash: b.value.initialCash,
+              // 扫描没有单点指标，如实存 null，不拿最优点的指标冒充整体
+              metrics: null,
+              evaluated: out.report.evaluated,
+              report: out.report,
+            });
+            w.close();
+          } catch (e) {
+            line({ phase: "archive_failed", reason: (e as Error).message });
+          }
+          line({ phase: "done", ok: true, report: out.report, archivedId });
+        }
       } catch (e) {
         // 取消不是错误：报成失败会让用户以为是自己的网格配错了
         if (e instanceof ReplayAborted) line({ phase: "aborted", ok: false, reason: e.message });

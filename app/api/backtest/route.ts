@@ -2,7 +2,8 @@ import { err, ok, parseBody } from "@/lib/ui/api";
 import { BacktestRunSchema } from "@/lib/ui/validate";
 import { runBacktestAsync, ReplayAborted } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
-import { openRead } from "@/lib/ui/db";
+import { openRead, writeDb } from "@/lib/ui/db";
+import { saveBacktestReport } from "@/lib/ui/mutations";
 import { tryAcquire, release } from "@/lib/ui/heavy";
 import { shanghaiTs } from "@/lib/ui/time";
 
@@ -91,8 +92,29 @@ export async function POST(req: Request) {
           signal: abort,
           onProgress: p => line({ phase: "day", done: p.done, total: p.total, date: p.date }),
         });
-        if (!out.available) line({ phase: "error", ok: false, reason: out.reason, needs: out.needs });
-        else line({ phase: "done", ok: true, report: out.report });
+        if (!out.available) { line({ phase: "error", ok: false, reason: out.reason, needs: out.needs }); }
+        else {
+          // 先存档再回消息：报告是花了几分钟算出来的，落库失败也要让用户拿到结果，
+          // 但反过来"回了消息才存"会在这中间断线时把结果丢掉
+          let archivedId: string | null = null;
+          try {
+            const w = writeDb();
+            archivedId = saveBacktestReport(w, {
+              kind: "backtest",
+              strategyId: out.report.strategyId,
+              strategyVersion: out.report.strategyVersion,
+              from: b.value.from, to: b.value.to,
+              initialCash: b.value.initialCash,
+              metrics: out.report.metrics,
+              report: out.report,
+            });
+            w.close();
+          } catch (e) {
+            // 存档失败不该把跑成功的回测变成失败：结果照给，只是没存住
+            line({ phase: "archive_failed", reason: (e as Error).message });
+          }
+          line({ phase: "done", ok: true, report: out.report, archivedId });
+        }
       } catch (e) {
         // 取消不是错误：报成失败会让用户以为是自己的策略配置有问题
         if (e instanceof ReplayAborted) line({ phase: "aborted", ok: false, reason: e.message });

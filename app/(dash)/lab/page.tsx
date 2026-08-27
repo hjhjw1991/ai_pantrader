@@ -4,11 +4,13 @@ import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { LabRunner } from "@/components/LabRunner";
 import { SweepRunner } from "@/components/SweepRunner";
+import { ReportArchive } from "@/components/ReportArchive";
 import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
-import { calendarRange, strategies, tableCountsCached } from "@/lib/ui/queries";
+import { calendarRange, strategies, tableCountsCached, backtestReports } from "@/lib/ui/queries";
+import { REPORT_KEEP } from "@/lib/ui/mutations";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { SWEEP_MAX_POINTS } from "@/lib/ui/adapters/engines";
 
@@ -33,6 +35,7 @@ export default function LabPage() {
   const cal = calendarRange(db);
   // 见 settings 页：整轮 COUNT(*) 要几秒，而页面每 60 秒自刷
   const { counts, at: countsAt } = tableCountsCached(db);
+  const archive = backtestReports(db);
   const count = (t: string) => counts.find((c) => c.table === t)?.rows ?? -1;
 
   return (
@@ -201,6 +204,18 @@ export default function LabPage() {
         用当前在市清单回测 2022 年等于假装当年买的没一只退市（spec §10.2）。
         这条约束在 PointInTimeView.universe() 里，不在前端。
       </p>
+
+      <Panel
+        title="回测存档"
+        hint="报告不再只活在页面里 —— 四年跨度一次回测约 6 分钟，36 点扫描约 3.7 小时，切走就没了太贵"
+        right={`最近 ${archive.length} 份 / 上限 ${REPORT_KEEP}`}
+      >
+        {archive.length === 0 ? (
+          <NoRows what="还没有存档" hint="跑一次回测或参数扫描，结果会自动存下来" />
+        ) : (
+          <ReportArchive rows={archive} keep={REPORT_KEEP} />
+        )}
+      </Panel>
     </div>
   );
 }

@@ -209,3 +209,65 @@ export function recordManualFill(db: Db, f: ManualFillInput): ManualFillResult {
   const position = tx() as { qty: number; cost: number } | null;
   return { tradeId, position };
 }
+
+// ═══════════════════════════ 回测存档 ═══════════════════════════
+
+export interface SaveReportInput {
+  kind: "backtest" | "sweep";
+  strategyId: string;
+  strategyVersion: string;
+  from: string;
+  to: string;
+  initialCash: number;
+  metrics: { annualReturn: number; maxDrawdown: number; calmar: number; trades: number } | null;
+  /** 扫描独有：扫了几个点 */
+  evaluated?: number;
+  report: unknown;
+}
+
+/**
+ * 只留最近这么多份。
+ *
+ * 定 50 而不是不限：报告是不可变快照，历史价值随时间快速衰减
+ * （半年前那次用的是半年前的数据和参数），而无限增长的表迟早要有人手工清。
+ * 一年跨度实测 13 KB，四年约 50 KB，50 份约 2.6 MB —— 对一个 2 GB 的库可以忽略。
+ */
+export const REPORT_KEEP = 50;
+
+/**
+ * 存一份报告，并把超出保留数的旧档删掉。
+ *
+ * id 用"生成时刻 + 随机后缀"而不是内容哈希：同一份配置同一段区间重跑一次，
+ * 用户想看到的是两条记录（"我又跑了一次"），而不是被去重成一条 ——
+ * 报告里带着 generatedAt，两次本来就不是同一份东西。
+ */
+export function saveBacktestReport(db: Db, i: SaveReportInput): string {
+  const ts = shanghaiTs();
+  const id = `${ts.replace(/[^0-9]/g, "")}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+  db.prepare(
+    `INSERT INTO backtest_report
+       (id, ts, kind, strategy_id, strategy_ver, from_date, to_date, initial_cash,
+        annual_return, max_drawdown, calmar, trades, evaluated, report_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    id, ts, i.kind, i.strategyId, i.strategyVersion, i.from, i.to, i.initialCash,
+    i.metrics?.annualReturn ?? null, i.metrics?.maxDrawdown ?? null,
+    i.metrics?.calmar ?? null, i.metrics?.trades ?? null,
+    i.evaluated ?? null, JSON.stringify(i.report)
+  );
+
+  // 超额的按时间从旧到新删。用子查询选出要保留的，而不是先数再算偏移 ——
+  // 后者在并发写入时会多删或少删
+  db.prepare(
+    `DELETE FROM backtest_report WHERE id NOT IN (
+       SELECT id FROM backtest_report ORDER BY ts DESC LIMIT ?
+     )`
+  ).run(REPORT_KEEP);
+
+  return id;
+}
+
+/** 删一份存档。用户主动删才调，保留数超了走 saveBacktestReport 里的自动清理 */
+export function deleteBacktestReport(db: Db, id: string): void {
+  db.prepare("DELETE FROM backtest_report WHERE id = ?").run(id);
+}

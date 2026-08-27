@@ -842,3 +842,78 @@ export function advisorOutputs(db: Db, limit = 50): AdvisorRow[] {
     degraded: Number(r.degraded) === 1,
   }));
 }
+
+// ═══════════════════════════ 回测存档 ═══════════════════════════
+
+/** 表在不在。migration 落后于代码时用它退化，而不是抛到页面上 */
+function hasTable(db: Db, name: string): boolean {
+  return db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).get(name) !== undefined;
+}
+
+export interface ReportSummary {
+  id: string;
+  ts: string;
+  kind: "backtest" | "sweep";
+  strategyId: string;
+  strategyVersion: string;
+  from: string;
+  to: string;
+  initialCash: number;
+  annualReturn: number | null;
+  maxDrawdown: number | null;
+  calmar: number | null;
+  trades: number | null;
+  evaluated: number | null;
+}
+
+/**
+ * 存档列表。**刻意不读 report_json** —— 列一页存档如果把几十份完整报告
+ * 全读进内存再扔掉，那是几 MB 的无谓开销，而列表上一个字段都用不到它。
+ * 摘要字段在写入时就拆出来存了，就是为了这个读法。
+ */
+export function backtestReports(db: Db, limit = 50): ReportSummary[] {
+  // 表不存在（新 migration 还没跑到这个库上）时返回空表，而不是让整个实验室页 500。
+  // 存档是附加功能，缺它不该挡住回测本身 —— 和 getMetaValue / appliedMigrations 同一处置
+  if (!hasTable(db, "backtest_report")) return [];
+  const rows = db.prepare(
+    `SELECT id, ts, kind, strategy_id, strategy_ver, from_date, to_date, initial_cash,
+            annual_return, max_drawdown, calmar, trades, evaluated
+       FROM backtest_report ORDER BY ts DESC LIMIT ?`
+  ).all(limit) as Array<Record<string, unknown>>;
+  return rows.map(r => ({
+    id: String(r.id),
+    ts: String(r.ts),
+    kind: r.kind === "sweep" ? "sweep" : "backtest",
+    strategyId: String(r.strategy_id),
+    strategyVersion: String(r.strategy_ver),
+    from: String(r.from_date),
+    to: String(r.to_date),
+    initialCash: Number(r.initial_cash),
+    annualReturn: r.annual_return === null ? null : Number(r.annual_return),
+    maxDrawdown: r.max_drawdown === null ? null : Number(r.max_drawdown),
+    calmar: r.calmar === null ? null : Number(r.calmar),
+    trades: r.trades === null ? null : Number(r.trades),
+    evaluated: r.evaluated === null ? null : Number(r.evaluated),
+  }));
+}
+
+/**
+ * 取一份完整存档。JSON 解析失败返回 null 而不是抛 ——
+ * 一份存坏的档不该让整个存档列表打不开。
+ */
+export function backtestReportById(
+  db: Db, id: string
+): { kind: "backtest" | "sweep"; report: unknown } | null {
+  if (!hasTable(db, "backtest_report")) return null;
+  const r = db.prepare(
+    "SELECT kind, report_json FROM backtest_report WHERE id = ?"
+  ).get(id) as { kind: string; report_json: string } | undefined;
+  if (r === undefined) return null;
+  try {
+    return { kind: r.kind === "sweep" ? "sweep" : "backtest", report: JSON.parse(r.report_json) };
+  } catch {
+    return null;
+  }
+}
