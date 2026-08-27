@@ -82,6 +82,21 @@ export interface StrategyConfig {
   };
   选股: {
     过滤器阈值: Record<string, number>;
+    /**
+     * 候选从哪几路来。三路都要过同一道主线筛与七道筛，只是"进池"的理由不同：
+     *   涨停池   —— 昨日涨停（强度最直接的证据）
+     *   主线领涨 —— 主线板块涨幅榜上那只领涨股
+     *   量价     —— 主线板块成分里放量突破且均线多头排列的
+     * 缺省全开。任一路关掉都只是少一个来源，不改变后面的筛与触发价逻辑。
+     */
+    候选来源?: { 涨停池?: boolean; 主线领涨?: boolean; 量价?: boolean };
+    /** 量价那一路的阈值。不配就用引擎默认值 */
+    量价条件?: {
+      均量窗口?: number;
+      放量倍数?: number;
+      新高窗口?: number;
+      多头排列?: boolean;
+    };
     主线识别: {
       板块涨幅榜TopN: number;
       /**
@@ -108,6 +123,20 @@ export interface StrategyEngineInput {
   phase: Phase;
   /** 当前持仓，用于产出持仓动作 */
   positions: Array<{ account: AccountType; code: string; cost: number; qty: number; stopPx: number | null }>;
+  /**
+   * 代码 → 行业板块。可选。
+   *
+   * 走输入而不是往 PointInTimeView 上加方法：视图是冻结契约（gapKinds 当初也是
+   * 为此另开的函数）。而且这份映射与视图的其余数据性质不同 —— 它是**当前**的行业归属，
+   * 没有历史版本，所以回放历史时它天然带一点前视，必须能被单独识别和告警，
+   * 混进视图里就看不出来了。
+   *
+   * 不给（或查不到某只票）时，依赖它的候选来源自动关闭，并在卡片上说明 ——
+   * "查不到行业"不等于"不在主线上"。
+   */
+  sectorOf?: (code: string) => string | null;
+  /** 上面那份映射是什么时候采的（上海挂钟串），用于前视告警。不给就不告警 */
+  sectorMapAt?: string;
 }
 
 export type StrategyEngine = (input: StrategyEngineInput) => SignalCard;

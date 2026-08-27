@@ -218,7 +218,20 @@ function assessEnv(
     板块涨幅榜TopN: config.选股.主线识别.板块涨幅榜TopN,
     必查链: config.选股.主线识别.必查链,
   });
-  const mainlines = 主线 === null ? [] : strArray(主线.value);
+  /**
+   * 主线名单。
+   *
+   * 除了链名/板块名本身，还要把因子给出的**真实板块名**并进来：
+   * 必查链的名字是"半导体全链"，而板块榜与涨停池里的名字是"半导体材料 / 半导体设备"，
+   * 子串互含一个都匹配不上 —— 于是"按主线选票"对必查链型主线整个失效，
+   * 表现只是候选少了几只，不报错也不告警。链→板块的对应只有因子层知道，
+   * 所以它通过 inputs.明细[].sectors 交出来（见 lib/factors/sectors.ts）。
+   */
+  const mainlineNames = 主线 === null ? [] : strArray(主线.value);
+  const 明细 = Array.isArray(主线?.inputs?.["明细"]) ? 主线!.inputs!["明细"] as unknown[] : [];
+  const realSectors = 明细.flatMap(m =>
+    m !== null && typeof m === "object" ? strArray((m as { sectors?: unknown }).sectors) : []);
+  const mainlines = [...new Set([...mainlineNames, ...realSectors])];
   if (mainlines.length === 0) {
     warn("未识别到主线板块 —— 候选池只会剩下必查链兜底能捞到的票，注意是不是板块榜快照缺了");
   }
@@ -353,6 +366,141 @@ interface RawCandidate {
   score: number;
 }
 
+/** 进池的理由。写进 thesis，也让人在卡片上看得出这只票是怎么被捞出来的 */
+type PoolSource = "涨停池" | "主线领涨" | "量价";
+
+interface PoolRow {
+  code: string;
+  sector: string | null;
+  /** 连板数与封单额只有涨停池那一路有；另两路为 0，排序时自然靠后 */
+  lbc: number;
+  sealAmt: number;
+  source: PoolSource;
+}
+
+const 量价默认 = { 均量窗口: 5, 放量倍数: 1.5, 新高窗口: 20, 多头排列: true };
+
+/**
+ * 放量突破 + 均线多头排列。
+ *
+ * 两条同时满足才算数：放量抓的是"资金刚进来"，多头排列排掉"放量但趋势已坏"的出货。
+ * 只看放量会捞到一批高位放量滞涨，只看多头排列会捞到一批缩量上行的慢牛
+ * —— 后者不是坏事，但那是另一种策略，不该混在同一个信号里不做区分。
+ *
+ * 用原始收盘价而非复权价：与触发价同源。窗口只有几十天，除权概率低，
+ * 混用的误差远小于"复权因子本身缺失"（spec R1）带来的误差。
+ */
+function passesVolumePrice(
+  view: PointInTimeView, code: string, date: string,
+  p: { 均量窗口: number; 放量倍数: number; 新高窗口: number; 多头排列: boolean }
+): boolean {
+  const need = Math.max(p.均量窗口, p.新高窗口, 20) + 1;
+  const bars = view.dailyBars(code, need);
+  if (bars.length < Math.max(p.均量窗口 + 1, 20)) return false;
+  const last = bars[bars.length - 1];
+  // 评估日当天必须有这根 bar，否则比的是别的日子
+  if (last.date !== date) return false;
+
+  const volWin = bars.slice(-1 - p.均量窗口, -1);
+  if (volWin.length < p.均量窗口) return false;
+  const avgVol = volWin.reduce((a, b) => a + b.vol, 0) / volWin.length;
+  if (!(avgVol > 0) || !(last.vol >= avgVol * p.放量倍数)) return false;
+
+  const highWin = bars.slice(-p.新高窗口);
+  const maxClose = Math.max(...highWin.slice(0, -1).map(b => b.c));
+  if (!(last.c >= maxClose)) return false;
+
+  if (p.多头排列) {
+    const ma = (n: number) => {
+      const w = bars.slice(-n);
+      return w.length < n ? null : w.reduce((a, b) => a + b.c, 0) / n;
+    };
+    const [m5, m10, m20] = [ma(5), ma(10), ma(20)];
+    if (m5 === null || m10 === null || m20 === null) return false;
+    if (!(m5 > m10 && m10 > m20 && last.c > m5)) return false;
+  }
+  return true;
+}
+
+/**
+ * 候选池：三路来源汇成一个列表，后面的主线筛 / 七道筛 / 回踩触发价对三路一视同仁。
+ *
+ * 为什么要多路：只从涨停池选，等于"入场手法是回踩低吸，标的池的人口结构却是打板股"
+ * —— 主线里没涨停但形态好的票永远进不来。
+ *
+ * 三路都保留 sector，因为"不在主线上的不追"这条纪律对三路一律有效。
+ * 量价那一路**先按行业过滤再拉日线**：先筛主线成分（一次哈希查找）再取 bar，
+ * 全市场 5,888 只降到几百只。反过来写的话，光这一路就要给回测每天加约 0.3 秒，
+ * 相对现在 0.38 秒/交易日 是近乎翻倍。
+ */
+function candidatePool(
+  input: StrategyEngineInput, mainlines: string[], date: string, warn: (m: string) => void
+): PoolRow[] {
+  const { view, config } = input;
+  const 开关 = config.选股.候选来源 ?? {};
+  const on = (k: "涨停池" | "主线领涨" | "量价"): boolean => 开关[k] !== false;
+  const seen = new Set<string>();
+  const out: PoolRow[] = [];
+  const push = (r: PoolRow): void => {
+    if (seen.has(r.code)) return;   // 多路命中同一只票时，先到的来源胜出（顺序即优先级）
+    seen.add(r.code);
+    out.push(r);
+  };
+
+  if (on("涨停池")) {
+    for (const r of view.ztPool(date)) {
+      push({ code: r.code, sector: r.sector, lbc: r.lbc ?? 0, sealAmt: r.sealAmt ?? 0, source: "涨停池" });
+    }
+  }
+
+  if (on("主线领涨")) {
+    // 同一天板块榜有多个时点，取每个板块最后一个时点的领涨股
+    const latest = new Map<string, { ts: string; leaderCode: string | null }>();
+    for (const r of view.sectorRank(date)) {
+      const prev = latest.get(r.sector);
+      if (prev === undefined || r.ts >= prev.ts) latest.set(r.sector, { ts: r.ts, leaderCode: r.leaderCode });
+    }
+    for (const [sector, v] of latest) {
+      if (v.leaderCode === null) continue;
+      if (matchesMainline(sector, mainlines) === null) continue;
+      push({ code: v.leaderCode, sector, lbc: 0, sealAmt: 0, source: "主线领涨" });
+    }
+  }
+
+  if (on("量价")) {
+    if (input.sectorOf === undefined) {
+      warn("候选来源.量价 未启用：没有 代码→行业 映射，无法判断标的是否在主线上 —— 查不到行业不等于不在主线上");
+    } else {
+      const p = { ...量价默认, ...(config.选股.量价条件 ?? {}) };
+      // 映射是"当前"的行业归属，没有历史版本：回放早于采集时间的日期时带一点前视
+      if (input.sectorMapAt !== undefined && input.sectorMapAt.slice(0, 10) > date) {
+        warn(
+          `候选来源.量价：代码→行业 映射采于 ${input.sectorMapAt.slice(0, 10)}，晚于评估日 ${date}` +
+          ` —— 行业归属没有历史版本，这一路在回放上存在轻微前视`
+        );
+      }
+      let scanned = 0;
+      for (const sec of view.universe()) {
+        const sector = input.sectorOf(sec.code);
+        if (sector === null) continue;                       // 查不到行业：不猜
+        if (matchesMainline(sector, mainlines) === null) continue;
+        scanned++;
+        if (passesVolumePrice(view, sec.code, date, p)) {
+          push({ code: sec.code, sector, lbc: 0, sealAmt: 0, source: "量价" });
+        }
+      }
+      if (scanned === 0 && mainlines.length > 0) {
+        warn("候选来源.量价：主线板块下一只成分股都没查到 —— 多半是 代码→行业 映射还没采全");
+      }
+    }
+  }
+
+  // 排序先定死：连板高 → 封单大 → 代码。名次会影响风控分配，抖动就是结果不可复现。
+  // 非涨停来源的 lbc/sealAmt 是 0，自然排在涨停股之后 —— 这是有意的优先级。
+  return out.sort((a, b) =>
+    b.lbc - a.lbc || b.sealAmt - a.sealAmt || (a.code < b.code ? -1 : 1));
+}
+
 function buildCandidates(
   input: StrategyEngineInput, runner: FactorRunner, mainlines: string[],
   heldCodes: Set<string>, date: string, warn: (m: string) => void
@@ -363,11 +511,7 @@ function buildCandidates(
   const perms = accountBoards(config);
   const out: RawCandidate[] = [];
 
-  // 排序先定死：连板高 → 封单大 → 代码。名次会影响风控分配，抖动就是结果不可复现
-  const pool = [...view.ztPool(date)].sort((a, b) =>
-    (b.lbc ?? 0) - (a.lbc ?? 0) ||
-    (b.sealAmt ?? 0) - (a.sealAmt ?? 0) ||
-    (a.code < b.code ? -1 : 1));
+  const pool = candidatePool(input, mainlines, date, warn);
 
   for (const row of pool) {
     if (heldCodes.has(row.code)) continue;              // 已持仓的走 holdings，不重复开仓
@@ -420,6 +564,9 @@ function buildCandidates(
     /* thesis：讲不出逻辑的不进池 */
     const stockFacts: FactorResult<any>[] = [filt];
     const parts: string[] = [`主线${mainline}`];
+    // 进池的理由写进 thesis：三路来源的票在卡片上长得一样，
+    // 不写清楚就没法判断"这只是昨天涨停的"还是"这只是量价选出来的"
+    if (row.source !== "涨停池") parts.push(`来源${row.source}`);
     if (row.lbc > 1) parts.push(`${row.lbc} 连板`);
     const 温度 = runner.run("龙头温度计", { 板块: mainline });
     if (温度 !== null && 温度.confidence > 0 && 温度.label !== undefined) {

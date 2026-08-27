@@ -48,6 +48,16 @@ export interface MainlineHit {
   leaderCode: string | null;
   limitUpCount: number;
   maxLbc: number;
+  /**
+   * 这条主线实际对应的**真实板块名**。
+   *
+   * 必须带出来：必查链的 name 是链名（"半导体全链"），而板块榜与 zt_pool 里的名字是
+   * "半导体材料 / 半导体设备 / 集成电路制造"。策略层拿链名去和板块名做子串互含
+   * 一个都匹配不上 —— 于是"按主线选票"这件事对必查链型主线整个失效，
+   * 而表现只是候选少了几只，不报错、不告警。链→板块的对应关系只有本模块知道
+   * （必查链关键词在这里），所以由本模块交出去。
+   */
+  sectors: string[];
 }
 
 export interface MainlineResult {
@@ -98,6 +108,8 @@ export function identifyMainlines(
         name: sector, source: "板块榜" as const, pct: round6(v.pct),
         leaderCode: v.leaderCode ?? leaderOf(members),
         limitUpCount: members.length, maxLbc: maxLbcOf(members),
+        // 板块榜命中时 name 本身就是真实板块名
+        sectors: [sector],
       };
     });
 
@@ -106,9 +118,15 @@ export function identifyMainlines(
     if (byRank.some(m => chainOf(m.name) === chain)) continue;   // 均值榜已经把这条链带进来了
     const members = zt.filter(z => chainOf(z.sector) === chain);
     if (members.length < minZt) continue;
+    // 链下真实出现过的板块名：板块榜里的 + 今日涨停池里的，去重后交给策略层
+    const chainSectors = [...new Set([
+      ...[...ranks.keys()].filter(sc => chainOf(sc) === chain),
+      ...members.map(z => z.sector).filter((x): x is string => typeof x === "string" && x.length > 0),
+    ])].sort();
     byChain.push({
       name: chain, source: "必查链龙头", pct: null,
       leaderCode: leaderOf(members), limitUpCount: members.length, maxLbc: maxLbcOf(members),
+      sectors: chainSectors,
     });
   }
 

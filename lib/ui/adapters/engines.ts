@@ -10,7 +10,7 @@ import { runBacktestAsync as replayAsync, ReplayAborted, type ReplayProgress } f
 import { gridPoints, heatmap, optimize, type ParamGrid } from "@/lib/backtest/optimizer";
 import { canonicalJson } from "@/lib/backtest/hash";
 import { overrideConfigParams } from "@/lib/ui/adapters/strategy";
-import { positions as loadPositions } from "@/lib/ui/queries";
+import { positions as loadPositions, sectorMap } from "@/lib/ui/queries";
 
 /**
  * 信号引擎 / 回测器适配器。
@@ -69,7 +69,13 @@ export function todaySignalCard(
       qty: p.qty,
       stopPx: p.stopPx,
     }));
-    const card = engine({ view, config, phase, positions: pos });
+    // 代码→行业 映射走输入注入（视图是冻结契约，见 StrategyEngineInput.sectorOf 的说明）
+    const sm = sectorMap(db);
+    const card = engine({
+      view, config, phase, positions: pos,
+      sectorOf: (code: string) => sm.byCode.get(code) ?? null,
+      ...(sm.at === null ? {} : { sectorMapAt: sm.at }),
+    });
     return { available: true, card, phase, asOf, universe: universeQuality(db, asOf) };
   } catch (e) {
     return unavailable(

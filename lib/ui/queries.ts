@@ -917,3 +917,25 @@ export function backtestReportById(
     return null;
   }
 }
+
+/**
+ * 代码 → 行业板块 的全量映射。
+ *
+ * 一次读全（5,888 行、两列）而不是逐票查：候选来源里的量价那一路要对整个宇宙
+ * 做一次行业过滤，逐票查等于几千次查询；一次读全是一个几毫秒的顺序扫描。
+ *
+ * at 是这批映射的采集时刻，交给引擎判断回放时是否存在前视 ——
+ * 行业归属没有历史版本，拿今天的映射去回放 2023 年是有问题的，必须能被看见。
+ */
+export function sectorMap(db: Db): { byCode: Map<string, string>; at: string | null } {
+  if (!hasTable(db, "security_sector")) return { byCode: new Map(), at: null };
+  const rows = db.prepare("SELECT code, sector, ts FROM security_sector").all() as
+    Array<{ code: string; sector: string; ts: string }>;
+  const byCode = new Map<string, string>();
+  let at: string | null = null;
+  for (const r of rows) {
+    byCode.set(r.code, r.sector);
+    if (at === null || r.ts > at) at = r.ts;
+  }
+  return { byCode, at };
+}
