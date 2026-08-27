@@ -298,26 +298,51 @@ export interface SectorRankEntry {
  * f3 的单位是 **万分之一**（639 = 6.39%），这里除以 100 归一成百分数 ——
  * 库里 pct 一律百分数，混着存迟早会有一处按错口径比阈值。
  */
+/**
+ * 单页上限。实测这个接口 **pz 超过 100 也只回 100** —— 请求 200 拿回来的还是 100，
+ * 而 total 是 496。不分页就会静默只拿到前 100 个行业，剩下的票在 代码→行业 映射里
+ * 查不到，再被主线筛当成"不在主线上"挡掉：一个看起来完全正常、
+ * 其实少了三分之二市场的候选池。
+ */
+const CLIST_PAGE_MAX = 100;
+
 export async function fetchSectorRank(
-  client: SourceClient, o: RotationOpts & { top?: number } = {}
+  client: SourceClient,
+  o: RotationOpts & { top?: number; allPages?: boolean } = {}
 ): Promise<SectorRankEntry[]> {
-  const pz = o.top ?? 100;
-  const r = await getWithHostRotation(
-    client,
-    // EM_PUSH2_HOSTS 存的是短名（"82.push2"），域名要在这里补齐 —— 与 fetchAllSecurities 一致
-    host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=1&pz=${pz}&po=1&fid=f3` +
-      // f128（领涨股名称）必须一起要：实测只要 f12,f14,f3,f140 时，f140 不会回来；
-      // 加上 f128 之后两个都有。我们只存代码，f128 纯粹是为了把 f140 带出来。
-      `&fs=m%3A90%2Bt%3A2&fields=f12%2Cf14%2Cf3%2Cf128%2Cf140&ut=${UT}`,
-    "sector rank", o
-  );
+  const pz = Math.min(CLIST_PAGE_MAX, o.allPages === true ? CLIST_PAGE_MAX : (o.top ?? CLIST_PAGE_MAX));
+  const out: SectorRankEntry[] = [];
 
-  const j = JSON.parse(r.text);
-  const diff = j?.data?.diff;
-  if (diff === undefined || diff === null) throw new Error("eastmoney sector rank unexpected payload");
-  // 东财这个接口的 diff 有时是数组、有时是以序号为键的对象，两种都要认
-  const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
+  for (let pn = 1; ; pn++) {
+    const r = await getWithHostRotation(
+      client,
+      // EM_PUSH2_HOSTS 存的是短名（"82.push2"），域名要在这里补齐 —— 与 fetchAllSecurities 一致
+      host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}&po=1&fid=f3` +
+        // f128（领涨股名称）必须一起要：实测只要 f12,f14,f3,f140 时，f140 不会回来；
+        // 加上 f128 之后两个都有。我们只存代码，f128 纯粹是为了把 f140 带出来。
+        `&fs=m%3A90%2Bt%3A2&fields=f12%2Cf14%2Cf3%2Cf128%2Cf140&ut=${UT}`,
+      "sector rank", o
+    );
 
+    const data = JSON.parse(r.text)?.data;
+    const diff = data?.diff;
+    if (diff === undefined || diff === null) {
+      if (pn === 1) throw new Error("eastmoney sector rank unexpected payload");
+      break;                       // 翻到空页 = 到底了
+    }
+    // 东财这个接口的 diff 有时是数组、有时是以序号为键的对象，两种都要认
+    const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
+    out.push(...mapSectorRows(list));
+
+    if (o.allPages !== true) break;
+    const total = Number(data?.total ?? 0);
+    // pn 天花板兜底，防翻页失控（496/100 → 5 页，20 页很充裕）
+    if (list.length === 0 || out.length >= total || pn >= 20) break;
+  }
+  return out;
+}
+
+function mapSectorRows(list: any[]): SectorRankEntry[] {
   return list
     .filter(x => x !== null && typeof x === "object" && typeof x.f14 === "string")
     // f3 缺失时整条丢掉，不补 0：0% 会被当成"这个板块今天没动"读
@@ -406,4 +431,40 @@ export async function fetchMacroQuote(
     throw new Error(`eastmoney macro ${symbol}(${secid}) 报价不是数字：f43=${d.f43} f170=${d.f170}`);
   }
   return { symbol, price, pct };
+}
+
+/* ─────────────────────── 板块成分股 ─────────────────────── */
+
+export interface SectorMember { code: string; name: string }
+
+/**
+ * 某个行业板块的成分股（`fs=b:BKxxxx`）。
+ *
+ * 用来建立全市场的 代码 → 行业 映射。此前库里唯一的映射来源是 zt_pool.sector，
+ * 只覆盖曾涨停过的票，于是候选池只能从涨停池里选。
+ *
+ * 一次拿全（pz=600）：单个行业成分最多两三百只，分页只会多打一倍请求，
+ * 而东财的限流额度很紧。
+ */
+export async function fetchSectorMembers(
+  client: SourceClient, bk: string, o: RotationOpts = {}
+): Promise<SectorMember[]> {
+  const r = await getWithHostRotation(
+    client,
+    host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=1&pz=600&po=1&fid=f3` +
+      `&fs=b%3A${encodeURIComponent(bk)}&fields=f12%2Cf14&ut=${UT}`,
+    `sector members ${bk}`, o
+  );
+
+  const j = JSON.parse(r.text);
+  const diff = j?.data?.diff;
+  // total=0 且 diff=null 是合法的（空板块），不能当报文异常
+  if (diff === undefined || diff === null) return [];
+  const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
+
+  return list
+    .filter(x => x !== null && typeof x === "object" && typeof x.f12 === "string")
+    // 只要 6 位 A 股代码：板块里混着的指数/其它市场代码不属于我们的宇宙
+    .filter(x => /^\d{6}$/.test(x.f12))
+    .map(x => ({ code: String(x.f12), name: String(x.f14 ?? "") }));
 }

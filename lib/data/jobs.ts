@@ -5,6 +5,7 @@ import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
 import {
   collectZtPool, collectSectorRank, collectDtPool, collectMacro,
+  collectSectorMembers, sectorMembersUpdatedAt, collectSectorRankList,
 } from "@/lib/data/collectors/cross-section";
 import { collectDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
@@ -13,6 +14,22 @@ import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { deriveSecurityMeta } from "@/lib/data/security-meta";
 import { MACRO_SECIDS } from "@/lib/data/sources/eastmoney";
+import { shanghaiTs } from "@/lib/data/clock";
+
+/**
+ * 盘中每隔多少分钟采一次板块涨幅榜。盘中时点是 5 分钟一个，所以 15 = 每 3 轮一次。
+ * 设 0 表示盘中完全不采（只留收盘那一张）。
+ */
+const SECTOR_RANK_EVERY_MIN = 15;
+
+/**
+ * 代码→行业 映射多久刷新一次（天）。
+ *
+ * 刷一次要 100+ 个请求，是本项目对东财最重的调用；而行业归属只在并购、
+ * 主业变更时才动。所以按周刷，且只在夜间 —— 那时没人等结果，
+ * 限流也影响不到盘中采集。
+ */
+const SECTOR_MEMBERS_MAX_AGE_DAYS = 7;
 
 export type JobName =
   | "selfcheck" | "preopen" | "plan" | "intraday" | "close" | "post" | "night";
@@ -238,12 +255,23 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         stats.minuteNoData = min.noData.length;
       }
       /**
-       * 板块涨幅榜每轮都采。主线识别看的是"谁一直在榜上"，只留收盘那一张就看不出来了。
+       * 板块涨幅榜。主线识别看的是"谁一直在榜上"，所以要留多个时点，
+       * 但**不必每轮都留**：实测每 5 分钟一次会把东财打到限流 ——
+       * 一轮下来 10 个主机多数返回 fetch failed，靠轮换才勉强拿到，
+       * 而同一时段 tencent/sina 是 594/594、300/300 全成功。是我们打得太密。
+       *
+       * 每 15 分钟一次（每 3 个时点采一次）：盘中约 10 个时点快照，
+       * 足够看出"谁一直在榜上"，而请求量降到三分之一。
        * 失败不上抛：板块榜没了不该让整轮盘中采集（全市场快照）算失败。
        */
-      try {
-        stats.sectorRankRows = await collectSectorRank(db, clients.eastmoney, compact);
-      } catch { stats.sectorRankFailed = 1; }
+      if (SECTOR_RANK_EVERY_MIN > 0) {
+        const mins = Number(shanghaiTs(now).slice(14, 16));
+        if (mins % SECTOR_RANK_EVERY_MIN < 5) {
+          try {
+            stats.sectorRankRows = await collectSectorRank(db, clients.eastmoney, compact);
+          } catch { stats.sectorRankFailed = 1; }
+        }
+      }
 
       /**
        * 采完就比一次信号。放在这里而不是另起一个 job：
@@ -278,6 +306,28 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       break;
     }
     case "night": {
+      /**
+       * 代码→行业 映射：空表或过期才刷。放在夜间 job 的最前面 ——
+       * 它请求重，跑在全量日线之前可以和后面那 5,888 次新浪请求错开源。
+       */
+      {
+        const last = sectorMembersUpdatedAt(db);
+        const lastMs = last === null ? NaN : Date.parse(`${last.slice(0, 10)}T00:00:00Z`);
+        // 空表或时间戳解析不出来（脏数据）都当成"该刷了"：宁可多刷一次，
+        // 也不要因为一个解析不了的时间戳让映射永远不更新
+        const stale = !Number.isFinite(lastMs)
+          || (now.getTime() - lastMs) / 86_400_000 >= SECTOR_MEMBERS_MAX_AGE_DAYS;
+        if (stale) {
+          try {
+            const ranks = await collectSectorRankList(db, clients.eastmoney);
+            const r = await collectSectorMembers(db, clients.eastmoney, ranks);
+            stats.sectorMembersSectors = r.sectors;
+            stats.sectorMembersCodes = r.codes;
+            stats.sectorMembersFailed = r.failed.length;
+          } catch { stats.sectorMembersFailed = -1; }
+        }
+      }
+
       const daily = await collectDaily(db, clients.sina, allCodes(db), 1023);
       stats.dailyWritten = daily.written;
       stats.dailyFailed = daily.failed.length;

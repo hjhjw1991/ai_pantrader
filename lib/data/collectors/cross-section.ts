@@ -1,7 +1,7 @@
 import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
 import {
-  fetchZtPool, fetchSectorRank, fetchDtPool, fetchMacroQuote,
+  fetchZtPool, fetchSectorRank, fetchDtPool, fetchMacroQuote, fetchSectorMembers,
 } from "@/lib/data/sources/eastmoney";
 import { recordGap, resolveGap } from "@/lib/data/gap";
 import { shanghaiTs } from "@/lib/data/clock";
@@ -135,4 +135,68 @@ export async function collectMacro(
     }
   }
   return { written, failed };
+}
+
+/**
+ * 全市场 代码 → 行业板块 映射。
+ *
+ * 逐个行业拉成分股。行业数约 106，每个一个请求 —— 这是本项目对东财最重的一次调用，
+ * 所以**不每天跑**：行业归属只在并购、主业变更时才动，按"整张表多久没更新过"判，
+ * 默认 7 天一次，放在夜间 job（那时没人等结果，且限流影响不到盘中采集）。
+ *
+ * 部分失败照样写入已拿到的部分并如实报数：拿到 90 个行业的映射，
+ * 比因为 16 个失败就整批丢弃有用得多 —— 缺的那部分下次刷新时补，
+ * 而映射缺失的票在策略层会被主线筛挡下（那是"未判定不等于通过"，不是错判）。
+ */
+export async function collectSectorMembers(
+  db: Db, client: SourceClient, sectors: Array<{ bk: string; sector: string }>
+): Promise<{ sectors: number; codes: number; failed: string[] }> {
+  const ts = shanghaiTs();
+  const stmt = db.prepare(
+    "INSERT OR REPLACE INTO security_sector (code, sector, bk, ts) VALUES (?, ?, ?, ?)"
+  );
+  let codes = 0, done = 0;
+  const failed: string[] = [];
+
+  for (const s of sectors) {
+    try {
+      const members = await fetchSectorMembers(client, s.bk, { rounds: 1 });
+      db.transaction(() => {
+        for (const m of members) stmt.run(m.code, s.sector, s.bk, ts);
+      })();
+      codes += members.length;
+      done++;
+    } catch (e: any) {
+      failed.push(`${s.sector}(${s.bk})`);
+    }
+  }
+  if (failed.length > 0) {
+    recordGap(db, ts.slice(0, 10), client.source, "security_sector",
+      `${failed.length}/${sectors.length} 个行业成分拉取失败：${failed.slice(0, 5).join(", ")}` +
+      (failed.length > 5 ? " …" : ""), true);
+  } else {
+    resolveGap(db, ts.slice(0, 10), client.source, "security_sector");
+  }
+  return { sectors: done, codes, failed };
+}
+
+/** 映射表最后一次更新是什么时候（上海挂钟串）。空表返回 null */
+export function sectorMembersUpdatedAt(db: Db): string | null {
+  const r = db.prepare("SELECT MAX(ts) AS t FROM security_sector").get() as { t: string | null };
+  return r.t ?? null;
+}
+
+/**
+ * 取当前的行业板块清单（bk + 名称），供成分股拉取使用。
+ * 与 collectSectorRank 共用同一个接口，但**不写库** —— 这里要的是清单，不是当日涨幅快照。
+ */
+export async function collectSectorRankList(
+  db: Db, client: SourceClient
+): Promise<Array<{ bk: string; sector: string }>> {
+  // 必须翻页：接口单页上限 100，而行业总数实测 496。
+  // 只拿第一页会让三分之二的票查不到行业，然后被主线筛静默挡掉。
+  const rows = await fetchSectorRank(client, { rounds: 3, allPages: true });
+  return rows
+    .filter(r => r.bk.length > 0)
+    .map(r => ({ bk: r.bk, sector: r.sector }));
 }
