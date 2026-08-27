@@ -1,6 +1,7 @@
 import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
-import { fetchSinaKline, SourceNoData } from "@/lib/data/sources/sina";
+import { fetchSinaKline, fetchSinaKlineBySymbol, SourceNoData } from "@/lib/data/sources/sina";
+import type { IndexDef } from "@/lib/data/indices";
 import { recordGap, resolveGapsForKind, today } from "@/lib/data/gap";
 
 /**
@@ -75,4 +76,44 @@ export async function collectDaily(
   }
 
   return { written, failed, noData };
+}
+
+/**
+ * 指数日线。
+ *
+ * 与个股日线写同一张 kline_daily，code 存**带前缀的 symbol**（sh000001）——
+ * 指数代码不遵循"6 开头即沪市"，而 security 表里也没有它们，
+ * 所以 allCodes() 的全市场遍历天然不会把指数当成股票混进去。
+ *
+ * 单独一个函数而不是塞进 collectDaily：后者按 6 位代码拼 symbol，
+ * 传指数进去会被拼错市场（sz000001 是平安银行）。
+ */
+export async function collectIndexDaily(
+  db: Db, client: SourceClient, indices: IndexDef[], datalen: number
+): Promise<{ written: number; failed: string[] }> {
+  const stmt = db.prepare(
+    `INSERT OR REPLACE INTO kline_daily (code, date, o, h, l, c, vol, amount, adj_factor)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1.0)`
+  );
+  let written = 0;
+  const failed: string[] = [];
+
+  for (const idx of indices) {
+    try {
+      const bars = await fetchSinaKlineBySymbol(client, idx.symbol, 240, datalen);
+      db.transaction(() => {
+        for (const b of bars) {
+          // 指数没有复权概念，adj_factor 固定 1.0（不 COALESCE 既有值：那是给个股的除权保护）
+          stmt.run(idx.symbol, b.ts.slice(0, 10), b.o, b.h, b.l, b.c, b.vol, null);
+        }
+      })();
+      written += bars.length;
+      resolveGapsForKind(db, client.source, `kline_daily:${idx.symbol}`);
+    } catch (e: any) {
+      failed.push(idx.symbol);
+      // 可回补：指数日线和个股日线一样，下次全量拉取会带回来
+      recordGap(db, today(), client.source, `kline_daily:${idx.symbol}`, e.message, true);
+    }
+  }
+  return { written, failed };
 }

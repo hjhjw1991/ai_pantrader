@@ -7,7 +7,8 @@ import {
   collectZtPool, collectSectorRank, collectDtPool, collectMacro,
   collectSectorMembers, sectorMembersUpdatedAt, collectSectorRankList,
 } from "@/lib/data/collectors/cross-section";
-import { collectDaily } from "@/lib/data/collectors/daily";
+import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
+import { INDICES } from "@/lib/data/indices";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
@@ -326,6 +327,16 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
             stats.sectorMembersFailed = r.failed.length;
           } catch { stats.sectorMembersFailed = -1; }
         }
+      }
+
+      /**
+       * 指数日线。放在个股全量之前：只有 6 个请求，先拿到能让"今天有没有数据"
+       * 这件事更早成立；而且个股那 5,888 次一旦触发新浪限频，指数会跟着一起挂。
+       */
+      {
+        const idx = await collectIndexDaily(db, clients.sina, INDICES, 1023);
+        stats.indexWritten = idx.written;
+        stats.indexFailed = idx.failed.length;
       }
 
       const daily = await collectDaily(db, clients.sina, allCodes(db), 1023);

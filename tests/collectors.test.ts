@@ -7,7 +7,7 @@ import { runMigrations } from "@/lib/db/migrate";
 import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
 import { collectZtPool } from "@/lib/data/collectors/cross-section";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
-import { collectDaily } from "@/lib/data/collectors/daily";
+import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 
 let dir: string, db: any;
@@ -425,5 +425,72 @@ describe("collectDaily 关闭历史缺口", () => {
       "SELECT COUNT(*) n FROM data_gap WHERE resolved_at IS NULL AND kind = 'kline_daily:300414'"
     ).get() as any;
     expect(n.n).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * 指数日线。
+ *
+ * 起因：`盘面强度` 有 30% 权重来自指数分项（默认 sh000001），但日线采集只拉
+ * security 表里的 6 位股票代码，指数序列从来没进过库 —— 那一项一直取不到值、
+ * 一直退化成中性 0.5，而且**不报错**。实测确认：库里 `code='sh000001'` 是 0 行。
+ *
+ * 指数不能走 collectDaily：它按"6 开头即沪市"拼 symbol，
+ * 000001 会被拼成 sz000001（平安银行），拿回来的是完全不相干的一条序列。
+ */
+describe("collectIndexDaily", () => {
+  const sinaBars = (dates: string[]) => ({
+    source: "sina",
+    breaker: { isOpen: () => false, record() {}, reset() {} },
+    lastUrl: "" as string,
+    async get(url: string) {
+      (this as any).lastUrl = url;
+      return { ok: true as const, latencyMs: 1, status: 200,
+        text: JSON.stringify(dates.map(d => ({
+          day: d, open: "10", high: "11", low: "9", close: "10.5", volume: "1000",
+        }))) };
+    },
+  });
+
+  it("按 symbol 原样落库，不做 6 位代码那套市场推断", async () => {
+    const c = sinaBars(["2026-08-25", "2026-08-26"]) as any;
+    const r = await collectIndexDaily(db, c, [{ symbol: "sh000001", name: "上证指数", why: "" }], 1023);
+    expect(r.written).toBe(2);
+    const rows = db.prepare("SELECT code, date FROM kline_daily ORDER BY date").all() as any[];
+    expect(rows.map(x => x.code)).toEqual(["sh000001", "sh000001"]);
+    // 请求里用的必须是 sh000001 本身
+    expect(c.lastUrl).toContain("symbol=sh000001");
+  });
+
+  it("复权因子固定 1.0 —— 指数没有除权", async () => {
+    const c = sinaBars(["2026-08-26"]) as any;
+    await collectIndexDaily(db, c, [{ symbol: "sh000300", name: "沪深300", why: "" }], 1023);
+    const r = db.prepare("SELECT adj_factor FROM kline_daily WHERE code='sh000300'").get() as any;
+    expect(r.adj_factor).toBe(1);
+  });
+
+  it("单条失败只记自己的缺口，其余照采", async () => {
+    let n = 0;
+    const flaky = {
+      source: "sina",
+      breaker: { isOpen: () => false, record() {}, reset() {} },
+      async get() {
+        n++;
+        return n === 1
+          ? { ok: false as const, error: "timeout", latencyMs: 1 }
+          : { ok: true as const, latencyMs: 1, status: 200,
+              text: JSON.stringify([{ day: "2026-08-26", open: "1", high: "1", low: "1", close: "1", volume: "1" }]) };
+      },
+    } as any;
+    const r = await collectIndexDaily(db, flaky, [
+      { symbol: "sh000001", name: "上证指数", why: "" },
+      { symbol: "sh000300", name: "沪深300", why: "" },
+    ], 1023);
+    expect(r.failed).toEqual(["sh000001"]);
+    expect(r.written).toBe(1);
+    const gaps = db.prepare(
+      "SELECT kind FROM data_gap WHERE resolved_at IS NULL"
+    ).all() as any[];
+    expect(gaps.map(g => g.kind)).toEqual(["kline_daily:sh000001"]);
   });
 });
