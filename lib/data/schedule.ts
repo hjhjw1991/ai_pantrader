@@ -91,6 +91,17 @@ export const SCHEDULE: JobSlot[] = [
     durationMin: 1, desc: "缺口自检与覆盖率" },
   { job: "preopen", slots: ["09:00"], catchUp: "all", backfillsAcrossDays: true,
     durationMin: 1, desc: "同步交易日历" },
+  /*
+   * 盘前作战计划。09:15 = 集合竞价开始。
+   *
+   * 放在盘前不是凑时间：候选池读的是日线与截面，而当天的日线要等 22:00 才落库 ——
+   * 选股结论在开盘前就已经定了，那它就该在开盘前交到人手上。
+   *
+   * catchUp=all + 跨天不可回补：中午才开机也值得算一份今天的计划（数据没变），
+   * 但绝不为上周五补一份 —— 那会拿今天的数据算出一份"上周五的计划"，纯属捏造。
+   */
+  { job: "plan", slots: ["09:15"], catchUp: "all", backfillsAcrossDays: false,
+    durationMin: 1, desc: "盘前作战计划（候选池推送）" },
   {
     job: "intraday", slots: intradaySlots(), catchUp: "latest",
     // 过去某一刻的盘口，源上不存在历史查询接口，永久丢失

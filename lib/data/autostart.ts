@@ -1,4 +1,4 @@
-import { openDb } from "@/lib/db";
+import { openDb, type Db } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { getConfig } from "@/lib/config";
 import { createClient } from "@/lib/data/client";
@@ -54,7 +54,18 @@ export function inAwakeWindow(hm: string): boolean {
   return awakeWindows().some(w => t >= hmToMinutes(w.from) && t <= hmToMinutes(w.to));
 }
 
-export function startAutostart(env: NodeJS.ProcessEnv = process.env): AutostartResult {
+export interface AutostartOpts {
+  /**
+   * 盘前计划实现。lib/data 不反向依赖上层，所以由组装根（scripts/daemon.ts）注入。
+   * 不给就只是少跑 plan 这个 job，其余采集照常。
+   */
+  planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
+}
+
+export function startAutostart(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: AutostartOpts = {}
+): AutostartResult {
   if (env.PANTRADER_NO_SCHEDULER === "1") {
     return { started: false, reason: "PANTRADER_NO_SCHEDULER=1，采集器未启动", scheduler: null };
   }
@@ -72,7 +83,10 @@ export function startAutostart(env: NodeJS.ProcessEnv = process.env): AutostartR
     eastmoney: createClient("eastmoney", { db, minIntervalMs: 600 }),
   };
 
-  const scheduler = createScheduler({ db, clients, runner: "scheduler", onEvent: log });
+  const scheduler = createScheduler({
+    db, clients, runner: "scheduler", onEvent: log,
+    ...(opts.planPreopen ? { planPreopen: opts.planPreopen } : {}),
+  });
   scheduler.start();
 
   // 只在采集时段内申请防休眠，不整天吊着不让机器睡

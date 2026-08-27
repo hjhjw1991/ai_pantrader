@@ -12,6 +12,7 @@ import { getConfig } from "@/lib/config";
 import { startAutostart, stopAutostart } from "@/lib/data/autostart";
 import { currentPlatform } from "@/lib/platform/keepawake";
 import { acquireLock, releaseLock } from "@/lib/platform/singleton";
+import { runPreopenPlan } from "@/lib/plan/preopen";
 
 const lockPath = path.join(getConfig().dataDir, "scheduler.pid");
 const lock = acquireLock(lockPath);
@@ -21,7 +22,8 @@ if (!lock.acquired) {
   process.exit(0);
 }
 
-const r = startAutostart();
+// 组装根：把盘前计划的实现注进采集层。lib/data 自己不反向依赖上层（见 JobDeps.planPreopen）
+const r = startAutostart(process.env, { planPreopen: runPreopenPlan });
 console.log(
   `[PanTrader daemon] 平台=${currentPlatform()} pid=${process.pid} ` +
   `runner=${process.env.PANTRADER_RUNNER ?? "manual"} ${r.reason}`

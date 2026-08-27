@@ -155,14 +155,19 @@ describe("未结清交易日", () => {
 });
 
 describe("不可回补时点补记 missed", () => {
-  it("只标 backfillsAcrossDays=false 的 job（intraday/close）", () => {
+  /*
+   * plan 也在这一类里：盘前计划算的是"今天开盘前该看哪几只"，
+   * 今天补一份上周五的计划只会拿今天的数据编造一个当时不存在的结论 ——
+   * 和 close 补跑拿到今天的涨停池是同一种错。
+   */
+  it("只标 backfillsAcrossDays=false 的 job（intraday/close/plan）", () => {
     const n = markUnaccountedMissed(db, ["2026-08-04"]);
     const jobs = db.prepare(
       "SELECT DISTINCT job FROM job_run WHERE date='2026-08-04' ORDER BY job"
     ).all().map((r: any) => r.job);
-    expect(jobs).toEqual(["close", "intraday"]);
-    // 48 个盘中 + 1 个收盘
-    expect(n).toBe(49);
+    expect(jobs).toEqual(["close", "intraday", "plan"]);
+    // 48 个盘中 + 1 个收盘 + 1 个盘前计划
+    expect(n).toBe(50);
     for (const r of db.prepare("SELECT status FROM job_run").all()) {
       expect(r.status).toBe("missed");
     }
@@ -186,7 +191,7 @@ describe("不可回补时点补记 missed", () => {
   it("幂等：重复调用不翻倍（INSERT OR IGNORE）", () => {
     markUnaccountedMissed(db, ["2026-08-04"]);
     expect(markUnaccountedMissed(db, ["2026-08-04"])).toBe(0);
-    expect(db.prepare("SELECT COUNT(*) c FROM job_run").get().c).toBe(49);
+    expect(db.prepare("SELECT COUNT(*) c FROM job_run").get().c).toBe(50);
   });
 
   it("不覆盖已有记录 —— 那天真跑过的 done 不能被改写成 missed", () => {
@@ -195,8 +200,8 @@ describe("不可回补时点补记 missed", () => {
     expect(db.prepare(
       "SELECT status FROM job_run WHERE date='2026-08-04' AND slot='09:35'"
     ).get().status).toBe("done");
-    // 只补了剩下的 48 个
-    expect(n).toBe(48);
+    // 只补了剩下的 49 个（48 盘中 + 收盘 + 盘前计划，减去已 done 的那一个）
+    expect(n).toBe(49);
   });
 });
 
@@ -340,11 +345,11 @@ describe("调度器接入唤醒补偿", () => {
     // 漏采日的快照时点如实记 missed
     expect(db.prepare(
       "SELECT COUNT(*) c FROM job_run WHERE date='2026-08-05' AND status='missed'"
-    ).get().c).toBe(49);
-    // 08-04 已经有一条 10:00 的残留行，其余 48 个补记 missed，不覆盖那一条
+    ).get().c).toBe(50);
+    // 08-04 已经有一条 10:00 的残留行，其余 49 个补记 missed，不覆盖那一条
     expect(db.prepare(
       "SELECT COUNT(*) c FROM job_run WHERE date='2026-08-04' AND status='missed'"
-    ).get().c).toBe(48);
+    ).get().c).toBe(49);
     // 补偿真的跑了，用 wake: 标签，不占真实时点
     const comp = db.prepare(
       "SELECT job, slot FROM job_run WHERE date='2026-08-06' AND slot LIKE 'wake:%' ORDER BY job"

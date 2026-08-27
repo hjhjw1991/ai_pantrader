@@ -11,7 +11,8 @@ import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { deriveSecurityMeta } from "@/lib/data/security-meta";
 
-export type JobName = "selfcheck" | "preopen" | "intraday" | "close" | "post" | "night";
+export type JobName =
+  | "selfcheck" | "preopen" | "plan" | "intraday" | "close" | "post" | "night";
 
 export interface JobDeps {
   db: Db;
@@ -23,6 +24,16 @@ export interface JobDeps {
    * 定时任务不传：没人看着，回调只是白开销。
    */
   onProgress?: (p: JobProgress) => void;
+  /**
+   * 盘前作战计划的实现，由组装根注入（scripts/daemon.ts / scripts/job.ts）。
+   *
+   * 为什么是注入而不是直接 import：算计划要用 strategy/factors 和策略配置，
+   * 那些都在 lib/data **之上**。lib/data 至今没有一处反向依赖上层，
+   * 这条分层值得保住 —— 一旦破了口子，采集层就会慢慢长出对界面层的依赖。
+   *
+   * 没注入时 job 如实 skip 并说明原因，而不是静默当成"跑过了"。
+   */
+  planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
 }
 
 /** 进度事件。phase 是当前在做哪一步，done/total 是该步的批次进度 */
@@ -41,7 +52,7 @@ export interface JobResult {
   since?: string;
 }
 
-const KNOWN: JobName[] = ["selfcheck", "preopen", "intraday", "close", "post", "night"];
+const KNOWN: JobName[] = ["selfcheck", "preopen", "plan", "intraday", "close", "post", "night"];
 
 /** 用 Asia/Shanghai 取交易日，避免 UTC 偏移把 15:05 算到前一天 */
 function shanghaiDate(now: Date): string {
@@ -139,7 +150,7 @@ export function jobOutcome(
 
 export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   if (!KNOWN.includes(name)) throw new Error(`unknown job: ${name}`);
-  const { db, clients, now, onProgress } = deps;
+  const { db, clients, now, onProgress, planPreopen } = deps;
   const date = shanghaiDate(now);
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
@@ -185,6 +196,17 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   }
 
   switch (name) {
+    case "plan": {
+      if (planPreopen === undefined) {
+        return { name, skipped: true,
+          reason: "未注入盘前计划实现（组装根没接上 lib/plan/preopen）", stats };
+      }
+      const r = await planPreopen(db);
+      stats.candidates = r.candidates.length;
+      stats.planOk = r.ok ? 1 : 0;
+      if (!r.ok) return { name, skipped: true, reason: r.reason ?? "计划未生成", stats };
+      break;
+    }
     case "intraday": {
       const snap = await collectMarketSnapshot(db, clients.tencent, allCodes(db),
         onProgress === undefined ? undefined : p => onProgress({ phase: "snapshot", ...p }));
