@@ -359,3 +359,71 @@ describe("collectMarketSnapshot 的进度回调", () => {
     expect(r.written).toBe(1);
   });
 });
+
+/**
+ * 日线拉取成功要**关掉**该代码的历史缺口。
+ *
+ * 这是实测踩出来的：库里 5 条未解决的 kline_daily 缺口，其中 4 条的数据早就补上了
+ * （夜间全量拉取覆盖 1023 个交易日），但 resolved_at 一直是 NULL，因为
+ * 只有分钟线/涨停池/龙虎榜的采集器调 resolveGap，日线这条从来没调过。
+ *
+ * 三个后果，最后一个最贵：
+ *   selfcheck 的 unresolvedGaps 只增不减（实测 5→6→7）；
+ *   设置页显示永远修不好的幽灵缺口；
+ *   **回测里 hasGap(date) 是不带 kind 调的** —— 那天只要有任何一条未解决缺口，
+ *   整个交易日对全部 5,888 只票直接跳过。于是一只票的一次 timeout，
+ *   会让所有回测永久少掉一整天。
+ *
+ * 关的时候不能只关"今天"：缺口记在当初失败的那天（08-17/08-19/08-21），
+ * 而一次成功拉取覆盖 1023 天，意味着那只票的历史整段都填上了。
+ */
+describe("collectDaily 关闭历史缺口", () => {
+  const bar = (d: string) => `${d.replace(/-/g, "")},10.0,11.0,9.5,10.5,1000000`;
+  const sinaOk = (dates: string[]) => ({
+    source: "sina",
+    breaker: { isOpen: () => false, record() {}, reset() {} },
+    async get() {
+      return { ok: true as const, latencyMs: 1, status: 200,
+        text: JSON.stringify(dates.map(d => ({
+          day: d, open: "10.0", high: "11.0", low: "9.5", close: "10.5", volume: "1000000",
+        }))) };
+    },
+  });
+
+  it("拉取成功后，该代码所有日期的未解决缺口都被关掉", async () => {
+    const g = db.prepare(
+      `INSERT INTO data_gap (date, source, kind, reason, recoverable, detected_at)
+       VALUES (?,?,?,?,1,?)`
+    );
+    g.run("2026-08-17", "sina", "kline_daily:300414", "database is locked", "2026-08-17 22:00:00.000");
+    g.run("2026-08-21", "sina", "kline_daily:300414", "timeout", "2026-08-21 22:00:00.000");
+    // 别人的缺口不该被顺手关掉
+    g.run("2026-08-21", "sina", "kline_daily:600577", "timeout", "2026-08-21 22:00:00.000");
+
+    await collectDaily(db, sinaOk(["2026-08-17", "2026-08-21"]) as any, ["300414"], 1023);
+
+    const open = db.prepare(
+      "SELECT kind, date FROM data_gap WHERE resolved_at IS NULL ORDER BY date"
+    ).all() as any[];
+    expect(open.map((r) => `${r.kind}@${r.date}`)).toEqual(["kline_daily:600577@2026-08-21"]);
+  });
+
+  it("拉取失败不关缺口 —— 关了等于把没拿到的数据记成拿到了", async () => {
+    db.prepare(
+      `INSERT INTO data_gap (date, source, kind, reason, recoverable, detected_at)
+       VALUES (?,?,?,?,1,?)`
+    ).run("2026-08-17", "sina", "kline_daily:300414", "boom", "2026-08-17 22:00:00.000");
+
+    const failing = {
+      source: "sina",
+      breaker: { isOpen: () => false, record() {}, reset() {} },
+      async get() { return { ok: false as const, error: "timeout", latencyMs: 1 }; },
+    };
+    await collectDaily(db, failing as any, ["300414"], 1023);
+
+    const n = db.prepare(
+      "SELECT COUNT(*) n FROM data_gap WHERE resolved_at IS NULL AND kind = 'kline_daily:300414'"
+    ).get() as any;
+    expect(n.n).toBeGreaterThan(0);
+  });
+});

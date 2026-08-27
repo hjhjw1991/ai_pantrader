@@ -21,6 +21,20 @@ export function resolveGap(db: Db, date: string, source: string, kind: string): 
 }
 
 /** 以 Asia/Shanghai 计的今天，避免 UTC 偏移把收盘后的时间算到前一天 */
+/**
+ * 销掉某个 kind 在**所有日期**上的未解决缺口。
+ *
+ * 与 resolveGap（按 date+source+kind 精确销一条）分开：日线是一次拉取覆盖上千个交易日，
+ * 成功之后该代码的历史缺口整段都不成立了，逐个日期去销既啰嗦又容易漏。
+ * 只动 resolved_at IS NULL 的行，不去重写已经销过的时间戳。
+ */
+export function resolveGapsForKind(db: Db, source: string, kind: string): void {
+  db.prepare(
+    `UPDATE data_gap SET resolved_at = ?
+      WHERE source = ? AND kind = ? AND resolved_at IS NULL`
+  ).run(shanghaiTs(), source, kind);
+}
+
 export function today(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",

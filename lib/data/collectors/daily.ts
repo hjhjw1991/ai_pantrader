@@ -1,7 +1,7 @@
 import type { Db } from "@/lib/db";
 import type { SourceClient } from "@/lib/data/client";
 import { fetchSinaKline, SourceNoData } from "@/lib/data/sources/sina";
-import { recordGap, today } from "@/lib/data/gap";
+import { recordGap, resolveGapsForKind, today } from "@/lib/data/gap";
 
 /**
  * 无序列代码占比的告警阈值。
@@ -40,6 +40,19 @@ export async function collectDaily(
         }
       })();
       written += bars.length;
+      /**
+       * 拉到了就把这只票**所有日期**的未解决缺口销掉。
+       *
+       * 不能只销"今天"：缺口记在当初失败的那一天，而一次拉取覆盖 1023 个交易日，
+       * 成功即意味着那只票的历史整段都填上了。
+       *
+       * 不销的后果是实测出来的 —— 库里 5 条未解决的日线缺口，4 条数据早就补上了，
+       * 只是没人销账。于是 selfcheck 的 unresolvedGaps 只增不减，
+       * 而回测里 hasGap(date) 是不带 kind 调的：那天只要挂着任何一条未解决缺口，
+       * 整个交易日对全部 5,888 只票直接跳过。一只票的一次 timeout，
+       * 会让此后所有回测永久少掉一整天。
+       */
+      resolveGapsForKind(db, client.source, `kline_daily:${code}`);
     } catch (e: any) {
       if (e instanceof SourceNoData) {
         // 源上没有这条序列，不是缺口：记成缺口就永远回补不掉
