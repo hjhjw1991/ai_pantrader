@@ -46,8 +46,9 @@ export default function SettingsPage() {
   const st = storageInfo();
   const sched = scheduleStatus();
   const migs = appliedMigrations(db);
-  // 22 张表一轮 COUNT(*) 实测 4.4 秒（kline_daily 5.75M + quote_snapshot 7.13M），
-  // 而本页每 60 秒自刷一次。取最近一分钟内数过的那份，并把统计时刻显示出来
+  // 22 张表一轮 COUNT(*) 实测 4.1–5.4 秒（kline_daily 5.75M + quote_snapshot 7.13M），
+  // 且同步阻塞整个事件循环，不能长在请求路径上。夜间 job 数好存进 app_meta，
+  // 这里只读快照，并把统计时刻（含日期，它可能是昨夜的）显示出来
   const { counts, at: countsAt } = tableCountsCached(db);
   const cal = calendarRange(db);
   const gaps = unresolvedGaps(db);
@@ -375,7 +376,7 @@ export default function SettingsPage() {
       <Panel
         title="各表行数"
         hint="空态文案指的就是这张表。行数 -1 = 表不存在（migration 未跑）"
-        right={`统计于 ${countsAt.slice(11, 19)} · 日历 ${cal.from ?? "—"} → ${cal.to ?? "—"}（${cal.openDays} 交易日）`}
+        right={`统计于 ${countsAt.slice(5, 16)} · 日历 ${cal.from ?? "—"} → ${cal.to ?? "—"}（${cal.openDays} 交易日）`}
       >
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-x-4">
           {counts.map((c) => (

@@ -1,5 +1,7 @@
 node_modules/
 .next/
+# PANTRADER_DIST_DIR 另建的产物目录（dev 跑着的时候做生产构建用）
+.next-*/
 *.db
 *.db-journal
 *.db-wal

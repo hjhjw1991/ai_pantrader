@@ -13,6 +13,7 @@ import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
+import { refreshTableCounts } from "@/lib/data/table-counts";
 import { deriveSecurityMeta } from "@/lib/data/security-meta";
 import { MACRO_SECIDS } from "@/lib/data/sources/eastmoney";
 import { shanghaiTs } from "@/lib/data/clock";
@@ -371,6 +372,19 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.backfillRecovered = bf.recovered.length;
       stats.backfillFailed = bf.failed.length;
       stats.unrecoverableGaps = bf.unrecoverable;
+
+      /**
+       * 行数快照。放在最后：今夜写的全都入库了，数出来才对得上。
+       *
+       * 这活以前长在 web 进程里 —— 设置页和回测实验室都显示这些数字，
+       * 缓存 60 秒一过就当场重数 4.1–5.4 秒，而 better-sqlite3 同步，
+       * 这 4 秒钉死事件循环，切到那两个页签就是一次卡死。
+       * 搬到这里：阻塞 4 秒没有人在等。
+       */
+      {
+        const snap = refreshTableCounts(db, now);
+        stats.countedTables = snap.counts.length;
+      }
       break;
     }
   }

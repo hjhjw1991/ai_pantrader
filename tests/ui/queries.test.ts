@@ -31,6 +31,8 @@ import {
   watchpool,
   ztPool,
 } from "@/lib/ui/queries";
+import { refreshTableCounts, readTableCountsSnapshot, TABLE_COUNTS_KEY } from "@/lib/data/table-counts";
+import { setMeta } from "@/lib/data/meta";
 import { winRateStats } from "@/lib/ui/adapters/ledger";
 import { recordManualFill, upsertAccount, upsertWatch, deactivateWatch } from "@/lib/ui/mutations";
 
@@ -499,15 +501,20 @@ describe("源健康：挂钟串口径（线上真实形态）", () => {
 });
 
 /**
- * 行数统计的缓存。
+ * 行数统计。
  *
  * COUNT(*) 在 SQLite 里没有 O(1) 写法：kline_daily 已经在扫最窄的那个索引
  * （idx_kline_daily_date），5,750,482 行仍要 1.87s，quote_snapshot 7,133,734 行 0.69s，
- * 22 张表一轮实测 4.4 秒。而 LiveBar 在根 layout 里每 60 秒 router.refresh() 一次，
- * 设置页和回测实验室都显示这些数字 —— 于是只要开着那两个页面，就每分钟全扫 1300 万行。
+ * 22 张表一轮实测 4.1–5.4 秒，且每次都要重付 —— 2.0 GB 的库比可用内存大，
+ * 两次统计之间页缓存已经被挤掉。而 better-sqlite3 是同步的，这 4 秒钉死整个事件循环。
  *
- * 所以缓存这件事必须显式：tableCounts 保持每次真数（导出/校验依赖它说实话），
- * 页面改用 tableCountsCached 并把统计时刻一起显示出来 —— 屏幕上是几分钟前的数字没问题，
+ * 早先的做法是进程内缓存 60 秒、过期当场重数。实测那等于每分钟随机挑一个
+ * 访问 /lab 或 /settings 的请求卡满四秒（连续访问 /lab，耗时在 4.1s 与 0.02s 之间按分钟交替），
+ * 期间 SSE、别的页签、正在跑的回测流一起停摆。
+ *
+ * 现在真数一遍由夜间 job 做，结果写进 app_meta；页面只读快照。
+ * tableCounts 本身保持每次真数（导出/校验依赖它说实话），
+ * 而快照必须带上统计时刻并显示出来 —— 屏幕上是昨夜的数字没问题，
  * 假装它是此刻的才有问题。
  */
 describe("tableCountsCached", () => {
@@ -523,31 +530,67 @@ describe("tableCountsCached", () => {
     db5.prepare("INSERT INTO security (code, name, board) VALUES (?,?,?)").run(code, code, "主板");
   const secCount = (r: { counts: Array<{ table: string; rows: number }> }) =>
     r.counts.find((c) => c.table === "security")!.rows;
+  /** 把 `YYYY-MM-DD HH:MM:SS.mmm`（上海）换回 epoch，方便按毫秒构造"多久以前" */
+  const ms = (at: string) => Date.parse(`${at.slice(0, 10)}T${at.slice(11, 19)}+08:00`);
 
-  it("窗口内重复调用返回同一份，不重新数", () => {
+  it("没有快照时当场真数 —— 全新的库不能显示空白", () => {
     addSec("600001");
-    const first = tableCountsCached(db5, 60_000, 1_000);
-    expect(secCount(first)).toBe(1);
-    addSec("600002");
-    const second = tableCountsCached(db5, 60_000, 30_000);
-    expect(secCount(second)).toBe(1);
-    expect(second.at).toBe(first.at);
+    expect(secCount(tableCountsCached(db5, 86_400_000, 0))).toBe(1);
   });
 
-  it("过了窗口就重新数", () => {
-    const fresh = tableCountsCached(db5, 60_000, 120_000);
-    expect(secCount(fresh)).toBe(2);
+  it("有快照就读快照，不再扫表", () => {
+    const snap = refreshTableCounts(db5);
+    expect(secCount(snap)).toBe(1);
+    // 快照写完之后再改库：读到的仍应是快照里的数，否则说明它偷偷重数了
+    addSec("600002");
+    const r = tableCountsCached(db5, 86_400_000, ms(snap.at) + 1_000);
+    expect(secCount(r)).toBe(1);
+    expect(r.at).toBe(snap.at);
+  });
+
+  it("快照太旧就当场重数 —— 夜间 job 一天没跑成，得看见真数字", () => {
+    const snap = refreshTableCounts(db5);        // 此刻 security 有 2 行
+    addSec("600003");
+    const stale = tableCountsCached(db5, 60_000, ms(snap.at) + 3_600_000);
+    expect(secCount(stale)).toBe(3);
+    expect(stale.at).not.toBe(snap.at);
+  });
+
+  it("时间戳解析不出来一律当太旧，不拿来路不明的时刻当新鲜", () => {
+    setMeta(db5, TABLE_COUNTS_KEY, JSON.stringify({ at: "不是时间", counts: [{ table: "security", rows: 999 }] }));
+    expect(secCount(tableCountsCached(db5, 86_400_000, 0))).toBe(3);
+  });
+
+  it("坏掉的快照当作没有快照，不给出半份数据", () => {
+    setMeta(db5, TABLE_COUNTS_KEY, "{ 这不是 JSON");
+    expect(secCount(tableCountsCached(db5, 86_400_000, 0))).toBe(3);
+    setMeta(db5, TABLE_COUNTS_KEY, JSON.stringify({ at: "2026-08-27 22:00:00.000" }));  // 缺 counts
+    expect(secCount(tableCountsCached(db5, 86_400_000, 0))).toBe(3);
+    expect(readTableCountsSnapshot(db5)).toBeNull();
   });
 
   it("带回统计时刻，页面要能显示这是什么时候数的", () => {
-    const r = tableCountsCached(db5, 60_000, 500_000);
-    expect(r.at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(refreshTableCounts(db5).at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
   });
 
-  it("maxAgeMs=0 等于不缓存 —— 导出/校验那种场合必须每次真数", () => {
-    addSec("600003");
-    expect(secCount(tableCountsCached(db5, 0, 500_001))).toBe(3);
+  it("兜底不会每个请求都真数一遍 —— 夜间 job 挂掉那天不能每分钟卡死四秒", () => {
+    setMeta(db5, TABLE_COUNTS_KEY, "{ 坏的");   // 逼进兜底路径
+    const t0 = 9_000_000_000_000;
+    expect(secCount(tableCountsCached(db5, 86_400_000, t0))).toBe(3);
+    addSec("600009");
+    // 十分钟内的第二次调用不重数：拿到的还是上一次的数字和上一次的时刻
+    const again = tableCountsCached(db5, 86_400_000, t0 + 60_000);
+    expect(secCount(again)).toBe(3);
+    // 过了节流窗口才重数
+    expect(secCount(tableCountsCached(db5, 86_400_000, t0 + 900_000))).toBe(4);
+    db5.prepare("DELETE FROM security WHERE code = ?").run("600009");
+  });
+
+  it("maxAgeMs=0 等于不看快照 —— 导出/校验那种场合必须每次真数", () => {
+    refreshTableCounts(db5);
     addSec("600004");
-    expect(secCount(tableCountsCached(db5, 0, 500_002))).toBe(4);
+    expect(secCount(tableCountsCached(db5, 0))).toBe(4);
+    addSec("600005");
+    expect(secCount(tableCountsCached(db5, 0))).toBe(5);
   });
 });

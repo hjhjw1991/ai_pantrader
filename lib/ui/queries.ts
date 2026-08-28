@@ -15,6 +15,11 @@ import type { Position } from "@/lib/contracts/execution";
 import type { Outcome, Prediction, Verdict, ErrorType } from "@/lib/contracts/ledger";
 import type { Phase, Action, EnvGear } from "@/lib/contracts/strategy";
 import { shanghaiTs } from "@/lib/data/clock";
+import {
+  tableCounts,
+  readTableCountsSnapshot,
+  type TableCountsSnapshot,
+} from "@/lib/data/table-counts";
 
 /**
  * 前端的 DB 读层。所有页面只经过这里读库。
@@ -53,72 +58,73 @@ function wall(col: string): string {
 
 // ═══════════════════════════ 元数据 / 健康 ═══════════════════════════
 
-export interface TableCount {
-  table: string;
-  rows: number;
-}
+/**
+ * 行数统计。真数一遍这件事已经搬去 lib/data/table-counts（由夜间 job 跑），
+ * 这里只做转发，保持页面/导出的 import 路径不变。
+ */
+export type { TableCount, TableCountsSnapshot } from "@/lib/data/table-counts";
+export { tableCounts } from "@/lib/data/table-counts";
 
-/** 设置页与空态用：哪张表真的有数据。空态文案要能指出缺的是哪一张 */
-const COUNTED_TABLES = [
-  "security", "trading_calendar", "kline_daily", "kline_min", "quote_snapshot",
-  "zt_pool", "dt_pool", "sector_rank", "lhb", "lhb_seat", "macro",
-  "data_gap", "source_health",
-  "strategy", "watchpool", "prediction", "outcome", "advisor_output",
-  "account", "position", "trade", "ord",
-] as const;
-
-export function tableCounts(db: Db): TableCount[] {
-  const out: TableCount[] = [];
-  for (const t of COUNTED_TABLES) {
-    try {
-      // 表名来自上面的常量白名单，不是用户输入
-      const r = db.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as { n: number };
-      out.push({ table: t, rows: r.n });
-    } catch {
-      out.push({ table: t, rows: -1 }); // -1 = 表不存在（migration 未跑）
-    }
-  }
-  return out;
-}
-
-export interface CachedTableCounts {
-  counts: TableCount[];
-  /** 这批数字是什么时候数出来的（上海挂钟），页面必须显示，不能假装是此刻 */
-  at: string;
-}
+/** @deprecated 名字保留给既有调用方；它现在返回的是快照，不是"缓存" */
+export type CachedTableCounts = TableCountsSnapshot;
 
 /**
- * 带时效的行数统计。
+ * 页面读的行数：优先用夜间 job 数好的快照，读它只是一条 SELECT。
  *
- * COUNT(*) 在 SQLite 里没有 O(1) 写法。kline_daily 已经在扫最窄的索引
- * （idx_kline_daily_date）了，5,750,482 行仍要 1.87s；quote_snapshot 7,133,734 行 0.69s；
- * 22 张表一轮实测 4.4 秒。而 LiveBar 在根 layout 里每 60 秒 router.refresh() 一次，
- * 设置页和回测实验室都在显示这些数字 —— 于是只要那两个页面开着，
- * 就每分钟把 1300 万行重扫一遍，纯粹为了刷新几个几乎不变的数。
+ * 以前这里是"60 秒进程内缓存 + 过期就当场重数"。问题在于重数要 4.1–5.4 秒
+ * （2.0 GB 库、1300 万行，库比可用内存大，页缓存留不住），而 better-sqlite3 是同步的，
+ * 这 4 秒钉死整个事件循环。于是每分钟就有一个访问 /lab 或 /settings 的请求
+ * 卡满四秒，期间 SSE、别的页签、正在跑的回测流一起停摆。
+ * 实测连续访问 /lab，耗时按分钟在 4.1s 和 0.02s 之间交替 —— 这就是切页签发卡的来源之一。
  *
- * 缓存挂在 globalThis 上而不是模块作用域：dev 下 HMR 会反复重新求值模块，
- * 挂模块里等于没有缓存（和 lib/ui/db 的只读连接同一个理由）。
+ * 兜底仍然会当场数：快照不存在（全新的库、夜间 job 还没跑过）
+ * 或者旧得离谱（超过 maxAgeMs，默认 24 小时，意味着夜间 job 已经一天没跑成了）。
+ * 这两种情况下慢一次是对的 —— 屏幕上显示一个一天前的行数，
+ * 会让人以为采集正常，而实际上采集已经停了一天。
  *
- * tableCounts 本身保持每次真数，不动 —— 导出/校验依赖它说实话。
- * 需要省的是页面，那就让页面显式说要多旧的数，并把 at 显示出来：
- * 屏幕上是一分钟前的数字没问题，假装它是此刻的才有问题。
+ * at 一律如实返回统计时刻，页面必须把它显示出来：
+ * 屏幕上是昨夜的数字没问题，假装它是此刻的才有问题。
  */
 export function tableCountsCached(
   db: Db,
-  maxAgeMs = 60_000,
+  maxAgeMs = 86_400_000,
   now: number = Date.now()
-): CachedTableCounts {
+): TableCountsSnapshot {
+  const snap = readTableCountsSnapshot(db);
+  if (snap !== null && maxAgeMs > 0) {
+    const at = Date.parse(`${snap.at.slice(0, 10)}T${snap.at.slice(11, 19)}+08:00`);
+    // 解析不出来的时间戳当成"太旧"：宁可多数一次，也不要拿一个来路不明的时刻当新鲜
+    if (Number.isFinite(at) && now - at < maxAgeMs) return snap;
+  }
+  return fallbackCount(db, now, maxAgeMs);
+}
+
+/**
+ * 兜底路径的进程内节流。
+ *
+ * 兜底本身要 4 秒且同步阻塞，所以**不能每个请求都付一次** ——
+ * 夜间 job 挂掉的那天，设置页每分钟自刷一次，就是每分钟卡死四秒。
+ * 这里只保证"最多十分钟真数一次"，屏幕上照旧显示真实统计时刻，
+ * 不掩盖夜间 job 没跑成这件事。
+ *
+ * 挂在 globalThis 而不是模块作用域：dev 下 HMR 会反复重新求值模块，
+ * 挂模块里等于没有节流（和 lib/ui/db 的只读连接同一个理由）。
+ */
+const FALLBACK_THROTTLE_MS = 600_000;
+
+function fallbackCount(db: Db, now: number, maxAgeMs: number): TableCountsSnapshot {
+  // maxAgeMs=0 是"我要真数字"的显式请求（导出/校验），节流不适用
+  if (maxAgeMs <= 0) return { counts: tableCounts(db), at: shanghaiTs(new Date(now)) };
   const g = globalThis as unknown as {
-    __pantraderCounts?: Map<string, { at: number; result: CachedTableCounts }>;
+    __pantraderCounts?: Map<string, { at: number; result: TableCountsSnapshot }>;
   };
   const cache = (g.__pantraderCounts ??= new Map());
   // 按库文件分桶：测试里每个用例一个临时库，不能互相看见对方的计数
   const key = (db as unknown as { name?: string }).name ?? "";
-
   const hit = cache.get(key);
-  if (hit !== undefined && maxAgeMs > 0 && now - hit.at < maxAgeMs) return hit.result;
+  if (hit !== undefined && now - hit.at < FALLBACK_THROTTLE_MS) return hit.result;
 
-  const result: CachedTableCounts = { counts: tableCounts(db), at: shanghaiTs(new Date(now)) };
+  const result: TableCountsSnapshot = { counts: tableCounts(db), at: shanghaiTs(new Date(now)) };
   cache.set(key, { at: now, result });
   return result;
 }

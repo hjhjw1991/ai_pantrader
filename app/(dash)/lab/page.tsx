@@ -33,7 +33,7 @@ export default function LabPage() {
   const cfg = readStrategyConfig();
   const strats = strategies(db);
   const cal = calendarRange(db);
-  // 见 settings 页：整轮 COUNT(*) 要几秒，而页面每 60 秒自刷
+  // 行数由夜间 job 数好存进 app_meta，这里只是读快照 —— 见 lib/data/table-counts
   const { counts, at: countsAt } = tableCountsCached(db);
   const archive = backtestReports(db);
   const count = (t: string) => counts.find((c) => c.table === t)?.rows ?? -1;
@@ -172,7 +172,7 @@ export default function LabPage() {
           )}
         </Panel>
 
-        <Panel title="回测可用区间" hint="这些是真实数据，现在就能看" right={`行数统计于 ${countsAt.slice(11, 19)}`}>
+        <Panel title="回测可用区间" hint="这些是真实数据，现在就能看" right={`行数统计于 ${countsAt.slice(5, 16)}`}>
           <KV label="交易日历区间">
             {cal.from ?? "—"} → {cal.to ?? "—"}
           </KV>
