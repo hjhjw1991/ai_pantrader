@@ -10,7 +10,7 @@ import {
 import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { INDICES } from "@/lib/data/indices";
 import { collectLhb } from "@/lib/data/collectors/lhb";
-import { coverageReport, detectGaps } from "@/lib/data/gap";
+import { coverageReport, detectGaps, recordGap } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { refreshTableCounts } from "@/lib/data/table-counts";
@@ -333,7 +333,24 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
             stats.sectorMembersSectors = r.sectors;
             stats.sectorMembersCodes = r.codes;
             stats.sectorMembersFailed = r.failed.length;
-          } catch { stats.sectorMembersFailed = -1; }
+          } catch (e) {
+            /**
+             * 原来这里是 `catch { stats.sectorMembersFailed = -1; }` —— 只留一个哨兵数字。
+             *
+             * 代价是实打实的：这一路从 2026-08-31 起连续 5 个夜里都记了 -1，
+             * security_sector 一直是 0 行，于是「量价」候选来源在生产上从来没工作过
+             * （engine 那边查不到行业就整路关掉），而排查时手上只有一个 -1，
+             * 连是限频、是解析失败还是网络断了都分不出来。
+             *
+             * 现在把原因写进 job_run.stats 旁边的缺口记录里：失败要留下能查的东西，
+             * 否则等于没记。仍然吞异常不上抛 —— 行业映射刷不到不该让整个夜间 job 挂掉，
+             * 后面还有日线、对账、行数快照要跑。
+             */
+            stats.sectorMembersFailed = -1;
+            const msg = (e as Error).message;
+            console.error(`[night] 行业映射刷新失败：${msg}`);
+            recordGap(db, date, "eastmoney", "security_sector", `行业映射刷新抛错：${msg}`, true);
+          }
         }
       }
 

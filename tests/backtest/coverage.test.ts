@@ -110,3 +110,82 @@ describe("覆盖率报告（spec §10.5）", () => {
     expect(header).toContain("gap");
   });
 });
+
+/**
+ * 候选覆盖率。
+ *
+ * 这是最容易把人骗过去的一个数：coverage 量的是「这天的 K 线够不够回放」，
+ * 而候选来源读的是 zt_pool / sector_rank / security_sector —— 那几张表都是
+ * 当日现场、错过不可回补，历史深度和 K 线完全不是一回事。
+ * 实测生产库：K 线 4 年，zt_pool 只有 24 天、sector_rank 7 天、security_sector 0 行。
+ * 于是 964 天的回测报告显示「覆盖率 98%」，看起来很健康，
+ * 实际只有 20 来天真的在做决策，全部指标都由那 20 天产生。
+ */
+describe("候选覆盖率：数据能回放 ≠ 策略在做决策", () => {
+  const effective = days.filter((d) => d >= "2024-01-01");
+
+  it("K 线满覆盖但几乎没出过候选时，必须明说指标只由那几天产生", () => {
+    const r = buildCoverageReport({
+      requested: { from: first, to: last },
+      tradingDays: days,
+      replayedDays: days,
+      skippedDays: [],
+      candidateDays: 20,
+    });
+    expect(r.coverage).toBe(1);                       // K 线一天不缺
+    expect(r.candidateDays).toBe(20);
+    expect(r.candidateCoverage).toBeCloseTo(20 / effective.length, 6);
+    const note = r.notes.join(" ");
+    expect(note).toContain("只有 20 天出过候选");
+    expect(note).toContain("不可回补");
+    expect(note).toContain("不要当成整个区间的成绩读");
+  });
+
+  it("候选覆盖率正常时不啰嗦", () => {
+    const r = buildCoverageReport({
+      requested: { from: first, to: last },
+      tradingDays: days,
+      replayedDays: days,
+      skippedDays: [],
+      candidateDays: effective.length,
+    });
+    expect(r.candidateCoverage).toBe(1);
+    expect(r.notes.join(" ")).not.toContain("出过候选");
+  });
+
+  it("不传 candidateDays 时不产生这条 note —— 老调用方不该被硬塞一个假警告", () => {
+    const r = buildCoverageReport({
+      requested: { from: first, to: last },
+      tradingDays: days, replayedDays: days, skippedDays: [],
+    });
+    expect(r.candidateDays).toBe(0);
+    expect(r.notes.join(" ")).not.toContain("出过候选");
+  });
+
+  /**
+   * 引擎警告是「这次回测其实只测了三路来源里的一路」的唯一线索。
+   * 丢掉它，人就会把一路来源的成绩当成整套策略的成绩读。
+   */
+  it("引擎警告带进报告，注明出现了多少天", () => {
+    const r = buildCoverageReport({
+      requested: { from: first, to: last },
+      tradingDays: days, replayedDays: days, skippedDays: [],
+      candidateDays: effective.length,
+      engineWarnings: [{ text: "候选来源.量价 未启用：没有 代码→行业 映射", days: 900 }],
+    });
+    expect(r.engineWarnings).toHaveLength(1);
+    expect(r.notes.join(" ")).toContain("候选来源.量价 未启用");
+    expect(r.notes.join(" ")).toContain("900 天");
+  });
+
+  it("报告首页把候选天数与数据覆盖率并列 —— 两个数经常一高一低，低的那个才是真相", () => {
+    const r = buildCoverageReport({
+      requested: { from: first, to: last },
+      tradingDays: days, replayedDays: days, skippedDays: [],
+      candidateDays: 20,
+    });
+    const header = formatCoverageHeader(r);
+    expect(header).toContain("数据覆盖率");
+    expect(header).toContain("出过候选的天数：20");
+  });
+});

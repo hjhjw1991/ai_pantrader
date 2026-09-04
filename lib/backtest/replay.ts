@@ -212,6 +212,22 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
   const replayedDays: string[] = [];
   let droppedDecisions = 0;
   let delistLiquidations = 0;
+  /**
+   * 出过候选的天数，以及引擎自己报的警告。
+   *
+   * 为什么必须单独数：coverage 量的是"这天的 K 线够不够回放"，
+   * 它可以是 98% 而策略一条候选都没出过 —— 候选来源读的是 zt_pool /
+   * sector_rank / security_sector，那几张表的历史深度和 K 线完全不是一回事
+   * （实测生产库 zt_pool 只有 24 天、sector_rank 7 天、security_sector 0 行，
+   * 而 K 线有 4 年）。于是 964 天的回测报告显示"覆盖率 98%"，
+   * 看起来很健康，实际只有 20 来天真的在做决策。
+   *
+   * 警告去重后带进报告：engine 在"候选来源.量价 未启用"这类情况下会报警告，
+   * 那正是"这次回测其实只测了三路来源里的一路"的唯一线索，丢掉它
+   * 等于让人把一路来源的成绩当成整套策略的成绩读。
+   */
+  let candidateDays = 0;
+  const engineWarnings = new Map<string, number>();
   let cash = o.initialCash;
   let pending: ReplayDecision[] = [];
 
@@ -342,6 +358,8 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
         account: p.account, code: p.code, cost: p.cost, qty: p.qty, stopPx: p.stopPx,
       })),
     });
+    if (card.candidates.length > 0) candidateDays++;
+    for (const w of card.warnings ?? []) engineWarnings.set(w, (engineWarnings.get(w) ?? 0) + 1);
     pending = decisionsFrom([...card.holdings, ...card.candidates], view, date, positions, total, blocked);
 
     yield { done: replayedDays.length + skippedDays.length, total: calendar.length, date };
@@ -357,6 +375,10 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
     skippedDays,
     lowConfidenceFactors: o.lowConfidenceFactors,
     adjFactorResolved: o.adjFactorResolved,
+    candidateDays,
+    engineWarnings: [...engineWarnings.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([text, days]) => ({ text, days })),
   });
 
   const metrics: BacktestMetrics = detailed.metrics;

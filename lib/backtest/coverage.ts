@@ -38,10 +38,30 @@ export interface CoverageInput {
   lowConfidenceFactors?: Array<{ name: string; rho: number }>;
   /** R1 攻下来了才传 true。默认 false = 诚实缩区间 */
   adjFactorResolved?: boolean;
+  /** 真出过候选的天数。见下面 candidateCoverage 的说明 */
+  candidateDays?: number;
+  /** 引擎自己报的警告（已按出现天数去重排序） */
+  engineWarnings?: Array<{ text: string; days: number }>;
 }
 
 export interface CoverageReportDetail extends CoverageReport {
   requestedRange: { from: string; to: string };
+  /**
+   * 出过候选的天数 / 回放天数。
+   *
+   * 和 coverage 是两个不同的东西，别混：
+   *   coverage          —— 这天的 K 线够不够回放
+   *   candidateCoverage —— 这天策略真的出没出候选
+   *
+   * 后者才是"这份回测到底测到了多少"的答案。候选来源读的是
+   * zt_pool / sector_rank / security_sector，那几张表的历史深度和 K 线
+   * 完全不是一回事，而且它们都是当日现场、错过不可回补。
+   * 实测：964 天的回测 coverage 98%，candidateCoverage 只有 2% ——
+   * 报告看起来很健康，实际只有 20 来天在做决策。
+   */
+  candidateDays: number;
+  candidateCoverage: number;
+  engineWarnings: Array<{ text: string; days: number }>;
   /** 因复权断层被砍掉的交易日数 */
   truncatedDays: number;
   /** 有效区间折算的年数，按 252 交易日/年 */
@@ -100,6 +120,27 @@ export function buildCoverageReport(i: CoverageInput): CoverageReportDetail {
     );
   }
 
+  const candidateDays = i.candidateDays ?? 0;
+  const candidateCoverage = replayedInRange.length === 0 ? 0 : candidateDays / replayedInRange.length;
+  const engineWarnings = i.engineWarnings ?? [];
+
+  /**
+   * 候选覆盖率低是**最容易被读错的一种健康报告**：
+   * coverage 98% 让人以为这份回测测了四年，而策略只在其中 20 天出过候选。
+   * 所以这条 note 要说清楚"指标只由这 N 天产生"，而不是含糊地说覆盖率低。
+   */
+  if (i.candidateDays !== undefined && candidateCoverage < 0.5 && replayedInRange.length > 0) {
+    notes.push(
+      `回放了 ${replayedInRange.length} 个交易日，其中只有 ${candidateDays} 天出过候选` +
+      `（${(candidateCoverage * 100).toFixed(1)}%）—— 候选来源读的是 zt_pool / sector_rank /` +
+      ` security_sector，它们的历史深度与 K 线无关，且都是当日现场、错过不可回补。` +
+      `本报告的全部指标只由这 ${candidateDays} 天产生，不要当成整个区间的成绩读。`
+    );
+  }
+  for (const w of engineWarnings) {
+    notes.push(`引擎警告（${w.days} 天）：${w.text}`);
+  }
+
   return {
     coverage,
     gapDays: i.skippedDays.length,
@@ -108,6 +149,9 @@ export function buildCoverageReport(i: CoverageInput): CoverageReportDetail {
     requestedRange: { ...i.requested },
     truncatedDays,
     effectiveYears,
+    candidateDays,
+    candidateCoverage,
+    engineWarnings,
     notes,
   };
 }
@@ -118,6 +162,8 @@ export function formatCoverageHeader(r: CoverageReportDetail): string {
     `请求区间：${r.requestedRange.from} ~ ${r.requestedRange.to}`,
     `有效区间：${r.effectiveRange.from || "—"} ~ ${r.effectiveRange.to || "—"}（${r.effectiveYears.toFixed(2)} 年）`,
     `数据覆盖率：${(r.coverage * 100).toFixed(2)}%　gap 日：${r.gapDays} 天　复权断层砍掉：${r.truncatedDays} 天`,
+    // 与数据覆盖率并列，因为这两个数经常一个很高一个很低，而低的那个才是真相
+    `出过候选的天数：${r.candidateDays}（${(r.candidateCoverage * 100).toFixed(1)}% of 回放日）`,
     r.lowConfidenceFactors.length === 0
       ? "低置信因子：无"
       : `低置信因子：${r.lowConfidenceFactors.map((f) => `${f.name} (ρ=${f.rho})`).join("、")}`,
