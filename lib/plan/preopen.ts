@@ -3,6 +3,7 @@ import { shanghaiTs } from "@/lib/data/clock";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { pushNotification } from "@/lib/ui/notify";
+import { recordPlan, type RecordPlanResult } from "@/lib/plan/record";
 
 /**
  * 盘前作战计划：09:15 跑一次策略引擎，把当天的候选推到通知里。
@@ -15,8 +16,13 @@ import { pushNotification } from "@/lib/ui/notify";
  * 既然选股结论在开盘前就已经确定，它就该在开盘前交到人手上，
  * 而不是等人想起来去开页面。09:15 是集合竞价开始的时刻，正好是看这张单子的时候。
  *
- * **不写台账**。prediction 表是胜率闭环的输入，往里写等于宣告"策略做了这些预测、
- * 请按它们统计胜率"。那是另一个决定，不该由一个"盘前提个醒"的 job 顺手打开。
+ * **写台账**。prediction 表是胜率闭环的输入，往里写等于宣告"策略做了这些预测、
+ * 请按它们统计胜率" —— 这个决定现在做了：不落台账就永远没有样本可量
+ * （实测台账自建成起 prediction 一直是 0 行，整套复盘机器从没通过电）。
+ * 一天只在这里记一批，理由见 lib/plan/record.ts。
+ *
+ * 记台账失败不拖垮通知：盘前计划本身是要人看的，
+ * 因为台账写不进去就连计划都不推，是把小故障升级成大故障。
  *
  * 分层：本模块在 lib/data 之上（它要用 strategy/factors/config）。
  * lib/data 从不反向依赖 lib/ui，所以 job 那边只留一个可选钩子，
@@ -31,6 +37,8 @@ export interface PreopenPlan {
   /** 引擎自己报的警告条数，写进通知正文的提示里 */
   warnings: number;
   notified: boolean;
+  /** 落台账的结果。null = 没跑到这一步（配置不可用等） */
+  ledger: RecordPlanResult | null;
 }
 
 export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
@@ -41,7 +49,7 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
       kind: "preopen_plan", severity: "warn",
       title: "盘前计划未生成", body: `策略配置不可用：${cfg.reason}`,
     });
-    return { ok: false, reason: cfg.reason, candidates: [], warnings: 0, notified: true };
+    return { ok: false, reason: cfg.reason, candidates: [], warnings: 0, notified: true, ledger: null };
   }
 
   const out = todaySignalCard(db, shanghaiTs(), cfg.config);
@@ -50,7 +58,7 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
       kind: "preopen_plan", severity: "warn",
       title: "盘前计划未生成", body: out.reason,
     });
-    return { ok: false, reason: out.reason, candidates: [], warnings: 0, notified: true };
+    return { ok: false, reason: out.reason, candidates: [], warnings: 0, notified: true, ledger: null };
   }
 
   const card = out.card;
@@ -62,6 +70,21 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
   }));
   const warnings = card.warnings?.length ?? 0;
   const gear = card.env?.gear;
+
+  /**
+   * 落台账。放在推通知之前：这批预测的"发出时刻"就是现在，
+   * 而通知推送可能因为去重被跳过 —— 台账不该跟着通知的去重逻辑走。
+   *
+   * 吞异常：台账写失败（日历不够、id 冲突）不能让盘前计划推不出去。
+   * 但要留声，否则会变成"胜率一直没样本，也没人知道为什么"。
+   */
+  let ledger: RecordPlanResult | null = null;
+  try {
+    ledger = recordPlan(db, card, shanghaiTs().slice(0, 10), card.ts);
+    if (ledger.skipped) console.error(`[盘前计划] 未落台账：${ledger.reason}`);
+  } catch (e) {
+    console.error(`[盘前计划] 落台账失败（不影响通知）：${(e as Error).message}`);
+  }
 
   /**
    * severity 按"有没有要人做的动作"分，不按"消息重不重要"分：
@@ -87,5 +110,5 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
     dedupeKey: `preopen_plan:${shanghaiTs().slice(0, 10)}`,
   });
 
-  return { ok: true, gear, candidates, warnings, notified };
+  return { ok: true, gear, candidates, warnings, notified, ledger };
 }

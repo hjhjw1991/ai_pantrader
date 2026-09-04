@@ -17,7 +17,7 @@ export type PriceSource = "kline_daily" | "quote_snapshot";
 export type Direction = "看涨" | "看跌" | "中性";
 
 /** 未能结算的原因，闭枚举，方便 job 统计与告警 */
-export type SkipReason = "日历不足" | "无基准价" | "无收盘价";
+export type SkipReason = "日历不足" | "无基准价" | "无收盘价" | "无触发窗口价";
 
 /**
  * 方向映射。
@@ -133,11 +133,126 @@ export function lhbLabelPct(db: Db, code: string, date: string, horizon: EvalHor
   return row?.v ?? null;
 }
 
+/**
+ * 触发窗口：推荐发出后，给价格几个交易日去够到买点。
+ *
+ * 取 1 个交易日，和回测撮合口径**必须**一致（lib/backtest/replay.ts：
+ * 决策挂到下一个可回放日，当日没成交就作废，pending 清空）。
+ * 两边窗口不一样的话，回测胜率和实盘胜率就不是同一件事的两次测量，
+ * 拿它们对比会得出完全错误的结论 —— 而这套复盘的全部意义就是拿它们对比。
+ *
+ * 语义上也站得住：09:15 给出的候选是"今天这个价可以买"，
+ * 不是"未来一周内哪天到了都算"。等三天才到的价，市况已经不是当初那个市况了。
+ */
+export const TRIGGER_WINDOW_DAYS = 1;
+
+export interface EntryFill {
+  triggered: boolean;
+  px: number;
+  date: string;
+}
+
+/**
+ * 限价成交。
+ *
+ * 买方向：当日最低价 <= trigger_px 就算够到了。成交价取 min(开盘价, trigger_px) ——
+ * 低开时挂单会以更好的开盘价成交，取 trigger_px 会系统性地少算这部分优势；
+ * 反过来若一路高开高走没回头，low > trigger_px，本来就不成交。
+ * 卖方向对称：最高价 >= trigger_px，成交价取 max(开盘价, trigger_px)。
+ *
+ * 不做封板/停牌判定：那是回测撮合层的事（涨停买不进）。这里量的是
+ * "价格到没到"，把两件事混在一个数里，触发率低的时候就分不清是买点定高了
+ * 还是当天封死了。回测那边的 blocked 记录保留着完整分类。
+ *
+ * 没有 trigger_px 的推荐（清仓类无条件动作）不走限价，直接以基准收盘价成交。
+ */
+export function resolveEntry(
+  db: Db, p: Prediction, base: string, basePx: ResolvedPx
+): EntryFill | null {
+  if (p.triggerPx == null) {
+    return { triggered: true, px: basePx.px, date: base };
+  }
+  const dir = directionOf(p.action);
+  const end = tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
+  if (!end) return null;                       // 日历没排到，交给调用方报"日历不足"
+
+  const row = db.prepare(
+    dir === "看跌"
+      ? `SELECT date, o, h FROM kline_daily
+         WHERE code = ? AND date > ? AND date <= ? AND h IS NOT NULL AND h >= ?
+         ORDER BY date LIMIT 1`
+      : `SELECT date, o, l FROM kline_daily
+         WHERE code = ? AND date > ? AND date <= ? AND l IS NOT NULL AND l <= ?
+         ORDER BY date LIMIT 1`
+  ).get(p.code, base, end, p.triggerPx) as { date: string; o: number | null } | undefined;
+
+  if (!row) {
+    /**
+     * 没找到够价的那根 K 线，有两种完全不同的原因，必须分开：
+     *   窗口内**有**行情但没到价 → 真的未触发，这是复盘要统计的结果
+     *   窗口内**没有**行情（停牌、数据缺口）→ 不知道到没到，不能判
+     *
+     * 混成一类会让停牌和数据缺口全部计入"未触发"，把触发率系统性地压低，
+     * 于是复盘会得出"买点定得太高"的结论，而真相是那几天根本没开盘。
+     * 按本文件抬头的硬规矩：拿不到真价就不结算。
+     */
+    const any = db.prepare(
+      `SELECT 1 FROM kline_daily WHERE code = ? AND date > ? AND date <= ?
+         AND h IS NOT NULL AND l IS NOT NULL LIMIT 1`
+    ).get(p.code, base, end);
+    if (!any) return null;
+    return { triggered: false, px: 0, date: end };
+  }
+  // 开盘价缺失（极少见的脏行）就退回用触发价，不猜
+  const open = row.o;
+  const px = open == null ? p.triggerPx
+    : dir === "看跌" ? Math.max(open, p.triggerPx) : Math.min(open, p.triggerPx);
+  return { triggered: true, px, date: row.date };
+}
+
+export interface Excursion {
+  mfePct: number | null;
+  maePct: number | null;
+}
+
+/**
+ * 区间内最大有利 / 不利偏移，相对成交价。
+ *
+ * 为什么必须有它：终点涨跌幅把"一路平推上去"和"先腰斩再拉回原地"算成同一个结果，
+ * 而这两种走势对应完全不同的止损设置、完全不同的持有体验。
+ * 盈亏比问的正是这两个方向各自走了多远 —— 只看终点是答不出来的。
+ *
+ * 方向按 direction 取：看跌的推荐，价格跌才是有利偏移。
+ * 用 h/l 而不是收盘：盘中摸到就是真摸到了，止损被打掉不会因为尾盘拉回而撤销。
+ */
+export function excursion(
+  db: Db, code: string, dir: Direction, entryPx: number, from: string, to: string
+): Excursion {
+  if (entryPx <= 0) return { mfePct: null, maePct: null };
+  const r = db.prepare(
+    `SELECT MAX(h) AS hi, MIN(l) AS lo FROM kline_daily
+     WHERE code = ? AND date >= ? AND date <= ? AND h IS NOT NULL AND l IS NOT NULL`
+  ).get(code, from, to) as { hi: number | null; lo: number | null } | undefined;
+  if (!r || r.hi == null || r.lo == null) return { mfePct: null, maePct: null };
+
+  const up = ((r.hi - entryPx) / entryPx) * 100;
+  const down = ((r.lo - entryPx) / entryPx) * 100;
+  // 看跌时有利方向是往下，两个数对调并翻号
+  const [fav, adv] = dir === "看跌" ? [-down, -up] : [up, down];
+  // 有利偏移不为负、不利偏移不为正：区间含成交当日，成交价必落在 [lo, hi] 内，
+  // 但脏数据（成交价来自快照而 K 线缺当日）可能违反，钳一下免得算出"最大盈利 -3%"
+  return { mfePct: round(Math.max(fav, 0), 6), maePct: round(Math.min(adv, 0), 6) };
+}
+
 export interface SettleFacts {
   base: ResolvedPx;
   exit: ResolvedPx;
   horizonEnd: string;
-  actualPct: number;
+  /** 成交情况。未触发时 entry.triggered=false，后面所有盈亏数都为 null */
+  entry: EntryFill;
+  excursion: Excursion;
+  /** 相对成交价的涨跌幅；未触发为 null */
+  actualPct: number | null;
   direction: Direction;
   bandPct: number;
   /** horizon 区间内最低价是否破过止损（含破位当日） */
@@ -193,10 +308,31 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   const exitPx = resolvePx(db, p.code, horizonEnd);
   if (!exitPx) return { ...head, ok: false, reason: "无收盘价", detail: `${horizonEnd} 无日线也无快照` };
 
-  const actualPct = round(((exitPx.px - basePx.px) / basePx.px) * 100, 6);
   const direction = directionOf(p.action);
   const bandPct = opts.bands?.[p.evalHorizon] ?? NEUTRAL_BAND_PCT[p.evalHorizon];
-  const verdict = verdictOf(direction, actualPct, bandPct);
+
+  const entry = resolveEntry(db, p, base, basePx);
+  if (!entry) {
+    // resolveEntry 返回 null 有两种情形，报出来的原因必须能区分：
+    // 日历没排到（系统问题）vs 窗口内没有行情（停牌/缺口，等数据补上还能结）
+    const end = tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
+    return end === null
+      ? { ...head, ok: false, reason: "日历不足", detail: `${base} 之后不足 ${TRIGGER_WINDOW_DAYS} 个交易日，判不了触发` }
+      : { ...head, ok: false, reason: "无触发窗口价", detail: `${base}~${end} 无日线（停牌或数据缺口），判不了到没到买点` };
+  }
+
+  // 价格没够到推荐的买点 —— 这笔推荐从未成为一个仓位，没有盈亏可算。
+  // 它仍然要结算、要落库：未触发本身就是复盘要统计的结果之一
+  // （买点定得够不到，和选股选错了，是两种病）。
+  const actualPct = entry.triggered
+    ? round(((exitPx.px - entry.px) / entry.px) * 100, 6)
+    : null;
+  const excur = entry.triggered
+    ? excursion(db, p.code, direction, entry.px, entry.date, horizonEnd)
+    : { mfePct: null, maePct: null };
+  const verdict: Verdict = entry.triggered
+    ? verdictOf(direction, actualPct as number, bandPct)
+    : "未触发";
 
   // 破止损：看区间内最低价，不看收盘 —— 盘中破位就已经触发纪律
   let stopBreached = false, stopBreachDate: string | null = null;
@@ -210,15 +346,25 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
 
   const label = lhbLabelPct(db, p.code, base, p.evalHorizon);
   const facts: SettleFacts = {
-    base: basePx, exit: exitPx, horizonEnd, actualPct, direction, bandPct,
-    stopBreached, stopBreachDate, lhbLabelPct: label,
+    base: basePx, exit: exitPx, horizonEnd, entry, excursion: excur,
+    actualPct, direction, bandPct, stopBreached, stopBreachDate, lhbLabelPct: label,
   };
 
-  const sign = actualPct >= 0 ? "+" : "";
-  let attribution =
-    `D${p.evalHorizon} ${base} ${basePx.px}(${basePx.source}) → ${horizonEnd} ${exitPx.px}(${exitPx.source})` +
-    ` = ${sign}${actualPct.toFixed(2)}%，${direction}／中性带 ±${bandPct}% → ${verdict}`;
-  if (label != null && Math.abs(label - actualPct) > 2) {
+  let attribution: string;
+  if (!entry.triggered) {
+    attribution =
+      `D${p.evalHorizon} 基准 ${base} ${basePx.px}(${basePx.source})；` +
+      `买点 ${p.triggerPx} 在 ${TRIGGER_WINDOW_DAYS} 个交易日内未触及 → 未触发（不进胜率分母）`;
+  } else {
+    const sign = (actualPct as number) >= 0 ? "+" : "";
+    attribution =
+      `D${p.evalHorizon} 成交 ${entry.date} ${round(entry.px, 4)} → ${horizonEnd} ${exitPx.px}(${exitPx.source})` +
+      ` = ${sign}${(actualPct as number).toFixed(2)}%，${direction}／中性带 ±${bandPct}% → ${verdict}`;
+    if (excur.mfePct != null && excur.maePct != null) {
+      attribution += `；区间最大有利 +${excur.mfePct.toFixed(2)}% / 最大不利 ${excur.maePct.toFixed(2)}%`;
+    }
+  }
+  if (entry.triggered && label != null && Math.abs(label - (actualPct as number)) > 2) {
     // 背离通常意味着复权/停牌，报出来让人看，不自动改判
     attribution += `；⚠与龙虎榜 d${p.evalHorizon}_chg ${label.toFixed(2)}% 背离`;
   }
@@ -232,6 +378,13 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
     errorType: extra?.errorType ?? null,
     attribution: extra ? `${attribution}｜${extra.attribution}` : attribution,
     settledAt: opts.now ?? new Date().toISOString(),
+    // trigger_px 为空的推荐无条件执行，"触发"这件事对它不适用 —— 记 null 而不是 true，
+    // 否则触发率的分母里会混进一批从来不需要够价的单子，把这个数拉高
+    triggered: p.triggerPx == null ? null : entry.triggered,
+    entryPx: entry.triggered ? round(entry.px, 4) : null,
+    entryDate: entry.triggered ? entry.date : null,
+    mfePct: excur.mfePct,
+    maePct: excur.maePct,
   };
   return { ...head, ok: true, facts, outcome };
 }
@@ -256,15 +409,20 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
   const settled: Outcome[] = [];
   const skipped: SettleAttempt[] = [];
   const stmt = db.prepare(
-    `INSERT INTO outcome (pred_id, verdict, actual_pct, error_type, attribution, settled_at)
-     VALUES (?,?,?,?,?,?) ON CONFLICT(pred_id) DO NOTHING`
+    `INSERT INTO outcome (pred_id, verdict, actual_pct, error_type, attribution, settled_at,
+       triggered, entry_px, entry_date, mfe_pct, mae_pct)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pred_id) DO NOTHING`
   );
 
   for (const p of pending) {
     const att = settleOne(db, p, opts);
     if (!att.ok || !att.outcome) { skipped.push(att); continue; }
     const o = att.outcome;
-    const info = stmt.run(o.predId, o.verdict, o.actualPct, o.errorType, o.attribution, o.settledAt);
+    const info = stmt.run(
+      o.predId, o.verdict, o.actualPct, o.errorType, o.attribution, o.settledAt,
+      o.triggered == null ? null : o.triggered ? 1 : 0,
+      o.entryPx, o.entryDate, o.mfePct, o.maePct
+    );
     if (info.changes > 0) settled.push(o);
   }
   return { asOf, scanned: pending.length, settled, skipped };

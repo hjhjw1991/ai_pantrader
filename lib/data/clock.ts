@@ -48,3 +48,23 @@ export function shanghaiTs(d: Date = new Date()): string {
 export function shanghaiDay(d: Date = new Date()): string {
   return shanghaiTs(d).slice(0, 10);
 }
+
+/**
+ * 上海时区的星期几（0=周日 … 6=周六）。
+ *
+ * 不用 Date.getDay()：那读的是**运行机器的本地时区**。
+ * 机器设在别的时区时，22:00 CST 的那一刻本地可能已经是次日，
+ * "周五夜跑周复盘"会悄悄变成周六 —— 不报错，只是永远错开一天。
+ * 从上海挂钟日期反推，与全库其它日期口径一致。
+ */
+export function shanghaiWeekday(d: Date = new Date()): number {
+  const [y, m, dd] = shanghaiDay(d).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, dd)).getUTCDay();
+}
+
+/** `YYYY-MM-DD` 加减自然日。跨月跨年交给 Date 的 UTC 算术，不手写进位 */
+export function addDays(date: string, n: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}-${String(t.getUTCDate()).padStart(2, "0")}`;
+}

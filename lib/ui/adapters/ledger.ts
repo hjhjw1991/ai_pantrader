@@ -2,10 +2,13 @@ import type Database from "better-sqlite3";
 import type { ParamSuggestion } from "@/lib/contracts/ledger";
 import {
   ledgerDashboard,
+  review,
   suggestParamChanges,
   winRate,
   type LedgerDashboard,
+  type LedgerFilter,
   type LedgerWinRateStats,
+  type ReviewStats,
 } from "@/lib/ledger";
 
 /**
@@ -34,6 +37,17 @@ export function winRateStats(db: Db): LedgerWinRateStats | null {
  */
 export function dashboard(db: Db, asOf: string): LedgerDashboard {
   return ledgerDashboard(db, { asOf, granularity: "day", timelineLimit: 200 });
+}
+
+/**
+ * 推荐质量复盘：触发率 / 胜率 / 盈亏比 三关分开报。
+ *
+ * **不返回 null**：这三个数各有各的"有没有样本"，整块判空会把
+ * "有 40 条推荐但一条都没到买点"（触发率 0%，重要信号）
+ * 和"一条推荐都没有"混成同一个空态。各比率自己是 null，页面各自判。
+ */
+export function reviewStats(db: Db, filter: LedgerFilter = {}): ReviewStats {
+  return review(db, filter);
 }
 
 /** 参数调整建议。只出建议，不自动改 YAML（spec §11 第 4 步） */

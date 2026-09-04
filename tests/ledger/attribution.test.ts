@@ -143,9 +143,10 @@ describe("ledger/attribution 取事实", () => {
   });
 
   it("attributeOutcome 把错因写回已结算的 outcome 行", () => {
+    // 次日开在触发价 10（限价成交于 10），盘中跌破止损 9，收 8.5
     seedDaily(db, "300502", [
       { date: "2026-07-01", c: 10 },
-      { date: "2026-07-02", c: 8.5, l: 8.4 },
+      { date: "2026-07-02", o: 10, c: 8.5, l: 8.4 },
     ]);
     recordPrediction(db, mkPred({
       id: "w1", ts: "2026-07-01T15:30:00+08:00", stopPx: 9,
@@ -163,9 +164,10 @@ describe("ledger/attribution 取事实", () => {
   });
 
   it("reconcile 传入 attribute 钩子时可以一次落地错因", () => {
+    // 次日开在触发价 10（限价成交于 10），盘中跌破止损 9，收 8.5
     seedDaily(db, "300502", [
       { date: "2026-07-01", c: 10 },
-      { date: "2026-07-02", c: 8.5, l: 8.4 },
+      { date: "2026-07-02", o: 10, c: 8.5, l: 8.4 },
     ]);
     recordPrediction(db, mkPred({
       id: "h1", ts: "2026-07-01T15:30:00+08:00", stopPx: 9,

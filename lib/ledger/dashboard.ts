@@ -2,13 +2,16 @@ import type { Db } from "@/lib/db";
 import type { Action, ErrorType, Verdict } from "@/lib/contracts";
 import { dateOf, predWhere, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
 import { directionOf, type Direction } from "@/lib/ledger/reconcile";
+import { countsTowardWinRate } from "@/lib/contracts";
 import { ERROR_TYPES, winRate, type LedgerWinRateStats } from "@/lib/ledger/winrate";
 
 /**
  * 胜率仪表盘的聚合查询层（spec §11 第 5 步、§13 前端）。
  *
  * 前端只读这里的返回类型，不自己写 SQL —— 否则同一个"胜率"会有两套口径。
- * 分母口径与 winrate.ts 一致：只算有方向的判定，中性单独计数。
+ * 分母口径与 winrate.ts 一致：只算有方向的判定（countsTowardWinRate），
+ * 中性与未触发都不进分母 —— 未触发那条从未成为仓位，算成 miss 就是把
+ * "买点够不到"记成"看错了"，两种病会被混成一种。
  */
 
 export type Granularity = "day" | "week" | "month";
@@ -117,7 +120,9 @@ export function hitRateByPeriod(
     const key = periodKey(dateOf(r.ts), granularity);
     const cur = acc.get(key)
       ?? { period: key, total: 0, hit: 0, miss: 0, neutral: 0, rate: null };
-    if (r.verdict === "中性") cur.neutral++;
+    // 中性与未触发都不进分母（口径见 countsTowardWinRate）——
+    // 未触发的那条从未成为仓位，算成 miss 会把"买点够不到"记成"看错了"
+    if (!countsTowardWinRate(r.verdict as Verdict)) cur.neutral++;
     else {
       cur.total++;
       if (r.verdict === "命中") cur.hit++; else cur.miss++;
@@ -140,7 +145,7 @@ export function hitRateByStock(db: Db, filter: LedgerFilter = {}): StockHitRate[
       code: r.code, name: names.get(r.code) ?? null,
       total: 0, hit: 0, neutral: 0, rate: null, avgActualPct: null, pctSum: 0, pctN: 0,
     };
-    if (r.verdict === "中性") cur.neutral++;
+    if (!countsTowardWinRate(r.verdict as Verdict)) cur.neutral++;
     else { cur.total++; if (r.verdict === "命中") cur.hit++; }
     if (r.actual_pct != null) { cur.pctSum += r.actual_pct; cur.pctN++; }
     acc.set(r.code, cur);

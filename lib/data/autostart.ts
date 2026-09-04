@@ -62,6 +62,8 @@ export interface AutostartOpts {
   planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
   /** 盘中信号盯守实现，同样由组装根注入 */
   signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
+  /** 周复盘实现，同样由组装根注入。不给就只是不出周报，对账照常 */
+  weeklyReview?: (db: Db, from: string, to: string) => { stats: { settled: number }; notified: boolean };
 }
 
 export function startAutostart(
@@ -89,6 +91,7 @@ export function startAutostart(
     db, clients, runner: "scheduler", onEvent: log,
     ...(opts.planPreopen ? { planPreopen: opts.planPreopen } : {}),
     ...(opts.signalWatch ? { signalWatch: opts.signalWatch } : {}),
+    ...(opts.weeklyReview ? { weeklyReview: opts.weeklyReview } : {}),
   });
   scheduler.start();
 

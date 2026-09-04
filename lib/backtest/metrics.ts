@@ -1,5 +1,5 @@
 import type { BacktestMetrics, EquityPoint } from "@/lib/contracts";
-import type { ClosedTrade } from "@/lib/backtest/types";
+import type { BlockedRecord, ClosedTrade, ReplayTrade } from "@/lib/backtest/types";
 
 /**
  * 回测指标（spec §10.4）。优化目标是 **Calmar = 年化 / 最大回撤**，不是纯收益。
@@ -25,6 +25,10 @@ export const MIN_SAMPLE_DAYS = TRADING_DAYS_PER_YEAR;
 export interface MetricsInput {
   equity: EquityPoint[];
   closed: ClosedTrade[];
+  /** 实际成交流水，用来数买入成交笔数（触发率的分子） */
+  trades?: ReplayTrade[];
+  /** 被拦下的决策，用来数"价格没到买点"的笔数（触发率分母的另一半） */
+  blocked?: BlockedRecord[];
 }
 
 export interface DetailedMetrics {
@@ -99,6 +103,18 @@ export function computeMetricsDetailed(input: MetricsInput): DetailedMetrics {
     degeneracy.push(`样本区间 ${equity.length} 个交易日不足 ${MIN_SAMPLE_DAYS}（一年）`);
   }
 
+  /**
+   * 触发率。分母 = 买入成交笔数 + 因"未触及限价"被拦下的笔数。
+   *
+   * 只算这两类是关键：涨停封板、停牌、T+1、资金不足都是**约束**导致的没买上，
+   * 和"买点定得够不到"是两码事。把它们混进分母，触发率就变成了一个
+   * 同时反映买点合理性和资金规模的混合指标，改哪个都动它，也就没法用它做判断。
+   */
+  const buyFilled = (input.trades ?? []).filter((t) => t.side === "buy").length;
+  const missedLimit = (input.blocked ?? [])
+    .filter((b) => b.side === "buy" && b.blockedBy === "未触及限价").length;
+  const buyDecisions = buyFilled + missedLimit;
+
   const rawCalmar = mdd === 0 ? null : annualReturn / mdd;
   const metrics: BacktestMetrics = {
     calmar: degeneracy.length > 0 ? 0 : (rawCalmar ?? 0),
@@ -110,6 +126,8 @@ export function computeMetricsDetailed(input: MetricsInput): DetailedMetrics {
     profitFactor: grossLoss === 0 ? 0 : grossWin / grossLoss,
     trades: closed.length,
     avgHoldDays: closed.length === 0 ? 0 : closed.reduce((a, t) => a + t.holdDays, 0) / closed.length,
+    triggerRate: buyDecisions === 0 ? null : buyFilled / buyDecisions,
+    buyDecisions, buyFilled,
   };
   return { metrics, degeneracy, rawCalmar };
 }

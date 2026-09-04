@@ -1,14 +1,19 @@
 import type { Db } from "@/lib/db";
-import type { ErrorType, Phase, WinRateStats } from "@/lib/contracts";
+import type { ErrorType, Phase, Verdict, WinRateStats } from "@/lib/contracts";
+import { countsTowardWinRate } from "@/lib/contracts";
 import { PHASES, predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
 
 /**
  * 胜率统计（spec §11 第 5 步）+ Advisor 的 A/B 分组（spec §5.3）。
  *
  * 口径写在这里，别处不要另算：
- *   - 分母 total 只算有方向的判定（命中 + 偏差）。中性是"没方向承诺"或"落在中性带里"，
- *     算进分母会让胜率随中性带宽度变动，那是在量测阈值而不是量测判断力。
- *   - settled / neutral 单独给出，调用方要看全貌时不用再查库。
+ *   - 分母 total 只算有方向的判定（命中 + 偏差），判据集中在 countsTowardWinRate。
+ *     中性是"没方向承诺"或"落在中性带里"，算进分母会让胜率随中性带宽度变动，
+ *     那是在量测阈值而不是量测判断力。
+ *   - 未触发同样不进分母，但它和中性是两回事：价格没够到推荐的买点，
+ *     这笔推荐从未成为一个仓位。它的统计口径在 lib/ledger/review（触发率），
+ *     混进胜率会把"买点定得够不到"伪装成"看得准"。
+ *   - settled / neutral / untriggered 单独给出，调用方要看全貌时不用再查库。
  */
 
 export const ERROR_TYPES: ErrorType[] = ["瞬时价误判", "板块漏扫", "逆势扛", "追高", "其他"];
@@ -37,9 +42,11 @@ export interface ABReport {
 }
 
 export interface LedgerWinRateStats extends WinRateStats {
-  /** 全部已结算条数，含中性 */
+  /** 全部已结算条数，含中性与未触发 */
   settled: number;
   neutral: number;
+  /** 价格没够到推荐买点的条数。不进胜率分母，但它是复盘的第一道闸 */
+  untriggered: number;
   ab: ABReport;
 }
 
@@ -69,10 +76,13 @@ export function winRate(db: Db, filter: LedgerFilter = {}): LedgerWinRateStats {
   const byErrorType: Record<string, number> = Object.fromEntries(ERROR_TYPES.map(e => [e, 0]));
   const ab = { with: { total: 0, hit: 0 }, without: { total: 0, hit: 0 } };
 
-  let total = 0, hit = 0, neutral = 0;
+  let total = 0, hit = 0, neutral = 0, untriggered = 0;
   for (const r of rows) {
     if (r.error_type) byErrorType[r.error_type] = (byErrorType[r.error_type] ?? 0) + 1;
-    if (r.verdict === "中性") { neutral++; continue; }
+    if (!countsTowardWinRate(r.verdict as Verdict)) {
+      if (r.verdict === "未触发") untriggered++; else neutral++;
+      continue;
+    }
 
     const isHit = r.verdict === "命中";
     total++; if (isHit) hit++;
@@ -86,7 +96,7 @@ export function winRate(db: Db, filter: LedgerFilter = {}): LedgerWinRateStats {
 
   return {
     total, hit, rate: rate(hit, total),
-    settled: rows.length, neutral,
+    settled: rows.length, neutral, untriggered,
     byPhase, byErrorType,
     advisorAB: ab,
     ab: abReport(ab),

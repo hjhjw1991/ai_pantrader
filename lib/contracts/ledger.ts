@@ -27,7 +27,21 @@ export interface Prediction {
   advisorInfluenced: boolean;
 }
 
-export type Verdict = "命中" | "偏差" | "中性";
+/**
+ * 判定。
+ *
+ * 未触发 是第四类，不是"中性"的一种：
+ *   中性   —— 到过买点、买了、涨跌落在中性带里（有方向承诺，只是没走出来）
+ *   未触发 —— 价格根本没到推荐的买点，这笔推荐从未成为一个仓位
+ * 两者都不进胜率分母，但病因完全不同：前者是"看得不够准"，
+ * 后者是"买点定得够不到"。混成一类，就再也分不出该改选股还是该改触发价。
+ */
+export type Verdict = "命中" | "偏差" | "中性" | "未触发";
+
+/** 进胜率分母的判定：只有真形成了方向承诺并且有结果的才算 */
+export function countsTowardWinRate(v: Verdict): boolean {
+  return v === "命中" || v === "偏差";
+}
 
 /**
  * 错误类型固定枚举，不许自由文本 —— 聚类统计频次才能驱动参数反馈。
@@ -42,12 +56,33 @@ export type ErrorType = "瞬时价误判" | "板块漏扫" | "逆势扛" | "追�
 export interface Outcome {
   predId: string;
   verdict: Verdict;
-  /** 实际涨跌幅，按 evalHorizon 对账 */
-  actualPct: number;
+  /**
+   * 实际涨跌幅，按 evalHorizon 对账。
+   *
+   * 起算价是**实际成交价 entryPx**，不是基准日收盘价 ——
+   * 推荐说的是"到 trigger_px 才动手"，拿一个系统从没说过要买的价去记功记过，
+   * 等于给策略换了一道它没做过的题。未触发时为 null：没有仓位就没有盈亏。
+   */
+  actualPct: number | null;
   errorType: ErrorType | null;
   /** 归因说明，人看的 */
   attribution: string;
   settledAt: string;
+
+  /**
+   * 价格到没到推荐的买点。null = 这条推荐没有 trigger_px（清仓类动作，无条件执行）。
+   *
+   * 这是复盘的第一道闸：触发率低的策略，胜率再高也没用 ——
+   * 它推荐的那些买点根本够不到，那些漂亮的胜率是纸上的。
+   */
+  triggered: boolean | null;
+  /** 实际成交基准价。限价成交口径见 lib/ledger/reconcile */
+  entryPx: number | null;
+  entryDate: string | null;
+  /** 区间内最大有利偏移（相对 entryPx，百分比，正数） */
+  mfePct: number | null;
+  /** 区间内最大不利偏移（相对 entryPx，百分比，负数） */
+  maePct: number | null;
 }
 
 export interface WinRateStats {

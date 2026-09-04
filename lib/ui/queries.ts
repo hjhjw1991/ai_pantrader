@@ -763,7 +763,8 @@ export function outcomes(db: Db, predIds: string[]): Map<string, Outcome> {
   if (predIds.length === 0) return m;
   const rows = db
     .prepare(
-      `SELECT pred_id, verdict, actual_pct, error_type, attribution, settled_at
+      `SELECT pred_id, verdict, actual_pct, error_type, attribution, settled_at,
+              triggered, entry_px, entry_date, mfe_pct, mae_pct
        FROM outcome WHERE pred_id IN (${placeholders(predIds.length)})`
     )
     .all(...predIds) as Array<Record<string, unknown>>;
@@ -771,10 +772,17 @@ export function outcomes(db: Db, predIds: string[]): Map<string, Outcome> {
     m.set(r.pred_id as string, {
       predId: r.pred_id as string,
       verdict: r.verdict as Verdict,
-      actualPct: Number(r.actual_pct ?? 0),
+      // 未触发的没有涨跌幅。别拿 0 兜底 —— 0% 会混进平均涨幅里，
+      // 把一批"根本没成交"的推荐算成"成交了但没涨没跌"
+      actualPct: r.actual_pct == null ? null : Number(r.actual_pct),
       errorType: (r.error_type as ErrorType) ?? null,
       attribution: (r.attribution as string) ?? "",
       settledAt: r.settled_at as string,
+      triggered: r.triggered == null ? null : Number(r.triggered) === 1,
+      entryPx: r.entry_px == null ? null : Number(r.entry_px),
+      entryDate: (r.entry_date as string) ?? null,
+      mfePct: r.mfe_pct == null ? null : Number(r.mfe_pct),
+      maePct: r.mae_pct == null ? null : Number(r.mae_pct),
     });
   }
   return m;

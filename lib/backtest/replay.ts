@@ -349,7 +349,7 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
 
   const unexecutedDecisions = pending.length;
 
-  const detailed = computeMetricsDetailed({ equity, closed });
+  const detailed = computeMetricsDetailed({ equity, closed, trades, blocked });
   const coverage = buildCoverageReport({
     requested: { from: o.from, to: o.to },
     tradingDays: calendar,

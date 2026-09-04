@@ -12,6 +12,7 @@ function metrics(calmar: number): BacktestMetrics {
   return {
     calmar, annualReturn: calmar * 0.1, maxDrawdown: 0.1, sharpe: 1,
     winRate: 0.5, profitFactor: 1.5, trades: 50, avgHoldDays: 3,
+    triggerRate: 0.5, buyDecisions: 100, buyFilled: 50,
   };
 }
 

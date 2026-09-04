@@ -43,7 +43,12 @@ describe("ledger/reconcile 交易日推进", () => {
 
 describe("ledger/reconcile 结算", () => {
   it("有日线时用日线收盘结算，看涨超中性带记命中", () => {
-    seedDaily(db, "300502", [{ date: "2026-08-03", c: 10 }, { date: "2026-08-10", c: 11 }]);
+    // 08-04 是触发窗口那天：低点摸到 triggerPx 10，成交价 min(开盘, 触发价) = 10
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", c: 10.1, l: 9.9 },
+      { date: "2026-08-10", c: 11 },
+    ]);
     recordPrediction(db, mkPred({ id: "d1", evalHorizon: 5, validUntil: "2026-08-10" }));
 
     const rep = reconcile(db, { asOf: "2026-08-11" });
@@ -63,7 +68,10 @@ describe("ledger/reconcile 结算", () => {
     // 08-04 只有快照没有日线（当日收盘日线尚未落库）
     seedSnapshot(db, "2026-08-04T06:00:00.000Z", "300502", 10.2);
     seedSnapshot(db, "2026-08-04T07:05:00.000Z", "300502", 10.5);
-    recordPrediction(db, mkPred({ id: "s1", evalHorizon: 1, validUntil: "2026-08-04" }));
+    // triggerPx 留空 —— 判"到没到买点"需要当日的最高/最低价，快照给不出这两个数。
+    // 有触发价的预测在日线落库前一律不结算（见下面"无触发窗口价"那条），
+    // 这里要测的是**收盘价源**的退化路径，两件事分开测
+    recordPrediction(db, mkPred({ id: "s1", triggerPx: null, evalHorizon: 1, validUntil: "2026-08-04" }));
 
     const rep = reconcile(db, { asOf: "2026-08-05" });
     expect(rep.settled).toHaveLength(1);
@@ -104,7 +112,11 @@ describe("ledger/reconcile 结算", () => {
   });
 
   it("重复结算是幂等的：二次运行不再写、不改已结算的行", () => {
-    seedDaily(db, "300502", [{ date: "2026-08-03", c: 10 }, { date: "2026-08-10", c: 11 }]);
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", c: 10.1, l: 9.9 },
+      { date: "2026-08-10", c: 11 },
+    ]);
     recordPrediction(db, mkPred({ id: "i1", evalHorizon: 5, validUntil: "2026-08-10" }));
 
     const first = reconcile(db, { asOf: "2026-08-11", now: "2026-08-11T01:00:00.000Z" });
@@ -122,7 +134,12 @@ describe("ledger/reconcile 结算", () => {
     expect(directionOf("买入")).toBe("看涨");
     expect(directionOf("观察")).toBe("中性");
 
-    seedDaily(db, "300502", [{ date: "2026-08-03", c: 10 }, { date: "2026-08-10", c: 9 }]);
+    // 卖方向的限价：最高价摸到 triggerPx 10 才算够到
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", c: 9.9, h: 10.1 },
+      { date: "2026-08-10", c: 9 },
+    ]);
     recordPrediction(db, mkPred({ id: "b1", action: "清仓", evalHorizon: 5, validUntil: "2026-08-10" }));
     const rep = reconcile(db, { asOf: "2026-08-11" });
     expect(rep.settled[0].verdict).toBe("命中");
@@ -130,7 +147,11 @@ describe("ledger/reconcile 结算", () => {
   });
 
   it("中性带内不判对错，观察类信号一律中性（没有方向承诺）", () => {
-    seedDaily(db, "300502", [{ date: "2026-08-03", c: 10 }, { date: "2026-08-10", c: 10.2 }]);
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", c: 10.05, l: 9.9 },
+      { date: "2026-08-10", c: 10.2 },
+    ]);
     recordPrediction(db, mkPred({ id: "z1", evalHorizon: 5, validUntil: "2026-08-10" }));
     recordPrediction(db, mkPred({ id: "z2", action: "观察", evalHorizon: 5, validUntil: "2026-08-10" }));
     const rep = reconcile(db, { asOf: "2026-08-11" });

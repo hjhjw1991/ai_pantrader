@@ -3,7 +3,7 @@ import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
-import { dashboard, paramSuggestions, winRateStats } from "@/lib/ui/adapters/ledger";
+import { dashboard, paramSuggestions, reviewStats, winRateStats } from "@/lib/ui/adapters/ledger";
 import { predictionTimeline } from "@/lib/ui/queries";
 import { shanghaiParts } from "@/lib/ui/status";
 
@@ -27,12 +27,75 @@ export default function LedgerPage() {
   const dash = dashboard(db, today);
   const suggestions = paramSuggestions(db);
   const timeline = predictionTimeline(db, 200);
+  const rv = reviewStats(db);
 
   const errorRows = dash.byErrorType.filter((e) => e.count > 0);
   const maxErr = errorRows.reduce((m, e) => Math.max(m, e.count), 0);
 
+  const pct = (x: number | null) => (x === null ? "—" : `${(x * 100).toFixed(1)}%`);
+  const num = (x: number | null, d = 2) => (x === null ? "—" : x.toFixed(d));
+
   return (
     <div className="flex flex-col gap-3">
+      {/* ── 推荐质量复盘：三关分开报 ── */}
+      <Panel
+        title="推荐质量复盘"
+        hint="三关分开看：够不够得到买点 → 判得准不准 → 赚赔比多少。任何一关不合格，另外两个数都不作数"
+        right={`已结算 ${rv.settled} 条 · 样本门槛 ${rv.minSample}`}
+        tone={rv.conclusive && (rv.winRate ?? 0) < rv.target ? "warn" : "normal"}
+      >
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6">
+          <div>
+            <KV label="触发率" hint="价格真到了推荐买点的比例">
+              {rv.triggerRate === null ? "—" : pct(rv.triggerRate)}
+            </KV>
+            <KV label="到价 / 有买点" hint="无条件动作不进分母">
+              <span className="num">{rv.triggered} / {rv.triggerable}</span>
+            </KV>
+          </div>
+          <div>
+            <KV label="胜率" hint={`只在到价样本里算，目标 ${pct(rv.target)}`}>
+              {rv.winRate === null ? "—" : (
+                <span className={rv.winRate >= rv.target ? "text-up" : "text-down"}>{pct(rv.winRate)}</span>
+              )}
+            </KV>
+            <KV label="命中 / 已判定" hint="中性与未触发都不进分母">
+              <span className="num">{rv.hit} / {rv.decided}</span>
+            </KV>
+          </div>
+          <div>
+            <KV label="盈亏比" hint="平均盈利 ÷ 平均亏损">
+              {rv.payoffRatio === null ? "—" : (
+                <span className={rv.payoffRatio >= 1 ? "text-up" : "text-down"}>{num(rv.payoffRatio)}</span>
+              )}
+            </KV>
+            <KV label="均盈 / 均亏">
+              <span className="num">{num(rv.avgWinPct)}% / {num(rv.avgLossPct)}%</span>
+            </KV>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 mt-2 pt-2 border-t border-line">
+          <KV label="每条推荐期望" hint="已按触发率折过，含够不到的那些">
+            <span className="num">{num(rv.expectancyPerSignalPct)}%</span>
+          </KV>
+          <KV label="已触发的每条期望">
+            <span className="num">{num(rv.expectancyPct)}%</span>
+          </KV>
+          <KV label="区间极值均值" hint="最大有利 / 最大不利，用来判断止损设得松还是紧">
+            <span className="num">{num(rv.avgMfePct)}% / {num(rv.avgMaePct)}%</span>
+          </KV>
+        </div>
+
+        <p className={`mt-2 text-[12px] ${rv.conclusive ? "text-ink" : "text-ink-3"}`}>{rv.verdict}</p>
+        {rv.settled === 0 ? (
+          <p className="text-ink-3 text-[11px] mt-1">
+            台账还是空的。推荐由 09:15 的盘前 job 落库，到期由夜间 job 结算 ——
+            D{5} 的预测最快要 5 个交易日之后才有第一条结果。
+          </p>
+        ) : null}
+      </Panel>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <Panel
           title="命中率仪表盘"

@@ -131,3 +131,56 @@ describe("退化情形不许伪装成好分数", () => {
     expect(MIN_SAMPLE_DAYS).toBe(252);
   });
 });
+
+/**
+ * 触发率：发出的买入决策里，价格真到了买点因而成交的比例。
+ *
+ * 单独立一组是因为它的分母口径最容易写错 —— 把封板/停牌/资金不足
+ * 一起算进"没买上"，触发率就同时反映买点合理性和资金规模，
+ * 改哪个都动它，也就没法用它判断买点定得对不对。
+ */
+describe("触发率", () => {
+  const buy = (n: number) => Array.from({ length: n }, () => ({
+    decidedOn: "2026-08-03", filledOn: "2026-08-04", code: "300502",
+    account: "卫星" as const, side: "buy" as const, px: 10, qty: 100, fee: 5,
+  }));
+  const blk = (n: number, by: "未触及限价" | "涨停封板" | "资金不足") =>
+    Array.from({ length: n }, () => ({
+      date: "2026-08-04", code: "300502", side: "buy" as const,
+      blockedBy: by, reason: "", wantQty: 100,
+    }));
+
+  it("分母 = 买入成交 + 未触及限价", () => {
+    const m = computeMetrics({
+      equity: twoYearCurve(), closed: closedTrades(40, 24),
+      trades: buy(30), blocked: blk(70, "未触及限价"),
+    });
+    expect(m.buyFilled).toBe(30);
+    expect(m.buyDecisions).toBe(100);
+    expect(m.triggerRate).toBeCloseTo(0.3, 6);
+  });
+
+  it("封板/资金不足不进分母 —— 那是约束问题，不是买点定得够不够得到", () => {
+    const m = computeMetrics({
+      equity: twoYearCurve(), closed: closedTrades(40, 24),
+      trades: buy(30), blocked: [...blk(70, "未触及限价"), ...blk(50, "涨停封板"), ...blk(20, "资金不足")],
+    });
+    expect(m.buyDecisions).toBe(100);
+    expect(m.triggerRate).toBeCloseTo(0.3, 6);
+  });
+
+  it("卖出成交不算进买入触发率", () => {
+    const sells = buy(10).map(t => ({ ...t, side: "sell" as const }));
+    const m = computeMetrics({
+      equity: twoYearCurve(), closed: closedTrades(40, 24),
+      trades: [...buy(30), ...sells], blocked: blk(70, "未触及限价"),
+    });
+    expect(m.buyFilled).toBe(30);
+  });
+
+  it("没有买入决策时给 null，不编 0 —— 0% 会被读成「买点全都够不到」", () => {
+    const m = computeMetrics({ equity: twoYearCurve(), closed: [] });
+    expect(m.triggerRate).toBeNull();
+    expect(m.buyDecisions).toBe(0);
+  });
+});

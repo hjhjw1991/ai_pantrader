@@ -14,9 +14,11 @@ import { coverageReport, detectGaps } from "@/lib/data/gap";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { refreshTableCounts } from "@/lib/data/table-counts";
+import { reconcile } from "@/lib/ledger/reconcile";
+import { attributeSettled } from "@/lib/ledger/attribution";
 import { deriveSecurityMeta } from "@/lib/data/security-meta";
 import { MACRO_SECIDS } from "@/lib/data/sources/eastmoney";
-import { shanghaiTs } from "@/lib/data/clock";
+import { shanghaiTs, shanghaiWeekday, addDays } from "@/lib/data/clock";
 
 /**
  * 盘中每隔多少分钟采一次板块涨幅榜。盘中时点是 5 分钟一个，所以 15 = 每 3 轮一次。
@@ -61,6 +63,11 @@ export interface JobDeps {
    * 每轮盘中采集之后重算信号卡并与上次比对，产生档位切换 / 新候选 / 硬线告警通知。
    */
   signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
+  /**
+   * 周复盘，同样由组装根注入（理由见 planPreopen）。
+   * 对账之后跑，把这一周的触发率 / 胜率 / 盈亏比汇成一条通知。
+   */
+  weeklyReview?: (db: Db, from: string, to: string) => { stats: { settled: number }; notified: boolean };
 }
 
 /** 进度事件。phase 是当前在做哪一步，done/total 是该步的批次进度 */
@@ -177,7 +184,7 @@ export function jobOutcome(
 
 export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   if (!KNOWN.includes(name)) throw new Error(`unknown job: ${name}`);
-  const { db, clients, now, onProgress, planPreopen, signalWatch } = deps;
+  const { db, clients, now, onProgress, planPreopen, signalWatch, weeklyReview } = deps;
   const date = shanghaiDate(now);
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
@@ -372,6 +379,39 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.backfillRecovered = bf.recovered.length;
       stats.backfillFailed = bf.failed.length;
       stats.unrecoverableGaps = bf.unrecoverable;
+
+      /**
+       * 台账对账。放在日线之后 —— 结算要读当日收盘价，而当日日线正是上面刚落的库。
+       * 放在盘后 job（15:05）就只能退回用快照价，口径和历史那些用日线结的对不上。
+       *
+       * 只结算已到期的（listPendingPredictions 按 valid_until 筛），幂等，
+       * 拿不到真价的留 pending 下次再来 —— 绝不猜价，理由见 lib/ledger/reconcile 抬头。
+       */
+      {
+        const rec = reconcile(db, { asOf: date });
+        stats.ledgerScanned = rec.scanned;
+        stats.ledgerSettled = rec.settled.length;
+        stats.ledgerSkipped = rec.skipped.length;
+        // 归因只处理"偏差"，把当天新结算的错因归进固定四类，供 suggest 统计频次
+        const att = attributeSettled(db);
+        stats.ledgerAttributed = att.attributed;
+
+        /**
+         * 周复盘只在周五夜跑一次。
+         *
+         * 为什么不是日频：一天出 3 条候选、判定 2 条，胜率不是 0% 就是 50% 或 100%，
+         * 照着这个数改参数改的是噪声。周频约 15 条判定，趋势才开始有形状。
+         *
+         * 用上海日历的星期几判断，不用 UTC：22:00 CST 在 UTC 还是同一天的 14:00，
+         * 这里没有跨日问题，但写死 getDay() 会在别的时区下悄悄错开一天。
+         */
+        if (weeklyReview !== undefined && shanghaiWeekday(now) === 5) {
+          const from = addDays(date, -6);
+          const r = weeklyReview(db, from, date);
+          stats.reviewSettled = r.stats.settled;
+          stats.reviewNotified = r.notified ? 1 : 0;
+        }
+      }
 
       /**
        * 行数快照。放在最后：今夜写的全都入库了，数出来才对得上。

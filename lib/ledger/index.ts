@@ -10,6 +10,7 @@
  *   3 attribution 偏差归入固定四类错因（闭枚举，能计数才能驱动后面两步）
  *   4 suggest     某类错误超频 → 出参数建议（只出建议，不改 YAML）
  *   5 winrate / dashboard  胜率与切片，含 Advisor 的 A/B 对比
+ *   6 review      推荐质量复盘：触发率 / 胜率 / 盈亏比 三关分开报
  */
 export * from "@/lib/ledger/query";
 export * from "@/lib/ledger/record";
@@ -18,3 +19,4 @@ export * from "@/lib/ledger/attribution";
 export * from "@/lib/ledger/winrate";
 export * from "@/lib/ledger/suggest";
 export * from "@/lib/ledger/dashboard";
+export * from "@/lib/ledger/review";

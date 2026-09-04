@@ -39,6 +39,21 @@ export interface BacktestMetrics {
   profitFactor: number;
   trades: number;
   avgHoldDays: number;
+  /**
+   * 触发率：发出的买入决策里，价格真到了买点因而成交的比例。
+   *
+   * 为什么它和胜率一样重要：胜率只在成交的那些单子上算，
+   * 一个"触发率 10%、胜率 80%"的策略单看胜率是满分，实际一年做不了几笔 ——
+   * 那 80% 是纸上的。没有这个数就看不出策略是选股不行，还是买点定得够不到。
+   *
+   * 分母只算"因为价格没到"而未成交的（未触及限价），
+   * 不含涨停封板/停牌/资金不足 —— 那些是约束问题，不是买点定得对不对的问题。
+   * 没有买入决策时为 null，不编 0。
+   */
+  triggerRate: number | null;
+  /** 触发率的分子/分母，给人看清样本量 */
+  buyDecisions: number;
+  buyFilled: number;
 }
 
 /**
