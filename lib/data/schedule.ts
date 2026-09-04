@@ -35,7 +35,15 @@ export interface JobSlot {
    * 对上周五的暗日跑一遍只会再拿一份今天的涨停池，等于什么都没补回来。
    *
    *   true  —— 今天跑一次就能把过去若干天的数据一并带回来。
-   *            night 拉 1023 根日线、preopen 同步未来 60 天日历，都属于这类。
+   *            night 拉 1023 根日线、preopen 同步日历（syncCalendar 一次取 1023 根
+   *            上证指数日线），都属于这类。
+   *
+   *            注意日历只有**历史**：它是从已落库的指数日线反推的，MAX(date) 就是当天，
+   *            不存在"未来 60 天"那种东西 —— 这行字原本就是这么写的，
+   *            照着它写的代码上线即静默失效（lib/plan/record.ts 的 valid_until
+   *            本来要求日历上存在的未来交易日，于是盘前计划永远落不了台账，
+   *            不报错、不告警，只是台账一直是空的）。要用未来交易日的地方必须自己兜，
+   *            见 planValidUntil。
    *   false —— 绑定在某个过去时点上的现场，只能如实记 missed。
    */
   backfillsAcrossDays: boolean;
