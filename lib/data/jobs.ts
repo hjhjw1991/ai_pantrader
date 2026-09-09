@@ -333,6 +333,9 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
             stats.sectorMembersSectors = r.sectors;
             stats.sectorMembersCodes = r.codes;
             stats.sectorMembersFailed = r.failed.length;
+            // 用了几轮也记下来：一轮就干净说明源很稳，三轮还剩一堆说明源在恶化，
+            // 这两种情况看到的 failed 数可能一样，但处置完全不同
+            stats.sectorMembersPasses = r.passes;
           } catch (e) {
             /**
              * 原来这里是 `catch { stats.sectorMembersFailed = -1; }` —— 只留一个哨兵数字。

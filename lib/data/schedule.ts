@@ -128,7 +128,12 @@ export const SCHEDULE: JobSlot[] = [
     durationMin: 3, desc: "龙虎榜 + 营业部席位" },
   // 实测 2026-08-03：写入 5,672,962 根日线，22:00 → 22:29
   { job: "night", slots: ["22:00"], catchUp: "all", backfillsAcrossDays: true,
-    durationMin: 40, desc: "全量日线 + 缺口回补" },
+    // 90 而不是 40：全量日线本身约 30 分钟，另外每 7 天要刷一次行业映射 ——
+    // 496 个行业 × 3 轮重试，轮间停 5 分钟，加上最多 3 次"全主机熔断"就地救场，
+    // 最坏约 40 分钟（见 collectSectorMembers 里 PASS_PAUSE_MS 的实测依据）。
+    // 这个数是防休眠窗口的长度，短了会在 job 跑完之前让机器睡过去，
+    // 而睡着之后 fetch 全挂 —— 那正是"夜里整批失败"最容易被误判成限流的一种成因。
+    durationMin: 90, desc: "全量日线 + 缺口回补 + 行业映射（7 天一次）" },
 ];
 
 /**

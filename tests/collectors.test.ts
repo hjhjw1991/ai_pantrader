@@ -5,7 +5,7 @@ import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
-import { collectZtPool } from "@/lib/data/collectors/cross-section";
+import { collectZtPool, collectSectorMembers } from "@/lib/data/collectors/cross-section";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
 import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
@@ -492,5 +492,155 @@ describe("collectIndexDaily", () => {
       "SELECT kind FROM data_gap WHERE resolved_at IS NULL"
     ).all() as any[];
     expect(gaps.map(g => g.kind)).toEqual(["kline_daily:sh000001"]);
+  });
+});
+
+/**
+ * 行业映射的多轮重试。
+ *
+ * 这一路曾经连续 5 个夜里整批失败（security_sector 一直是 0 行，
+ * 「量价」候选来源因此从来没工作过）。实测出来的机制不是限流，是熔断级联：
+ * 东财这个接口单次失败率 30~50%，每次失败记进按主机的熔断器
+ * （3 次连续失败即开、冷却 5 分钟），批越长开的主机越多
+ * （75 个行业时 0/10 开，100 个时 3/10，150 个时 6/10），
+ * 等 10 个主机全开，剩下的行业每个都在 circuit open 上瞬间失败，
+ * 一个请求都发不出去 —— 实测 496 个行业成功 63、失败 433，几秒内跑完。
+ *
+ * 所以要的不是更慢，是把失败的攒起来、等冷却过去再来一轮。
+ */
+describe("collectSectorMembers 多轮重试", () => {
+  const SECTORS = [
+    { bk: "BK1", sector: "半导体" },
+    { bk: "BK2", sector: "电网设备" },
+    { bk: "BK3", sector: "光模块" },
+  ];
+  const payload = (code: string) =>
+    JSON.stringify({ data: { total: 1, diff: [{ f12: code, f14: "某股" }] } });
+
+  /** 按 bk 决定第几次调用才成功，用来模拟"抖动但会好" */
+  function flakyClient(okOnAttempt: Record<string, number>, allOpen = false) {
+    const tries: Record<string, number> = {};
+    let resets = 0;
+    return {
+      client: {
+        source: "eastmoney",
+        breakers: { reset: () => { resets++; }, allOpen: () => allOpen } as any,
+        breakerFor: () => ({ isOpen: () => false, record() {}, reset() {} }) as any,
+        async get(url: string) {
+          const bk = /b%3A(BK\d+)/.exec(url)?.[1] ?? "?";
+          tries[bk] = (tries[bk] ?? 0) + 1;
+          return tries[bk] >= (okOnAttempt[bk] ?? 1)
+            ? { ok: true as const, text: payload(`00000${bk.slice(-1)}`), status: 200, latencyMs: 1 }
+            : { ok: false as const, error: "other side closed", latencyMs: 1 };
+        },
+      } as any,
+      resets: () => resets,
+      tries: () => tries,
+    };
+  }
+
+  const noSleep = async () => {};
+
+  it("第一轮失败的行业在第二轮补回来", async () => {
+    // BK2 要到第 2 次调用才成功。fetchSectorMembers 单轮会把 10 个主机各试一次，
+    // 所以"第 2 次"在第一轮内就会碰到 —— 这里用更大的数字确保它跨轮
+    const f = flakyClient({ BK1: 1, BK2: 11, BK3: 1 });
+    const r = await collectSectorMembers(db, f.client, SECTORS, { passes: 3, sleep: noSleep });
+    expect(r.failed).toEqual([]);
+    expect(r.sectors).toBe(3);
+    expect(r.passes).toBe(2);
+    const rows = db.prepare("SELECT COUNT(*) n FROM security_sector").get() as any;
+    expect(rows.n).toBe(3);
+  });
+
+  it("成功过的行业不会在后续轮里被重复请求 —— 重试只针对失败的那些", async () => {
+    const f = flakyClient({ BK1: 1, BK2: 11, BK3: 1 });
+    await collectSectorMembers(db, f.client, SECTORS, { passes: 3, sleep: noSleep });
+    const t = f.tries();
+    // BK1/BK3 第一轮就成功，之后不该再被碰
+    expect(t.BK1).toBe(1);
+    expect(t.BK3).toBe(1);
+  });
+
+  it("轮间重置熔断器 —— 主机没死，只是抖，不重置的话后面几轮全是 circuit open", async () => {
+    const f = flakyClient({ BK1: 1, BK2: 11, BK3: 1 });
+    await collectSectorMembers(db, f.client, SECTORS, { passes: 3, sleep: noSleep });
+    expect(f.resets()).toBe(1);            // 只在第 2 轮开始前重置一次
+  });
+
+  it("先停顿再重置：顺序反了等于主机还没喘过气就又被放行", async () => {
+    const order: string[] = [];
+    const f = flakyClient({ BK1: 1, BK2: 11, BK3: 1 });
+    f.client.breakers = { reset: () => order.push("reset"), allOpen: () => false } as any;
+    await collectSectorMembers(db, f.client, SECTORS, {
+      passes: 2, sleep: async () => { order.push("sleep"); },
+    });
+    expect(order).toEqual(["sleep", "reset"]);
+  });
+
+  it("轮数用完仍失败的如实记进缺口，并带上重试了几轮", async () => {
+    const f = flakyClient({ BK1: 1, BK2: 999, BK3: 1 });
+    const r = await collectSectorMembers(db, f.client, SECTORS, { passes: 2, sleep: noSleep });
+    expect(r.failed).toEqual(["电网设备(BK2)"]);
+    expect(r.passes).toBe(2);
+    const gap = db.prepare(
+      "SELECT reason FROM data_gap WHERE kind='security_sector' ORDER BY rowid DESC LIMIT 1"
+    ).get() as any;
+    expect(gap.reason).toContain("1/3");
+    expect(gap.reason).toContain("已重试 2 轮");
+    // 拿到的那两个照样入库：部分映射比整批丢弃有用得多
+    expect((db.prepare("SELECT COUNT(*) n FROM security_sector").get() as any).n).toBe(2);
+  });
+
+  it("全部一轮成功时不留缺口，也不做多余的停顿", async () => {
+    let slept = 0;
+    const f = flakyClient({});
+    const r = await collectSectorMembers(db, f.client, SECTORS, {
+      passes: 3, sleep: async () => { slept++; },
+    });
+    expect(r.failed).toEqual([]);
+    expect(r.passes).toBe(1);
+    expect(slept).toBe(0);
+    expect(f.resets()).toBe(0);
+    expect((db.prepare(
+      "SELECT COUNT(*) n FROM data_gap WHERE kind='security_sector' AND resolved_at IS NULL"
+    ).get() as any).n).toBe(0);
+  });
+
+  /**
+   * 10 个主机全熔断时，后面每个行业都在 circuit open 上瞬间失败，
+   * 一个请求都发不出去 —— 这正是"496 个行业几秒内失败 433 个"的成因。
+   * 与其把这一轮剩下的几百个白白烧掉，不如就地停一下再放行。
+   */
+  it("一轮之内全部主机熔断就就地停顿+重置，不把剩下的白白烧掉", async () => {
+    let slept = 0;
+    const f = flakyClient({}, true);          // allOpen 恒为 true
+    await collectSectorMembers(db, f.client, SECTORS, {
+      passes: 1, sleep: async () => { slept++; },
+    });
+    // 3 个行业各触发一次救场（上限 3）
+    expect(slept).toBe(3);
+    expect(f.resets()).toBe(3);
+  });
+
+  it("救场有次数上限 —— 源真挂了不能变成无限期干等", async () => {
+    let slept = 0;
+    const many = Array.from({ length: 10 }, (_, i) => ({ bk: `BK${i}`, sector: `S${i}` }));
+    const f = flakyClient({}, true);
+    await collectSectorMembers(db, f.client, many, {
+      passes: 1, sleep: async () => { slept++; },
+    });
+    expect(slept).toBe(3);                     // MAX_MID_PASS_RESCUES
+  });
+
+  it("passes=1 退化成老行为 —— 不重试、不停顿", async () => {
+    let slept = 0;
+    const f = flakyClient({ BK2: 999 });
+    const r = await collectSectorMembers(db, f.client, SECTORS, {
+      passes: 1, sleep: async () => { slept++; },
+    });
+    expect(r.passes).toBe(1);
+    expect(slept).toBe(0);
+    expect(r.failed).toHaveLength(1);
   });
 });

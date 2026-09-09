@@ -37,6 +37,15 @@ export interface RotationOpts {
   rounds?: number;
   /** 轮间退避基数，第 n 轮等待 backoffMs * n */
   backoffMs?: number;
+  /**
+   * 单个主机上的 HTTP 重试次数，透传给 httpGet。默认走 httpGet 自己的 2 次。
+   *
+   * 批量场景要显式传 0：httpGet 的重试之间要睡 1s、2s，而这里外面还套着
+   * 10 个主机的轮换 —— 一个注定失败的请求就变成 10 × 3 次尝试、约 40 秒。
+   * 496 个行业里只要有几十个这样的，整批就跑不完了（实测 4 分钟只走了 68 个）。
+   * 批量的正确做法是单次快速失败，把重试留给外层的多轮。
+   */
+  retries?: number;
 }
 
 /**
@@ -57,7 +66,10 @@ async function getWithHostRotation(
   for (let round = 1; round <= rounds; round++) {
     errors = [];
     for (const host of EM_PUSH2_HOSTS) {
-      const r = await client.get(buildUrl(host), { referer: EM_REFERER });
+      const r = await client.get(buildUrl(host), {
+        referer: EM_REFERER,
+        ...(o.retries === undefined ? {} : { retries: o.retries }),
+      });
       if (r.ok) return r;
       errors.push(`${host}: ${r.error}`);
     }

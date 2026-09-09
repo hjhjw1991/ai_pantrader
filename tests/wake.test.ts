@@ -60,7 +60,7 @@ describe("lastActivity", () => {
 });
 
 describe("running 残留回收", () => {
-  it("门槛内的 running 不动 —— night 正常要跑 40 分钟", () => {
+  it("门槛内的 running 不动 —— night 正常要跑 40 分钟（预算 90）", () => {
     run("2026-08-05", "night", "22:00", "running", "2026-08-05 22:00:00.000");
     const stale = findStaleClaims(db, at("2026-08-05T22:30:00"));
     expect(stale).toEqual([]);
@@ -68,8 +68,9 @@ describe("running 残留回收", () => {
 
   it("超过 durationMin×3 判为残留", () => {
     run("2026-08-05", "night", "22:00", "running", "2026-08-05 22:00:00.000");
-    // night durationMin=40 → 门槛 120 分钟
-    expect(findStaleClaims(db, at("2026-08-06T00:05:00")).length).toBe(1);
+    // night durationMin=90 → 门槛 270 分钟（4.5 小时）。268 分钟还不算，275 分钟算
+    expect(findStaleClaims(db, at("2026-08-06T02:28:00"))).toEqual([]);
+    expect(findStaleClaims(db, at("2026-08-06T02:35:00")).length).toBe(1);
   });
 
   it("短 job 有 15 分钟地板 —— limiter 排队 + 熔断退避能拖很久", () => {
@@ -82,15 +83,16 @@ describe("running 残留回收", () => {
     expect(late.length).toBe(1);
   });
 
-  it("门槛对健康的慢 job 留足余量 —— night 实测 30 分钟，门槛 120 分钟", () => {
+  it("门槛对健康的慢 job 留足余量 —— night 实测 30 分钟，门槛 270 分钟", () => {
     run("2026-08-05", "night", "22:00", "running", "2026-08-05 22:00:00.000");
-    // 实测最慢一次 29 分钟；就算翻倍到 60 分钟也不会被同机另一个 runner 抢走
-    expect(findStaleClaims(db, at("2026-08-05T23:00:00"))).toEqual([]);
+    // 实测最慢一次 29 分钟。行业映射那一路每 7 天要多跑最坏约 40 分钟
+    // （496 个行业 × 3 轮 + 5 分钟轮间停顿 + 最多 3 次救场），门槛必须容得下那种夜里
+    expect(findStaleClaims(db, at("2026-08-05T23:50:00"))).toEqual([]);
   });
 
   it("当天、日内重跑有意义的残留 → requeue（删占位让它重跑）", () => {
     // 用 close：durationMin=3 → 门槛取 15 分钟地板。
-    // night 反而做不到同日 requeue —— 22:00 + 120 分钟已经跨到次日了
+    // night 反而做不到同日 requeue —— 22:00 + 270 分钟已经跨到次日了
     run("2026-08-05", "close", "15:05", "running", "2026-08-05 15:05:00.000");
     const stale = findStaleClaims(db, at("2026-08-05T15:30:00"));
     expect(stale[0].action).toBe("requeue");
@@ -100,7 +102,8 @@ describe("running 残留回收", () => {
 
   it("过去日期的残留一律 fail，绝不 requeue —— dueSlots 只看今天，删了等于凭空消失", () => {
     run("2026-08-05", "night", "22:00", "running", "2026-08-05 22:00:00.000");
-    const stale = findStaleClaims(db, at("2026-08-06T02:00:00"));
+    // night 门槛 270 分钟，22:00 + 4.5h = 次日 02:30 之后才算残留
+    const stale = findStaleClaims(db, at("2026-08-06T03:00:00"));
     expect(stale[0].action).toBe("fail");
     reclaimStaleClaims(db, stale);
     // 行还在，账不丢；日线本身由 night 补偿覆盖

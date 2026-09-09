@@ -137,47 +137,139 @@ export async function collectMacro(
   return { written, failed };
 }
 
+export interface SectorMembersOpts {
+  /**
+   * 总轮数（含第一轮）。失败的行业进下一轮重试，成功的不再重复请求。
+   *
+   * 为什么必须多轮，而不是把单次请求的 rounds 调高：单次 rounds 的退避是
+   * 15s、30s 串在**这一个**行业上，496 个行业里只要有几十个走到退避，
+   * 整批就要多花十几分钟；而失败是零散、随机、且下一轮多半就好了的，
+   * 攒到下一轮统一重试便宜得多。
+   */
+  passes?: number;
+  /** 轮间停顿。默认 5 分钟，见 PASS_PAUSE_MS 的实测依据 */
+  pausePassMs?: number;
+  /** 注入点：测试里不真睡 */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * 轮间停顿。
+ *
+ * 取 5 分钟而不是更短，有两个实测依据：
+ *   1. 客户端熔断器的冷却就是 5 分钟。虽然这里会显式重置，但停够冷却时长
+ *      意味着即使重置逻辑将来被改掉，行为仍然是对的。
+ *   2. 更要紧的是源本身：连续重压之后东财这个接口会进入一个明显的惩罚状态，
+ *      实测持续好几分钟都只能放行零星请求（本次调试连续压了一小时之后，
+ *      496 个行业里 20 分钟只走完 82 个）。90 秒明显不够它缓过来。
+ *
+ * 代价可以接受：这一路每 7 天才跑一次，跑在夜间 job 里，没有人在等结果。
+ */
+const PASS_PAUSE_MS = 300_000;
+/** 一轮之内最多因"全部主机熔断"就地救场几次 */
+const MAX_MID_PASS_RESCUES = 3;
+const DEFAULT_PASSES = 3;
+
 /**
  * 全市场 代码 → 行业板块 映射。
  *
- * 逐个行业拉成分股。行业数约 106，每个一个请求 —— 这是本项目对东财最重的一次调用，
+ * 逐个行业拉成分股。行业数实测 496，每个一个请求 —— 这是本项目对东财最重的一次调用，
  * 所以**不每天跑**：行业归属只在并购、主业变更时才动，按"整张表多久没更新过"判，
  * 默认 7 天一次，放在夜间 job（那时没人等结果，且限流影响不到盘中采集）。
  *
- * 部分失败照样写入已拿到的部分并如实报数：拿到 90 个行业的映射，
- * 比因为 16 个失败就整批丢弃有用得多 —— 缺的那部分下次刷新时补，
+ * ── 为什么是多轮 + 轮间重置熔断器 ──
+ *
+ * 这一路曾经连续 5 个夜里整批失败（security_sector 一直是 0 行，「量价」候选来源
+ * 因此从来没工作过）。实测下来的机制是：
+ *
+ *   1. 东财这个接口本身是**间歇性抖动**的，单次请求实测失败率 30~50%
+ *      （同一时刻 curl 也一样失败，不是我们客户端的问题）；
+ *   2. httpGet 的重试 + 10 主机轮换本来能把抖动吸收掉 —— 实测前 150 个行业
+ *      成功 149 个；
+ *   3. 但每次失败都会记进**按主机**的熔断器（3 次连续失败即开、冷却 5 分钟）。
+ *      批越长，开的主机越多：75 个行业时 0/10 开，100 个时 3/10，150 个时 6/10；
+ *   4. 等 10 个主机全开，剩下的行业每个都在 `circuit open` 上瞬间失败，
+ *      **一个请求都不会真发出去**。实测 496 个行业：成功 63、失败 433，
+ *      而那 433 个是在几秒内"失败"完的。
+ *
+ * 所以慢下来没用（实测 800ms 间隔反而更差，那是噪声），加大单次退避也没用 ——
+ * 要的是把失败的攒起来，等熔断冷却之后重来一轮。
+ *
+ * 轮间显式重置熔断器是**故意**的，也是安全的：熔断器的职责是"别再捶一台已经死了的
+ * 主机"，而这里每台主机刚刚都成功返回过几十次，它们没死，只是抖。
+ * 真正的退避是轮间那 90 秒停顿本身。
+ *
+ * 部分失败照样写入已拿到的部分并如实报数：拿到 400 个行业的映射，
+ * 比因为 96 个失败就整批丢弃有用得多 —— 缺的那部分下次刷新时补，
  * 而映射缺失的票在策略层会被主线筛挡下（那是"未判定不等于通过"，不是错判）。
  */
 export async function collectSectorMembers(
-  db: Db, client: SourceClient, sectors: Array<{ bk: string; sector: string }>
-): Promise<{ sectors: number; codes: number; failed: string[] }> {
+  db: Db, client: SourceClient, sectors: Array<{ bk: string; sector: string }>,
+  o: SectorMembersOpts = {}
+): Promise<{ sectors: number; codes: number; failed: string[]; passes: number }> {
   const ts = shanghaiTs();
   const stmt = db.prepare(
     "INSERT OR REPLACE INTO security_sector (code, sector, bk, ts) VALUES (?, ?, ?, ?)"
   );
-  let codes = 0, done = 0;
-  const failed: string[] = [];
+  const passes = Math.max(1, o.passes ?? DEFAULT_PASSES);
+  const pause = o.pausePassMs ?? PASS_PAUSE_MS;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
 
-  for (const s of sectors) {
-    try {
-      const members = await fetchSectorMembers(client, s.bk, { rounds: 1 });
-      db.transaction(() => {
-        for (const m of members) stmt.run(m.code, s.sector, s.bk, ts);
-      })();
-      codes += members.length;
-      done++;
-    } catch (e: any) {
-      failed.push(`${s.sector}(${s.bk})`);
+  let codes = 0, done = 0, used = 0;
+  // 救场次数按**整次调用**计，不按轮 —— 否则 3 轮 × 3 次 × 5 分钟 = 45 分钟，
+  // 夜间 job 的防休眠窗口容不下，机器会在 job 跑完之前睡过去
+  let rescues = 0;
+  let remaining = sectors;
+
+  for (let pass = 1; pass <= passes && remaining.length > 0; pass++) {
+    if (pass > 1) {
+      // 先停顿再重置：顺序反过来的话，主机还没喘过气就又被放行了
+      await sleep(pause);
+      client.breakers.reset();
     }
+    used = pass;
+    const stillFailed: Array<{ bk: string; sector: string }> = [];
+    for (const s of remaining) {
+      /**
+       * 10 个主机的熔断器全开时，后面每个行业都会在 circuit open 上瞬间失败，
+       * 一个请求都发不出去 —— 那正是"496 个行业几秒内失败 433 个"的成因。
+       * 与其把这一轮剩下的几百个白白烧掉（它们还要等下一轮才重试），
+       * 不如就地停一下、放行，接着往下跑。
+       *
+       * 限次数（整次调用共 MAX_MID_PASS_RESCUES 次）：真的是源挂了的时候，
+       * 不能变成无限期干等，也不能把夜间 job 的防休眠窗口撑爆。
+       */
+      if (rescues < MAX_MID_PASS_RESCUES && client.breakers.allOpen()) {
+        await sleep(pause);
+        client.breakers.reset();
+        rescues++;
+      }
+      try {
+        // retries:0 —— 单次快速失败，重试交给外层的多轮。
+        // 不这么做的话，一个注定失败的行业要耗掉 10 主机 × 3 次尝试 ≈ 40 秒
+        // （httpGet 的重试之间还要睡 1s、2s），实测 4 分钟只能走完 68 个行业
+        const members = await fetchSectorMembers(client, s.bk, { rounds: 1, retries: 0 });
+        db.transaction(() => {
+          for (const m of members) stmt.run(m.code, s.sector, s.bk, ts);
+        })();
+        codes += members.length;
+        done++;
+      } catch {
+        stillFailed.push(s);
+      }
+    }
+    remaining = stillFailed;
   }
+
+  const failed = remaining.map(s => `${s.sector}(${s.bk})`);
   if (failed.length > 0) {
     recordGap(db, ts.slice(0, 10), client.source, "security_sector",
-      `${failed.length}/${sectors.length} 个行业成分拉取失败：${failed.slice(0, 5).join(", ")}` +
-      (failed.length > 5 ? " …" : ""), true);
+      `${failed.length}/${sectors.length} 个行业成分拉取失败（已重试 ${used} 轮）：` +
+      `${failed.slice(0, 5).join(", ")}${failed.length > 5 ? " …" : ""}`, true);
   } else {
     resolveGap(db, ts.slice(0, 10), client.source, "security_sector");
   }
-  return { sectors: done, codes, failed };
+  return { sectors: done, codes, failed, passes: used };
 }
 
 /** 映射表最后一次更新是什么时候（上海挂钟串）。空表返回 null */
