@@ -97,6 +97,14 @@ export interface StrategyConfig {
       新高窗口?: number;
       多头排列?: boolean;
     };
+    /**
+     * 买点。触发价 = 昨收 × (1 + 相对昨收)，不高于MA5=true 时再与 MA5 取低。
+     * 不配就用引擎默认值（见 lib/strategy/engine 的 买点默认）。
+     */
+    买点?: {
+      相对昨收: number;
+      不高于MA5?: boolean;
+    };
     主线识别: {
       板块涨幅榜TopN: number;
       /**

@@ -4,6 +4,7 @@ import { KV, Panel, Tag } from "@/components/Panel";
 import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { dashboard, paramSuggestions, reviewStats, winRateStats } from "@/lib/ui/adapters/ledger";
+import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { predictionTimeline } from "@/lib/ui/queries";
 import { shanghaiParts } from "@/lib/ui/status";
 
@@ -26,8 +27,17 @@ export default function LedgerPage() {
   const stats = winRateStats(db);
   const dash = dashboard(db, today);
   const suggestions = paramSuggestions(db);
+  const cfgForReview = readStrategyConfig();
   const timeline = predictionTimeline(db, 200);
-  const rv = reviewStats(db);
+  /**
+   * 复盘按**参数版本**分组，不混算。
+   *
+   * 买点这类参数是要按台账数据反复重调的，调完之后的推荐就和之前不是同一件事了 ——
+   * 触发率、胜率、盈亏比三个数全会变。两代混在一个分母里，算出来的既不是旧版成绩
+   * 也不是新版成绩，而是一个谁也解释不了的加权平均。
+   */
+  const activeVer = cfgForReview.available ? cfgForReview.config.version : null;
+  const rv = reviewStats(db, activeVer === null ? {} : { strategyVersion: activeVer });
 
   const errorRows = dash.byErrorType.filter((e) => e.count > 0);
   const maxErr = errorRows.reduce((m, e) => Math.max(m, e.count), 0);
@@ -40,8 +50,8 @@ export default function LedgerPage() {
       {/* ── 推荐质量复盘：三关分开报 ── */}
       <Panel
         title="推荐质量复盘"
-        hint="三关分开看：够不够得到买点 → 判得准不准 → 赚赔比多少。任何一关不合格，另外两个数都不作数"
-        right={`已结算 ${rv.settled} 条 · 样本门槛 ${rv.minSample}`}
+        hint="三关分开看：够不够得到买点 → 判得准不准 → 赚赔比多少。只统计当前参数版本 —— 调过参之后两代样本不能混算"
+        right={`参数版本 ${activeVer ?? "?"} · 已结算 ${rv.settled} 条 · 样本门槛 ${rv.minSample}`}
         tone={rv.conclusive && (rv.winRate ?? 0) < rv.target ? "warn" : "normal"}
       >
         <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6">
@@ -90,8 +100,9 @@ export default function LedgerPage() {
         <p className={`mt-2 text-[12px] ${rv.conclusive ? "text-ink" : "text-ink-3"}`}>{rv.verdict}</p>
         {rv.settled === 0 ? (
           <p className="text-ink-3 text-[11px] mt-1">
-            台账还是空的。推荐由 09:15 的盘前 job 落库，到期由夜间 job 结算 ——
-            D{5} 的预测最快要 5 个交易日之后才有第一条结果。
+            当前参数版本还没有已结算的推荐。推荐由 09:15 的盘前 job 落库，
+            到期由夜间 job 结算 —— D5 的预测最快要 5 个交易日之后才有第一条结果。
+            刚调过参数的话，这里从零开始是对的：上一版的样本不会被算进来。
           </p>
         ) : null}
       </Panel>

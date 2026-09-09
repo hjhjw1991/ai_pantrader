@@ -80,7 +80,7 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
    */
   let ledger: RecordPlanResult | null = null;
   try {
-    ledger = recordPlan(db, card, shanghaiTs().slice(0, 10), card.ts);
+    ledger = recordPlan(db, card, shanghaiTs().slice(0, 10), card.ts, undefined, cfg.config.version);
     if (ledger.skipped) console.error(`[盘前计划] 未落台账：${ledger.reason}`);
   } catch (e) {
     console.error(`[盘前计划] 落台账失败（不影响通知）：${(e as Error).message}`);

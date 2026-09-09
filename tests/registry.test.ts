@@ -45,6 +45,8 @@ const write = (id: string, text = BASE) =>
 const readFile = (id: string) =>
   fs.readFileSync(path.join(dir, "config", "strategies", `${id}.yaml`), "utf8");
 const commentLines = (t: string) => t.split("\n").filter(l => l.trim().startsWith("#")).length;
+/** 从真实默认策略里取版本号，别写死 —— 调参会升 version，测试不该跟着改 */
+const BASE_VERSION = /^version:\s*(\S+)/m.exec(BASE)![1];
 
 describe("策略 id 安全", () => {
   it("挡住路径穿越 —— id 直接拼进文件名", async () => {
@@ -221,7 +223,7 @@ describe("删除策略", () => {
     expect(r.predictions).toBe(1);
     expect(r.snapshotted).toBe(1);
     const row = db.prepare("SELECT id, version, yaml FROM strategy WHERE id='keeper'").get();
-    expect(row.version).toBe("1.0.0");
+    expect(row.version).toBe(BASE_VERSION);
     // 快照必须带注释：它是"这条预测依据的参数集"的唯一副本
     expect(commentLines(row.yaml)).toBeGreaterThan(0);
     // 文件删了，但 prediction 仍解释得清

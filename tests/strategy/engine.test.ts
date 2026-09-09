@@ -166,6 +166,50 @@ describe("候选池", () => {
     expect(c!.thesis).toContain("半导体");
   });
 
+  /**
+   * 买点直接决定推荐能不能成交，所以它的值要被钉住，不能只断言"不高于昨收"。
+   *
+   * 原先写死 min(昨收, MA5)。方向没错（不追高），但和候选池的人口结构对不上：
+   * 候选主要来自昨日涨停池，刚涨停的票 MA5 必然远在收盘价之下，次日通常还要高开。
+   * 实测 4 年回测 21 条买入决策成交 0 笔，触发率 0% —— 台账因此永远攒不出样本。
+   */
+  describe("买点", () => {
+    // 600183 的 5 根收盘：10 / 10.2 / 10.5 / 10.8 / 11 → 昨收 11、MA5 10.5
+    const trig = (mutate?: (y: string) => string) =>
+      run(mutate ? { config: config(mutate) } : {})
+        .candidates.find(x => x.code === "600183")!.triggerPx;
+
+    const withBuy = (line: string) => (y: string) =>
+      y.replace("  主线识别:", `  买点: ${line}
+  主线识别:`);
+
+    it("默认按昨收 -1% 挂，不再压 MA5 —— 压了就等于挂在市价下方 4.5%", () => {
+      expect(trig()).toBe(10.89);          // 11 × 0.99
+    });
+
+    it("不高于MA5=true 复现旧行为 —— 参数还在，只是不再是默认", () => {
+      expect(trig(withBuy("{ 相对昨收: 0, 不高于MA5: true }"))).toBe(10.5);
+    });
+
+    it("相对昨收=0 即平昨收挂单", () => {
+      expect(trig(withBuy("{ 相对昨收: 0 }"))).toBe(11);
+    });
+
+    it("可以挂到昨收之上 —— 追一点更容易成交，是要按台账数据权衡的那一档", () => {
+      expect(trig(withBuy("{ 相对昨收: 0.03 }"))).toBe(11.33);
+    });
+
+    it("两个开关同时给：先按折让算，再与 MA5 取低", () => {
+      // 11 × 1.03 = 11.33，与 MA5 10.5 取低 → 10.5
+      expect(trig(withBuy("{ 相对昨收: 0.03, 不高于MA5: true }"))).toBe(10.5);
+    });
+
+    it("止损仍从触发价推 —— 买点动了止损要跟着动，不能各算各的", () => {
+      const c = run().candidates.find(x => x.code === "600183")!;
+      expect(c.stopPx).toBe(Math.round(c.triggerPx! * 0.95 * 100) / 100);
+    });
+  });
+
   it("防守档下候选池为空 —— 0 仓就是不开新仓", () => {
     const card = run({ stubs: baseStubs({ 跌停家数: { value: 45, confidence: 0.9 } }) });
     expect(card.candidates).toEqual([]);

@@ -23,6 +23,13 @@ export interface LedgerFilter {
   to?: string;
   code?: string;
   strategyId?: string;
+  /**
+   * 只看某一版参数产出的预测。
+   *
+   * 复盘默认要带上它：买点这类参数是按台账数据反复重调的，
+   * 不分版本统计等于把两代参数的成绩加权平均，那个数谁也解释不了。
+   */
+  strategyVersion?: string;
   account?: AccountType;
   phase?: Phase;
   horizon?: EvalHorizon;
@@ -43,6 +50,7 @@ export function predWhere(f: LedgerFilter = {}, alias = "p"): { sql: string; par
   if (f.to) { parts.push(`substr(${alias}.ts,1,10) <= ?`); params.push(f.to); }
   if (f.code) { parts.push(`${alias}.code = ?`); params.push(f.code); }
   if (f.strategyId) { parts.push(`${alias}.strategy_id = ?`); params.push(f.strategyId); }
+  if (f.strategyVersion) { parts.push(`${alias}.strategy_ver = ?`); params.push(f.strategyVersion); }
   if (f.account) { parts.push(`${alias}.account = ?`); params.push(f.account); }
   if (f.phase) { parts.push(`${alias}.phase = ?`); params.push(f.phase); }
   if (f.horizon) { parts.push(`${alias}.eval_horizon = ?`); params.push(f.horizon); }
@@ -55,13 +63,14 @@ export function predWhere(f: LedgerFilter = {}, alias = "p"): { sql: string; par
 
 export interface PredictionRow {
   id: string; ts: string; phase: string; code: string; strategy_id: string;
+  strategy_ver: string | null;
   action: string; account: string | null; trigger_px: number | null; stop_px: number | null;
   size: number | null; thesis: string | null; gear: string | null;
   eval_horizon: number; valid_until: string; advisor_influenced: number;
 }
 
 export const PRED_COLS =
-  `p.id, p.ts, p.phase, p.code, p.strategy_id, p.action, p.account, p.trigger_px,
+  `p.id, p.ts, p.phase, p.code, p.strategy_id, p.strategy_ver, p.action, p.account, p.trigger_px,
    p.stop_px, p.size, p.thesis, p.gear, p.eval_horizon, p.valid_until, p.advisor_influenced`;
 
 /**
@@ -78,6 +87,7 @@ export function toPrediction(r: PredictionRow): Prediction {
     phase: r.phase as Prediction["phase"],
     code: r.code,
     strategyId: r.strategy_id,
+    strategyVersion: r.strategy_ver,
     action: r.action as Prediction["action"],
     account: r.account as Prediction["account"],
     triggerPx: r.trigger_px,

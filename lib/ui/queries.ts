@@ -734,7 +734,7 @@ export function trades(db: Db, limit = 200): TradeRow[] {
 export function predictions(db: Db, limit = 200): Prediction[] {
   const rows = db
     .prepare(
-      `SELECT id, ts, phase, code, strategy_id, action, account, trigger_px, stop_px,
+      `SELECT id, ts, phase, code, strategy_id, strategy_ver, action, account, trigger_px, stop_px,
               size, thesis, gear, eval_horizon, valid_until, advisor_influenced
        FROM prediction ORDER BY ts DESC LIMIT ?`
     )
@@ -745,6 +745,7 @@ export function predictions(db: Db, limit = 200): Prediction[] {
     phase: r.phase as Phase,
     code: r.code as string,
     strategyId: r.strategy_id as string,
+    strategyVersion: (r.strategy_ver as string) ?? null,
     action: r.action as Action,
     account: r.account as AccountType,
     triggerPx: r.trigger_px === null ? null : Number(r.trigger_px),

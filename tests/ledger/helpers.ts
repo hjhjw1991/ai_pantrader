@@ -75,6 +75,7 @@ export function mkPred(over: Partial<Prediction> = {}): Prediction {
     phase: "盘后",
     code: "300502",
     strategyId: "s1",
+    strategyVersion: "1.0.0",
     action: "买入",
     account: "卫星",
     triggerPx: 10,

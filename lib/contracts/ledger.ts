@@ -13,6 +13,14 @@ export interface Prediction {
   phase: Phase;
   code: string;
   strategyId: string;
+  /**
+   * 产出这条预测的参数版本。
+   *
+   * 必须逐条记：买点这类参数是要按台账数据反复重调的，调一次之后的推荐
+   * 就和之前不是同一件事了。两代参数混在一个分母里，算出来的既不是旧版成绩
+   * 也不是新版成绩。null = 加这列之前写入的老行，版本未知（不编）。
+   */
+  strategyVersion: string | null;
   action: Action;
   account: AccountType;
   triggerPx: number | null;

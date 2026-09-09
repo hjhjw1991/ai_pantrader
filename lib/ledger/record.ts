@@ -49,7 +49,7 @@ function assertPrediction(p: Prediction): void {
 /** 只比参与身份的字段，settled 之类的派生信息不参与 */
 function fingerprint(p: Prediction): string {
   return JSON.stringify([
-    p.ts, p.phase, p.code, p.strategyId, p.action, p.account, p.triggerPx, p.stopPx,
+    p.ts, p.phase, p.code, p.strategyId, p.strategyVersion, p.action, p.account, p.triggerPx, p.stopPx,
     p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil, p.advisorInfluenced,
   ]);
 }
@@ -81,11 +81,11 @@ export function recordPrediction(db: Db, p: Prediction): void {
   }
 
   db.prepare(
-    `INSERT INTO prediction (id, ts, phase, code, strategy_id, action, account, trigger_px,
-       stop_px, size, thesis, gear, eval_horizon, valid_until, advisor_influenced)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(p.id, p.ts, p.phase, p.code, p.strategyId, p.action, p.account, p.triggerPx,
-        p.stopPx, p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil,
+    `INSERT INTO prediction (id, ts, phase, code, strategy_id, strategy_ver, action, account,
+       trigger_px, stop_px, size, thesis, gear, eval_horizon, valid_until, advisor_influenced)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(p.id, p.ts, p.phase, p.code, p.strategyId, p.strategyVersion, p.action, p.account,
+        p.triggerPx, p.stopPx, p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil,
         p.advisorInfluenced ? 1 : 0);
 }
 

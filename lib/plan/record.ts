@@ -72,7 +72,8 @@ export function planPredictionId(date: string, strategyId: string, code: string,
  * 因为"这周出了多少条只能观察的信号"本身就是复盘要看的东西。
  */
 export function planPredictions(
-  card: SignalCard, date: string, ts: string, horizon: EvalHorizon, validUntil: string
+  card: SignalCard, date: string, ts: string, horizon: EvalHorizon, validUntil: string,
+  strategyVersion: string | null = null
 ): Prediction[] {
   return [...card.candidates, ...card.holdings].map((c) => ({
     id: planPredictionId(date, card.strategyId, c.code, c.action),
@@ -80,6 +81,9 @@ export function planPredictions(
     phase: card.phase,
     code: c.code,
     strategyId: card.strategyId,
+    // 版本逐条记：买点这类参数要按台账数据反复重调，
+    // 不记版本的话下一次调参就把两代样本混进同一个分母了
+    strategyVersion,
     action: c.action,
     account: c.account,
     triggerPx: c.triggerPx,
@@ -126,7 +130,8 @@ function alreadyRecordedToday(db: Db, date: string, strategyId: string): boolean
 
 export function recordPlan(
   db: Db, card: SignalCard, date: string, ts: string,
-  horizon: EvalHorizon = PLAN_EVAL_HORIZON
+  horizon: EvalHorizon = PLAN_EVAL_HORIZON,
+  strategyVersion: string | null = null
 ): RecordPlanResult {
   /**
    * 先查今天记过没有，而不是靠 recordPrediction 的幂等去兜。
@@ -147,7 +152,7 @@ export function recordPlan(
     };
   }
   const validUntil = planValidUntil(db, date, horizon);
-  const preds = planPredictions(card, date, ts, horizon, validUntil);
+  const preds = planPredictions(card, date, ts, horizon, validUntil, strategyVersion);
   if (preds.length === 0) return { recorded: 0, skipped: false, ids: [], validUntil };
 
   recordPredictions(db, preds);
