@@ -1,0 +1,238 @@
+# PanTrader
+
+A-share market quant system · local-first · human-in-the-loop · self-calibrating closed loop
+
+The whole chain runs on one machine: collection → factors → strategy → signals → ledger reconciliation → parameter suggestions. Data stays local. No paid data feed, no server.
+
+> **Hard line: the system never places orders.** You place them by hand in your broker's app and fill the execution back in on the positions page.
+> Automation waits until broker permissions are in place **and** paper mode has run a full quarter and met its targets. There is no order-placing capability in the frontend, and no config hook left for one.
+
+*[中文版 README](README.md)*
+
+---
+
+## One-command install
+
+Requires **Node 22** — not "≥ 22"; the upper bound is pinned too. Check with `node -v`; if you don't have it, `nvm install 22 && nvm use 22` (there's a `.nvmrc` at the repo root).
+
+> Why no higher version: `better-sqlite3` is a native module whose prebuilt `.node` binds to the Node ABI, so a major version bump fails to load.
+> And `install-launchd` / `install-schtasks` write **the absolute path of whichever Node was current at install time** into the scheduled task.
+> Running two Nodes produces a split-brain state: the collector writes to the database while the web UI says it can't open it.
+>
+> Three layers catch this: `engine-strict=true` in `.npmrc` makes **any `pnpm` entry point** fail at startup on a version mismatch (instead of printing one WARN line and running anyway); `node scripts/setup.mjs --check` additionally loads the `.node` for real, which also catches "right version number, wrong ABI"; and if it still slips through to runtime, the web UI's 503 translates the ABI number into the concrete action ("switch back to Node N").
+
+```bash
+git clone <repo-url> pantrader
+cd pantrader
+node scripts/setup.mjs --start
+```
+
+That command will: check the environment → install dependencies → create the database and run migrations → load the security list and trading calendar (hits the network, 1–3 minutes) → build → start the web UI at **http://localhost:3111**
+
+Windows uses the same command, from PowerShell or CMD — the script is pure Node, there is no separate `.sh` / `.ps1` implementation.
+
+### Other switches
+
+| Command | Purpose |
+|---|---|
+| `node scripts/setup.mjs --check` | Check the environment only, **changes nothing** |
+| `node scripts/setup.mjs --no-data` | Skip data loading, no network. Look at the UI structure first |
+| `node scripts/setup.mjs --dev` | Start in dev mode (hot reload, slower than production) |
+| `node scripts/setup.mjs` | Install and stop, don't start |
+
+After that, day to day you only need `pnpm start`.
+
+### Manual install (if you want to see each step)
+
+```bash
+pnpm install             # dependencies
+pnpm run migrate         # create the database + run migrations (lands in ~/PanTraderData/)
+pnpm run seed-strategies # seed real strategy files from config/strategies/*.yaml.example
+pnpm run bootstrap       # load the security list + trading calendar. Interruptible; reruns resume
+pnpm build               # build
+pnpm start               # start → http://localhost:3111
+```
+
+`seed-strategies` is not optional: **the real strategy files are not in git** — the repo only ships `.yaml.example` templates. The reason is that the keys under `持仓:` (positions) are your own account ids, which is personal data and doesn't belong in a published source tree. This step is idempotent — if the real file already exists it is skipped, so your edited thresholds are never overwritten.
+
+No `pnpm`? `npm i -g pnpm`. npm works too, but the repo ships a `pnpm-lock.yaml` and npm ignores the pinned versions in it.
+
+---
+
+## Three things to do after installing
+
+**1. Create an account** → bottom of http://localhost:3111/positions
+
+The system **ships with no accounts**. How you organise your money is yours to name; the program has no business picking for you.
+
+Three fields: `account id` (the ledger's primary key — don't change it after creating), `display name`, and `type label` (free text, used only for grouping in the UI).
+
+**2. Rename the account keys in your strategy to match your ids** → the `持仓:` section of `config/strategies/default.yaml`
+
+Per-account stop-loss rules come from that section, **keyed by account id**. If a key doesn't match, that account has no hard-line rules — the positions page calls this out in a red panel listing which YAML keys don't exist in the `account` table, alongside the accounts that did get rules. It never fails silently.
+
+Two ways to edit: the file directly, or the "strategy source editor" at http://localhost:3111/settings — the latter runs schema validation before saving, shows a diff, and backs the original up to `~/PanTraderData/strategy-backups/<filename>.YYYYMMDD-HHmmss`.
+
+> This file is gitignored (only the `default.yaml.example` template is tracked), so editing it won't dirty `git status`.
+> The cost is that you can no longer read the strategy's evolution with `git diff` — that role moves to the backup directory above, which keeps a full timestamped copy on every write-back and is backed up along with `~/PanTraderData`, so it survives `git clean` or a project reinstall.
+
+**3. Glance at data health** → http://localhost:3111/settings
+
+Every data source is a free, unofficial endpoint: they drop out, rate-limit, and change fields. This page lays out per-source health and the gap list. Staleness is its own category — it never gets folded into "healthy".
+
+---
+
+## Pages
+
+| Path | Contents |
+|---|---|
+| `/today` | Today's signal card: environment gear, target exposure, buy candidates, hard-line alerts |
+| `/positions` | Holdings, P&L, distance to stop, execution fill-back, **account management** |
+| `/watchpool` | Watchlist: each entry carries a trigger price, a stop price, and a one-line rationale |
+| `/ledger` | Prediction ledger and reconciliation: hit rate, error attribution, parameter suggestions |
+| `/lab` | Backtesting and walk-forward |
+| `/settings` | Source health, gaps, scheduler status, **strategy management**, parameter panel, import/export |
+
+Pages refresh themselves every 60 seconds, plus an SSE push — gear changes, new buy candidates, and hard-line breaks raise a desktop notification; routine data refreshes do not.
+
+---
+
+## Data collection
+
+**Collection starts automatically as soon as the system is running.** Scheduling is cross-platform and in-process; it does not depend on launchd / cron / Task Scheduler.
+
+| Time (Shanghai) | Job | Contents | Backfillable across days |
+|---|---|---|---|
+| 08:50 | `selfcheck` | Gap scan + coverage | ✅ |
+| 09:00 | `preopen` | Sync trading calendar | ✅ |
+| 09:15 | `plan` | Pre-open battle plan: run the strategy, push today's candidates | ❌ |
+| 09:35–11:30 / 13:00–14:55, every 5 min | `intraday` | Whole-market snapshot + watchlist minute bars | ❌ |
+| 15:05 | `close` | Closing snapshot + limit-up pool | ❌ |
+| 18:40 | `post` | Dragon-tiger list + broker seats | ✅ |
+| 22:00 | `night` | Full daily bars + gap backfill + dragon-tiger label refresh + ledger reconciliation | ✅ |
+
+The "backfillable across days" column is a real constraint, not a labelling convention: **an intraday snapshot is a moment that has passed, and the sources offer no historical endpoint — miss a day and it is missing forever.** So a missed slot is honestly recorded as `missed`, never as a success; recording it as success would be forging the coverage number.
+
+Both schedulers can be installed at once without double-collecting: the in-process scheduler and the OS-level task (launchd / schtasks) share the `job_run` table, keyed `(date, job, slot)`. Whoever claims a slot first runs it; the other stands down. So "browser open" plus "startup task installed" will not pull the whole-market snapshot twice.
+
+> Learned the hard way: `scripts/job.ts` used to execute directly without writing `job_run`, which made the OS task completely invisible to the scheduler.
+> Observed on 2026-08-21: launchd finished `post`/`night`, then the web UI started, the scheduler saw no rows in the table, and ran both again.
+
+To collect without opening the web UI:
+
+```bash
+pnpm run daemon          # standalone daemon with a PID lock, so it can't start twice
+```
+
+To install as a startup-level task (optional):
+
+```bash
+pnpm run install-launchd    # macOS
+pnpm run install-schtasks   # Windows
+```
+
+### Wake compensation
+
+When the system comes back to life (process restart, or the machine waking from sleep), it first asks: when did I last do work, and what did I miss?
+
+- Reclaim slots stuck in `running` (sleep interrupting a process leaves these behind; without reclaiming they are never rerun and never recorded as missed)
+- Sync the trading calendar **first**, then work out which trading days were missed — the calendar is derived from historical index bars and never contains future dates, so without syncing first you cannot see any day during the sleep
+- For backfillable data, run `night` once for structural coverage (pull 1023 daily bars + refresh the last 30 trading days of dragon-tiger data) rather than replaying day by day
+- Honestly record non-backfillable slots as `missed`
+
+The criterion is "backfillable data for a trading day never landed", not "asleep for more than N hours". The latter gets it wrong in both directions: a 60-hour weekend shutdown misses nothing, while Thursday to Friday is only 10 hours apart and misses all of Friday.
+
+---
+
+## Strategy
+
+A strategy is a file, not a database row:
+
+```
+config/strategies/<id>.yaml           editable source of truth, add or delete freely. **Not in git**
+config/strategies/<id>.yaml.example   de-personalised template, in git, seeded by seed-strategies
+config/strategies/ACTIVE              single line of text: which one is currently in effect
+```
+
+The real file stays out of git because the keys under `持仓:` are your own account ids. History is preserved in `~/PanTraderData/strategy-backups/<filename>.YYYYMMDD-HHmmss`: every write-back (including changing one number in the panel) backs up first, consecutive saves within the same second get a `-2` suffix, and nothing is auto-pruned.
+
+**The YAML is the single source of truth for parameters.** The parameter panel is only a projection of it; there is no second copy of state. Changing one number in the panel replaces one scalar in the source text and leaves comments and layout byte-for-byte intact — those comments record where each threshold came from, which is worth more than the convenience of editing parameters in a panel.
+
+Add / switch / delete under the "strategy" panel in `/settings`. Adding **copies an existing strategy's source text** (comments and all) and changes only the `id:` line; it does not generate a blank template, which would start you from "I have no idea what these numbers should be".
+
+When the first prediction is produced, the strategy source is automatically snapshotted into the `strategy` table (idempotent, only the first copy is kept). That is what makes deletion safe: `prediction.strategy_id` is the ledger's attribution key, and as long as the snapshot exists the file can be deleted freely while historical conclusions remain explainable.
+
+---
+
+## Where the data lives
+
+```
+~/PanTraderData/
+├── pantrader.db          SQLite (WAL mode)
+├── snapshots/            raw response archive
+└── *.ptbak               export bundles
+```
+
+`PANTRADER_DATA_DIR` relocates the whole thing.
+
+**Deliberately outside the repo**: free data sources can be cut off at any time, so the history you accumulate is a non-reproducible asset. It has to be independently backup-able and movable, and it should not be deleted as collateral damage by `git clean` or a project reinstall.
+
+```bash
+pnpm db:export                      # VACUUM-consistent snapshot + meta + sha256
+pnpm db:import <f.ptbak> dry-run    # see what would happen first
+pnpm db:import <f.ptbak> merge newer
+```
+
+---
+
+## Common commands
+
+| Command | Purpose |
+|---|---|
+| `pnpm start` / `pnpm dev` | Start the web UI (production / development) |
+| `pnpm run daemon` | Standalone collection daemon |
+| `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
+| `pnpm test` | Unit tests (**no network**) |
+| `pnpm test:live` | Smoke tests against the real endpoints |
+| `pnpm run migrate` | Run migrations |
+| `pnpm run seed-strategies` | Seed real strategy files from `*.yaml.example` (idempotent, never overwrites) |
+
+> `pnpm import` / `pnpm export` are built-in pnpm commands and would hijack scripts of the same name. Hence `db:import` / `db:export`.
+
+---
+
+## Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PANTRADER_DATA_DIR` | `~/PanTraderData` | Where the database and snapshots live |
+| `PANTRADER_CONFIG_ROOT` | repo root | Where `config/` lives (used by tests) |
+| `PANTRADER_NO_SCHEDULER` | — | Set to `1` to disable the in-process collector. Use when running backtests or import/export, to avoid competing for the rate-limit budget |
+| `PORT` | `3111` | Web UI port |
+
+---
+
+## Architectural constraints
+
+These are hard constraints with assertions guarding them in CI. Read them before changing anything:
+
+- **`lib/data/` is the only directory allowed to make network requests** (sole exception: the advisor transport layer, separately annotated)
+- **The factor and strategy layers may not touch the database or read the system clock.** Data enters only through `PointInTimeView`, and "now" can only be `view.asOf` — otherwise a backtest peeks at the future, and you cannot tell that it did
+- **A failed collection never silently returns empty.** It must throw or record a `data_gap`. An empty response body is a classic symptom of rate limiting, not "no data today"
+- **All timestamps are Shanghai wall-clock time**, to millisecond precision (`source_health`'s primary key needs it)
+- **The ledger is append-only.** Same id with the same content is treated as a duplicate delivery; same id with different content is an error
+
+## Known limitations
+
+- **Adjustment factors are not implemented**: Sina daily bars are unadjusted, Tencent's forward-adjusted data only goes back to 2023-12, and the 2022-05–2023-12 stretch has no adjustment reference → the usable backtest window is roughly 2.6 years
+- **Three portfolio risk limits cannot be computed**: they need account equity/cash, an industry classification, and core/satellite tagging, and there is currently no input source for any of the three. The engine lists them under "unevaluated conditions" on the signal card and **never quietly treats them as passed**
+- **Backtests only exercise one of the three candidate sources**: the code→industry map has no historical versions, so injecting it into a replay would leak the future. With it absent, the "sector leader" and "volume-price" sources switch themselves off and only the limit-up pool is tested. The backtest report states how many days actually produced candidates, alongside data coverage
+- **The limit-up pool has a short history and cannot be backfilled**: it is a same-day-only snapshot, so ledger samples can only accumulate going forward
+- **Two advisor transport layers are unverified against real endpoints**
+- **macOS clamshell sleep cannot be blocked**: `caffeinate` cannot prevent it. If you want complete intraday data, keep the lid open
+- A handful of securities have no real-time snapshot (long suspensions / some Beijing Stock Exchange names); whole-market coverage is about 99.9%
+
+## Disclaimer
+
+This project does not constitute investment advice. The data sources are free, unofficial endpoints that drop out, rate-limit, and change fields — they are **not trading grade**.
+Your gains and losses are your own.

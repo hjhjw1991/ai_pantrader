@@ -11,6 +11,17 @@ tmp/
 .DS_Store
 *.tsbuildinfo
 
+# 环境变量文件。lib/advisor/claude-api.ts 读 ANTHROPIC_API_KEY，
+# 迟早有人会建一个 .env 把 key 写进去 —— 那时它默认是会被 commit 的。
+.env
+.env.*
+!.env.example
+
+# 编辑器/助手的本机配置。settings.local.json 里带绝对路径（含用户名）。
+# 本机是靠**全局** gitignore 挡住的（~/.config/git/ignore），
+# 那条规则不会跟着仓库走 —— 别人 clone 下来就没有保护了。
+.claude/settings.local.json
+
 # 策略实文件不进 git：`持仓:` 段的键就是用户自己的账户 id，那是个人数据。
 # 仓库只跟踪去个人化的 config/strategies/*.yaml.example（不匹配下面这条），
 # 实文件由 `pnpm seed-strategies` 从模板播种。
