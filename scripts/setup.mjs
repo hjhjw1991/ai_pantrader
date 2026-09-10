@@ -59,12 +59,20 @@ function has(cmd) {
 say("检查运行环境");
 
 /**
- * Node 版本要**上下都卡**，不只是"够新"。
+ * Node 版本只卡下界。
  *
- * 上界的理由是原生模块：better-sqlite3 的预编译 .node 绑定 NODE_MODULE_VERSION，
- * 换了 Node 大版本就 dlopen 失败；而 install-launchd / install-schtasks 写进
- * 计划任务的解释器路径，是**安装当时那个 Node 的绝对路径**。所以这个项目实际是
- * "按某个 Node 大版本部署"的，允许更高版本只会让采集与网页跑在两个 ABI 上。
+ * 曾经上下都卡（">=22 <23"），理由是原生模块：better-sqlite3 v11 用 prebuild-install，
+ * 预编译产物**按 NODE_MODULE_VERSION 分**，换 Node 大版本就 dlopen 失败。
+ * 升到 v13 之后那个前提没了 —— 它是 N-API，产物按**平台**分
+ * （darwin-arm64 / linux-x64 / win32-x64…），同一份 .node 跨 Node 大版本加载。
+ * 实测同一份安装在 Node 22（ABI 127）与 Node 24（ABI 137）下各跑通全量测试，
+ * 并读通了 2.4 GB 的真实库。
+ *
+ * 仍然保留下界：项目用到的语法与内置 API 按 Node 22 写。
+ *
+ * 上界拿掉之后，唯一还与 Node 版本相关的坑是 install-launchd / install-schtasks
+ * 把**安装当时那个 Node 的绝对路径**写进了计划任务 —— 换版本本身无害，
+ * 但把旧版本删掉会让任务指向一个不存在的解释器。`pnpm doctor` 专门查这一项。
  *
  * 解析要按 semver 区间取字段，别用 replace(/[^\d]/g,"") ——
  * ">=22 <23" 会被那种写法拼成 2223。
@@ -79,11 +87,11 @@ if (Number.isNaN(major) || major < MIN) {
     `装对版本：nvm install ${MIN} && nvm use ${MIN}（仓库根目录有 .nvmrc，nvm use 会自动读）`
   );
 }
+// engines 现在没有上界；这段留着是为了将来真要再卡上界时不用重写解析
 if (major >= MAX_EX) {
   die(
-    `Node 版本过高：当前 ${process.versions.node}，本项目按 Node ${MIN} 部署（engines: ${ENGINE}）`,
-    `原生模块 better-sqlite3 的预编译包绑 Node ABI，计划任务里也写死了安装时的 Node 路径。\n  ` +
-      `执行 nvm use ${MIN} 再重跑本脚本。`
+    `Node 版本过高：当前 ${process.versions.node}，engines 要求 ${ENGINE}`,
+    `执行 nvm use ${MIN} 再重跑本脚本。`
   );
 }
 ok(`Node ${process.versions.node}（engines ${ENGINE}）`);
@@ -99,10 +107,9 @@ if (PM === "npm") {
   ok("pnpm 可用");
 }
 
-// better-sqlite3 是原生模块。有预编译包就不用编译器；没有才需要工具链
-if (platform() === "win32") {
-  info("Windows 上 better-sqlite3 若无预编译包，需要 VS Build Tools（C++ 桌面开发）");
-}
+// better-sqlite3 是 N-API，官方对三大平台都发预编译产物，正常路径用不到编译器。
+// 真缺工具链的情形（冷门平台 / 要从源码编）交给 `pnpm doctor` 按平台报，那里能给出具体装法
+info("缺什么环境依赖（编译器、磁盘、定时任务指向的 Node）用 `pnpm doctor` 看");
 
 /**
  * 真装载一次 better-sqlite3。

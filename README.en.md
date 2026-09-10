@@ -13,13 +13,17 @@ The whole chain runs on one machine: collection → factors → strategy → sig
 
 ## One-command install
 
-Requires **Node 22** — not "≥ 22"; the upper bound is pinned too. Check with `node -v`; if you don't have it, `nvm install 22 && nvm use 22` (there's a `.nvmrc` at the repo root).
+Requires **Node ≥ 22**. Check with `node -v`; if you don't have it, `nvm install 22 && nvm use 22` (the `.nvmrc` at the repo root gives the recommended version).
 
-> Why no higher version: `better-sqlite3` is a native module whose prebuilt `.node` binds to the Node ABI, so a major version bump fails to load.
-> And `install-launchd` / `install-schtasks` write **the absolute path of whichever Node was current at install time** into the scheduled task.
-> Running two Nodes produces a split-brain state: the collector writes to the database while the web UI says it can't open it.
+> The upper bound used to be pinned too (`>=22 <23`), because `better-sqlite3` v11 used `prebuild-install`, whose prebuilt artifacts are **split by Node ABI** — a major version bump failed to load.
+> Upgrading to v13 removed that premise: it is N-API, and its artifacts are split by **platform** (`darwin-arm64` / `linux-x64` / `win32-x64`…), so one `.node` loads across Node major versions.
+> Verified: the same install passes all 1136 tests under both Node 22 (ABI 127) and Node 24 (ABI 137), and reads the real 2.4 GB database under both.
 >
-> Three layers catch this: `engine-strict=true` in `.npmrc` makes **any `pnpm` entry point** fail at startup on a version mismatch (instead of printing one WARN line and running anyway); `node scripts/setup.mjs --check` additionally loads the `.node` for real, which also catches "right version number, wrong ABI"; and if it still slips through to runtime, the web UI's 503 translates the ABI number into the concrete action ("switch back to Node N").
+> The lower bound stays: the code is written against Node 22's syntax and built-ins.
+>
+> Two layers catch problems: `engine-strict=true` in `.npmrc` makes **any `pnpm` entry point** fail at startup if the version is too low (instead of printing one WARN line and running anyway); `node scripts/setup.mjs --check` additionally loads the `.node` for real, which also catches "right version number, broken artifact" (copying `node_modules` from another machine does that). If it still slips through to runtime, the web UI's 503 translates the ABI number into the concrete action ("switch back to Node N").
+
+**Environment check-up**: `pnpm doctor` reports, for your platform, the state of each requirement, whether it is actually needed, and how to fix it — compiler toolchain (macOS Xcode CLT / Windows VS Build Tools / Linux build-essential), free disk space, and whether the Node your scheduled tasks point at still exists. Read-only; it changes nothing.
 
 ```bash
 git clone <repo-url> pantrader
@@ -35,7 +39,8 @@ Windows uses the same command, from PowerShell or CMD — the script is pure Nod
 
 | Command | Purpose |
 |---|---|
-| `node scripts/setup.mjs --check` | Check the environment only, **changes nothing** |
+| `pnpm doctor` | Environment check-up: what's missing on your platform and how to fix it. **Read-only** |
+| `node scripts/setup.mjs --check` | Pre-install gate: only checks whether installation can proceed, **changes nothing** |
 | `node scripts/setup.mjs --no-data` | Skip data loading, no network. Look at the UI structure first |
 | `node scripts/setup.mjs --dev` | Start in dev mode (hot reload, slower than production) |
 | `node scripts/setup.mjs` | Install and stop, don't start |
@@ -196,6 +201,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm test:live` | Smoke tests against the real endpoints |
 | `pnpm run migrate` | Run migrations |
 | `pnpm run seed-strategies` | Seed real strategy files from `*.yaml.example` (idempotent, never overwrites) |
+| `pnpm doctor` | Environment check-up (read-only): Node / toolchain / disk / scheduled tasks |
 
 > `pnpm import` / `pnpm export` are built-in pnpm commands and would hijack scripts of the same name. Hence `db:import` / `db:export`.
 

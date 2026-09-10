@@ -14,15 +14,19 @@ A 股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 
 ## 一键安装
 
-需要 **Node 22**（不是"≥ 22"，上界也卡死：`node -v` 检查；没有就 `nvm install 22 && nvm use 22`，仓库根目录有 `.nvmrc`）。
+需要 **Node ≥ 22**（`node -v` 检查；没有就 `nvm install 22 && nvm use 22`，仓库根目录有 `.nvmrc` 给的是推荐版本）。
 
-> 为什么不许更高版本：`better-sqlite3` 是原生模块，预编译的 `.node` 绑定 Node ABI，换大版本就装载失败；
-> 而 `install-launchd` / `install-schtasks` 写进定时任务的解释器，是**安装当时那个 Node 的绝对路径**。
-> 用两个 Node 会出现"采集在写库、网页说连不上库"这种撕裂状态。
+> 曾经上界也卡死（`>=22 <23`），因为 `better-sqlite3` v11 用 `prebuild-install`，预编译产物**按 Node ABI 分**，换大版本就装载失败。
+> 升到 v13 之后这个前提没了：它是 N-API，产物按**平台**分（`darwin-arm64` / `linux-x64` / `win32-x64`…），同一份 `.node` 跨 Node 大版本加载。
+> 实测同一份安装在 Node 22（ABI 127）与 Node 24（ABI 137）下各跑通 1136 个测试，并读通了 2.4 GB 的真实库。
 >
-> 拦截分三层：`.npmrc` 里的 `engine-strict=true` 让**任何 `pnpm` 入口**在版本不对时启动即失败（不再是一行 WARN 照跑）；
-> `node scripts/setup.mjs --check` 会额外真装载一次 `.node`，把"版本号对但 ABI 不匹配"也探出来；
+> 仍然保留下界：代码按 Node 22 的语法与内置 API 写。
+>
+> 两层拦截：`.npmrc` 里的 `engine-strict=true` 让**任何 `pnpm` 入口**在版本过低时启动即失败（不再是一行 WARN 照跑）；
+> `node scripts/setup.mjs --check` 会额外真装载一次 `.node`，把"版本号对但产物坏了"也探出来（从别的机器拷 `node_modules` 就会这样）。
 > 万一还是漏到了运行时，网页的 503 会把 ABI 号翻成"换回 Node 几"的具体动作。
+
+**环境体检**：`pnpm doctor` 按你所在的平台列出每一项的现状、是否必需、缺了怎么补 —— 编译器（macOS Xcode CLT / Windows VS Build Tools / Linux build-essential）、磁盘余量、定时任务指向的 Node 还在不在。只读，不改任何东西。
 
 ```bash
 git clone <仓库地址> pantrader
@@ -38,7 +42,8 @@ Windows 一样这条命令，PowerShell 或 CMD 都行——脚本是纯 Node，
 
 | 命令 | 用途 |
 |---|---|
-| `node scripts/setup.mjs --check` | 只检查环境，**不改任何东西** |
+| `pnpm doctor` | 环境体检：按平台列出缺什么、怎么补。**只读** |
+| `node scripts/setup.mjs --check` | 安装前的闸门：只看能不能往下装，**不改任何东西** |
 | `node scripts/setup.mjs --no-data` | 跳过灌数据，不打网络。先看界面结构 |
 | `node scripts/setup.mjs --dev` | 开发模式启动（热更新，比生产模式慢） |
 | `node scripts/setup.mjs` | 装完就停，不启动 |
@@ -208,6 +213,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm test:live` | 打真实接口的 smoke 测试 |
 | `pnpm run migrate` | 跑迁移 |
 | `pnpm run seed-strategies` | 从 `*.yaml.example` 播种策略实文件（幂等，不覆盖已有） |
+| `pnpm doctor` | 环境体检（只读）：Node/工具链/磁盘/定时任务 |
 
 > `pnpm import` / `pnpm export` 是 pnpm 内置命令，会劫持同名 script。所以叫 `db:import` / `db:export`。
 
