@@ -337,9 +337,22 @@ describe("组合风控", () => {
     expect(观察[0].rejectedBy!.join(" ")).toMatch(/占比|上限/);
   });
 
-  it("无法核算现有持仓占比时必须告警 —— 引擎拿不到总资产", () => {
+  /**
+   * 引擎不接账户资金是**设计决定**（见 engine.ts 那条 warn 上面的说明）：
+   * 只出比例，换算成金额由人做，顺带兜住"系统不会自动下单"那条红线。
+   * 所以这条断言守的不是"某个待办还没做"，而是"这条边界必须一直说出来" ——
+   * 有持仓时若不告警，人就会以为新开仓预算已经扣过已有仓位了。
+   */
+  it("有持仓时必须点明预算没扣已有仓位 —— 引擎按设计不接账户资金", () => {
     const card = run({ positions: [{ account: "卫星", code: "000001", cost: 10, qty: 1000, stopPx: null }] });
-    expect(card.warnings.some(w => w.includes("总资产") || w.includes("现有持仓"))).toBe(true);
+    const w = card.warnings.find(x => x.includes("组合风控"));
+    expect(w).toBeDefined();
+    expect(w!).toContain("未扣除现有 1 笔持仓");
+    expect(w!).toContain("人工核对");
+  });
+
+  it("没有持仓就不发这条告警 —— 空仓时预算本来就没什么可扣的", () => {
+    expect(run().warnings.some(w => w.includes("组合风控：引擎按设计"))).toBe(false);
   });
 });
 
