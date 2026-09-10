@@ -72,7 +72,7 @@ say("检查运行环境");
  *
  * 上界拿掉之后，唯一还与 Node 版本相关的坑是 install-launchd / install-schtasks
  * 把**安装当时那个 Node 的绝对路径**写进了计划任务 —— 换版本本身无害，
- * 但把旧版本删掉会让任务指向一个不存在的解释器。`pnpm doctor` 专门查这一项。
+ * 但把旧版本删掉会让任务指向一个不存在的解释器。`node scripts/doctor.mjs` 专门查这一项。
  *
  * 解析要按 semver 区间取字段，别用 replace(/[^\d]/g,"") ——
  * ">=22 <23" 会被那种写法拼成 2223。
@@ -108,8 +108,8 @@ if (PM === "npm") {
 }
 
 // better-sqlite3 是 N-API，官方对三大平台都发预编译产物，正常路径用不到编译器。
-// 真缺工具链的情形（冷门平台 / 要从源码编）交给 `pnpm doctor` 按平台报，那里能给出具体装法
-info("缺什么环境依赖（编译器、磁盘、定时任务指向的 Node）用 `pnpm doctor` 看");
+// 真缺工具链的情形（冷门平台 / 要从源码编）交给 `node scripts/doctor.mjs` 按平台报，那里能给出具体装法
+info("缺什么环境依赖（编译器、磁盘、定时任务指向的 Node）用 `node scripts/doctor.mjs` 看");
 
 /**
  * 真装载一次 better-sqlite3。

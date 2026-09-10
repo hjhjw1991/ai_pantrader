@@ -7,8 +7,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "setup": "node scripts/setup.mjs",
-    "doctor": "node scripts/doctor.mjs",
+    "env:setup": "node scripts/setup.mjs",
+    "env:doctor": "node scripts/doctor.mjs",
     "dev": "next dev -p 3111",
     "build": "next build",
     "start": "next start -p 3111",

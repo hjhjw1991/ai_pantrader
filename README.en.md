@@ -23,7 +23,7 @@ Requires **Node ≥ 22**. Check with `node -v`; if you don't have it, `nvm insta
 >
 > Two layers catch problems: `engine-strict=true` in `.npmrc` makes **any `pnpm` entry point** fail at startup if the version is too low (instead of printing one WARN line and running anyway); `node scripts/setup.mjs --check` additionally loads the `.node` for real, which also catches "right version number, broken artifact" (copying `node_modules` from another machine does that). If it still slips through to runtime, the web UI's 503 translates the ABI number into the concrete action ("switch back to Node N").
 
-**Environment check-up**: `pnpm doctor` reports, for your platform, the state of each requirement, whether it is actually needed, and how to fix it — compiler toolchain (macOS Xcode CLT / Windows VS Build Tools / Linux build-essential), free disk space, and whether the Node your scheduled tasks point at still exists. Read-only; it changes nothing.
+**Environment check-up**: `node scripts/doctor.mjs` reports, for your platform, the state of each requirement, whether it is actually needed, and how to fix it — compiler toolchain (macOS Xcode CLT / Windows VS Build Tools / Linux build-essential), free disk space, and whether the Node your scheduled tasks point at still exists. Read-only; it changes nothing.
 
 ```bash
 git clone <repo-url> pantrader
@@ -39,7 +39,7 @@ Windows uses the same command, from PowerShell or CMD — the script is pure Nod
 
 | Command | Purpose |
 |---|---|
-| `pnpm doctor` | Environment check-up: what's missing on your platform and how to fix it. **Read-only** |
+| `node scripts/doctor.mjs` | Environment check-up: what's missing on your platform and how to fix it. **Read-only**, runs before dependencies are installed |
 | `node scripts/setup.mjs --check` | Pre-install gate: only checks whether installation can proceed, **changes nothing** |
 | `node scripts/setup.mjs --no-data` | Skip data loading, no network. Look at the UI structure first |
 | `node scripts/setup.mjs --dev` | Start in dev mode (hot reload, slower than production) |
@@ -201,9 +201,13 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm test:live` | Smoke tests against the real endpoints |
 | `pnpm run migrate` | Run migrations |
 | `pnpm run seed-strategies` | Seed real strategy files from `*.yaml.example` (idempotent, never overwrites) |
-| `pnpm doctor` | Environment check-up (read-only): Node / toolchain / disk / scheduled tasks |
+| `pnpm env:doctor` | Environment check-up (read-only): Node / toolchain / disk / scheduled tasks |
 
-> `pnpm import` / `pnpm export` are built-in pnpm commands and would hijack scripts of the same name. Hence `db:import` / `db:export`.
+> `import` / `setup` / `doctor` are built-in pnpm commands and **hijack** scripts of the same name: what runs is
+> pnpm's own, and it **still exits 0** — it looks like it passed while our script never ran at all. Silent false pass,
+> the hardest kind to notice. Hence the prefixes: `db:import` / `env:setup` / `env:doctor`.
+> `db:export` just mirrors `db:import` (`export` isn't a pnpm command, so a typo fails loudly rather than lying).
+> `tests/package-scripts.test.ts` pins this down, so new scripts get checked automatically.
 
 ---
 

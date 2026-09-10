@@ -26,7 +26,7 @@ A 股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 > `node scripts/setup.mjs --check` 会额外真装载一次 `.node`，把"版本号对但产物坏了"也探出来（从别的机器拷 `node_modules` 就会这样）。
 > 万一还是漏到了运行时，网页的 503 会把 ABI 号翻成"换回 Node 几"的具体动作。
 
-**环境体检**：`pnpm doctor` 按你所在的平台列出每一项的现状、是否必需、缺了怎么补 —— 编译器（macOS Xcode CLT / Windows VS Build Tools / Linux build-essential）、磁盘余量、定时任务指向的 Node 还在不在。只读，不改任何东西。
+**环境体检**：`node scripts/doctor.mjs` 按你所在的平台列出每一项的现状、是否必需、缺了怎么补 —— 编译器（macOS Xcode CLT / Windows VS Build Tools / Linux build-essential）、磁盘余量、定时任务指向的 Node 还在不在。只读，不改任何东西。
 
 ```bash
 git clone <仓库地址> pantrader
@@ -42,7 +42,7 @@ Windows 一样这条命令，PowerShell 或 CMD 都行——脚本是纯 Node，
 
 | 命令 | 用途 |
 |---|---|
-| `pnpm doctor` | 环境体检：按平台列出缺什么、怎么补。**只读** |
+| `node scripts/doctor.mjs` | 环境体检：按平台列出缺什么、怎么补。**只读**，装依赖前就能跑 |
 | `node scripts/setup.mjs --check` | 安装前的闸门：只看能不能往下装，**不改任何东西** |
 | `node scripts/setup.mjs --no-data` | 跳过灌数据，不打网络。先看界面结构 |
 | `node scripts/setup.mjs --dev` | 开发模式启动（热更新，比生产模式慢） |
@@ -213,9 +213,13 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm test:live` | 打真实接口的 smoke 测试 |
 | `pnpm run migrate` | 跑迁移 |
 | `pnpm run seed-strategies` | 从 `*.yaml.example` 播种策略实文件（幂等，不覆盖已有） |
-| `pnpm doctor` | 环境体检（只读）：Node/工具链/磁盘/定时任务 |
+| `pnpm env:doctor` | 环境体检（只读）：Node/工具链/磁盘/定时任务 |
 
-> `pnpm import` / `pnpm export` 是 pnpm 内置命令，会劫持同名 script。所以叫 `db:import` / `db:export`。
+> `import` / `setup` / `doctor` 是 pnpm 的内置命令，会**劫持**同名 script：敲下去跑的是 pnpm 自己那个，
+> **退出码还是 0**，看着像通过了，其实我们的脚本一次都没执行 —— 静默假通过，最难发现的那种。
+> 所以带前缀改名：`db:import` / `env:setup` / `env:doctor`。
+> `db:export` 是跟着 `db:import` 对称（`export` 不是 pnpm 命令，敲错会直接报命令不存在，不会骗人）。
+> `tests/package-scripts.test.ts` 钉住了这条，新加 script 时会自动查。
 
 ---
 
