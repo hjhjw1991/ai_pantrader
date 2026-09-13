@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全问题 / Security issue
+    url: https://github.com/hjhjw1991/ai_pantrader/security/advisories/new
+    about: 请走私密安全公告，不要开公开 issue。Please report privately, not as a public issue.

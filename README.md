@@ -8,6 +8,10 @@ A 股盘面量化系统 · 本地优先 · 人在环上 · 闭环自校准
 > **红线：系统不会自动下单。** 下单在券商 App 手敲，回来在持仓页回填成交。
 > 自动化要等券商权限到位 **且** paper 模式连续跑满一个季度并达标。前端里不存在下单能力，也没给它留配置口子。
 
+[![CI](https://github.com/hjhjw1991/ai_pantrader/actions/workflows/ci.yml/badge.svg)](https://github.com/hjhjw1991/ai_pantrader/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+
 *[English README](README.en.md)*
 
 ---
@@ -256,6 +260,20 @@ pnpm db:import <f.ptbak> merge newer
 - **两个 advisor 传输层未对真实端点验证**
 - **macOS 合盖休眠拦不住**：`caffeinate` 无法阻止 clamshell sleep。要盘中数据完整就得开着盖
 - 少数证券取不到实时快照（长期停牌 / 部分北交所），全市场覆盖率约 99.9%
+
+## 参与共建
+
+欢迎 PR。动核心逻辑前先读这两份：
+
+| 文档 | 内容 |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 怎么跑起来、四条硬约束、注释写法、数据源礼节、哪些改动不接受 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 代码里 193 处 `spec §N` 引用背后的规矩，按章节号索引 |
+
+其它：[SECURITY.md](SECURITY.md)（漏洞走私密公告，别开公开 issue）·
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+
+---
 
 ## 免责
 

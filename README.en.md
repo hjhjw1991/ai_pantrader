@@ -7,6 +7,10 @@ The whole chain runs on one machine: collection → factors → strategy → sig
 > **Hard line: the system never places orders.** You place them by hand in your broker's app and fill the execution back in on the positions page.
 > Automation waits until broker permissions are in place **and** paper mode has run a full quarter and met its targets. There is no order-placing capability in the frontend, and no config hook left for one.
 
+[![CI](https://github.com/hjhjw1991/ai_pantrader/actions/workflows/ci.yml/badge.svg)](https://github.com/hjhjw1991/ai_pantrader/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+
 *[中文版 README](README.md)*
 
 ---
@@ -244,6 +248,20 @@ These are hard constraints with assertions guarding them in CI. Read them before
 - **Two advisor transport layers are unverified against real endpoints**
 - **macOS clamshell sleep cannot be blocked**: `caffeinate` cannot prevent it. If you want complete intraday data, keep the lid open
 - A handful of securities have no real-time snapshot (long suspensions / some Beijing Stock Exchange names); whole-market coverage is about 99.9%
+
+## Contributing
+
+PRs welcome. Read these two before touching core logic:
+
+| Doc | What's in it |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Getting it running, the four hard constraints, comment conventions, data-source etiquette, what won't be accepted |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The rules behind the 193 `spec §N` citations in the code, indexed by section |
+
+Also: [SECURITY.md](SECURITY.md) (report privately, not as a public issue) ·
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+
+---
 
 ## Disclaimer
 

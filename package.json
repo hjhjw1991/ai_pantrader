@@ -2,6 +2,30 @@
   "name": "pantrader",
   "version": "0.1.0",
   "private": true,
+  "description": "A-share market quant dashboard. Local-first, human-in-the-loop, self-calibrating closed loop. 本地优先的 A 股盘面量化系统。",
+  "keywords": [
+    "a-share",
+    "quant",
+    "trading",
+    "stock-market",
+    "backtest",
+    "nextjs",
+    "sqlite",
+    "local-first",
+    "china-stock",
+    "量化",
+    "A股"
+  ],
+  "homepage": "https://github.com/hjhjw1991/ai_pantrader#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hjhjw1991/ai_pantrader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hjhjw1991/ai_pantrader/issues"
+  },
+  "license": "MIT",
+  "author": "hjhjw1991",
   "type": "module",
   "engines": {
     "node": ">=22"

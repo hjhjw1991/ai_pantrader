@@ -1,0 +1,24 @@
+name: 功能建议 / Feature request
+description: 想加点什么
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        动核心逻辑的建议，请先读 [docs/ARCHITECTURE.md](../blob/main/docs/ARCHITECTURE.md)。
+        其中 [CONTRIBUTING 的「不接受的改动」](../blob/main/CONTRIBUTING.md#不接受的改动)
+        列了几类已经决定不做的方向（自动下单、让回测变好看的"优化"、系统自动改写策略 YAML）。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决什么问题 / What problem
+      description: 先说问题，别直接说方案。你在什么场景下被卡住了？
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 设想的做法 / Proposed approach
+      description: 可选。如果会影响回测可复现性或因子纯度，请说明怎么处理。

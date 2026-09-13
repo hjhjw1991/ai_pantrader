@@ -1,0 +1,49 @@
+name: Bug 报告 / Bug report
+description: 系统行为与预期不符
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **请不要贴真实持仓、账户信息或数据库文件。**
+        Please don't paste real positions, account details, or your database file.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: 环境体检输出 / Environment check-up
+      description: 跑 `node scripts/doctor.mjs` 并把输出贴进来。它会列出平台、Node 版本、原生模块状态、定时任务指向 —— 这几项能省掉大半轮来回。
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 / What happened
+      description: 实际行为 vs 预期行为。有报错请贴原文，别转述。
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎么复现 / How to reproduce
+      description: 最小步骤。如果与具体数据有关，说明是哪类数据（不用给真实数据）。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及哪块 / Area
+      multiple: true
+      options:
+        - 安装 / setup
+        - 数据采集 / collection
+        - 策略与因子 / strategy & factors
+        - 回测 / backtest
+        - 台账复盘 / ledger
+        - 网页界面 / web UI
+        - 定时任务 / scheduling
+        - 不确定 / not sure

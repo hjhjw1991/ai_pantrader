@@ -1,0 +1,67 @@
+# 每个 PR 都要回答同一个问题：这个改动有没有弄坏别的东西。
+#
+# 矩阵覆盖三个平台 × 两个 Node 大版本，因为这两件事都是仓库对外的承诺：
+#   - README 说「Windows 一样这条命令」，那就得真在 Windows 上跑过；
+#   - package.json 的 engines 是 ">=22"，那 22 和 24 就都得绿。
+#     （这条承诺的底气是 better-sqlite3 v13 走 N-API，产物按平台分而不按
+#     Node ABI 分 —— 但承诺要靠 CI 每次复查，不能靠一次手工验证。）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个 PR 连推多次时，只跑最后一次
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了，其它平台的结果仍然有价值 —— 跨平台问题往往只在一处冒头
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+
+    env:
+      # CI 上绝不能让采集器跑起来：它会去打东方财富/新浪的免费接口。
+      # 那些接口没有配额可言，被 CI 反复敲会连累所有真实用户。
+      PANTRADER_NO_SCHEDULER: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      # --frozen-lockfile：lockfile 与 package.json 对不上就直接失败，
+      # 别让 CI 悄悄装出一套和本地不同的依赖
+      - run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm exec tsc --noEmit
+
+      - name: 单元测试
+        # 这套测试不打网络（见 CONTRIBUTING）。真打接口的 smoke 测试是
+        # pnpm test:live，故意不放进 CI
+        run: pnpm test
+
+      - name: 生产构建
+        run: pnpm build
+
+      # 不阻断：体检脚本本来就会因为「定时任务没装」这类 CI 环境的正常缺失而
+      # 报非零。放在这里是为了证明它在三个平台上都能跑起来、不崩
+      - name: 环境体检（仅观察）
+        continue-on-error: true
+        run: node scripts/doctor.mjs
