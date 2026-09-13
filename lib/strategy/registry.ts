@@ -204,7 +204,10 @@ export function rewriteIdLine(src: string, newId: string): string {
     if (/^id\s*:/.test(lines[i])) { hit = i; break; }
   }
   if (hit < 0) throw new Error("源策略里找不到顶层 `id:` 行，无法安全改写 —— 请手工建文件");
-  lines[hit] = lines[hit].replace(/^id\s*:.*$/, `id: ${newId}`);
+  // 用 [^\r\n]* 而不是 .*$：CRLF 的行尾是 \r，而 `.` 不匹配 \r、`$`（无 m）只认串尾，
+  // 于是 /^id\s*:.*$/ 在 CRLF 文件上**匹配不上**，替换静默失效 —— 新建出来的策略 id 没被改。
+  // 这样写顺带把 \r 原样留在行尾，保持原文件的换行风格不被这次改写偷偷换掉。
+  lines[hit] = lines[hit].replace(/^id\s*:[^\r\n]*/, `id: ${newId}`);
   return lines.join("\n");
 }
 

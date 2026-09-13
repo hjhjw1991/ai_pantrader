@@ -52,9 +52,9 @@ ${argXml}
   <key>WorkingDirectory</key>
   <string>${o.workdir}</string>
   <key>StandardOutPath</key>
-  <string>${path.join(o.logDir, `${o.label}.out.log`)}</string>
+  <string>${path.posix.join(o.logDir, `${o.label}.out.log`)}</string>
   <key>StandardErrorPath</key>
-  <string>${path.join(o.logDir, `${o.label}.err.log`)}</string>
+  <string>${path.posix.join(o.logDir, `${o.label}.err.log`)}</string>
 ${calBlock}
   <key>RunAtLoad</key>
   <false/>

@@ -70,6 +70,23 @@ export function openRead(p: string = dbPath()): ReadDbResult {
 }
 
 /** 旧签名保留：绝大多数调用方只关心"有没有连上" */
+/**
+ * 关掉缓存的读连接。
+ *
+ * 平时用不上 —— 连接挂在 globalThis 上是故意的（见上面 HMR 那段注释）。
+ * 需要它的是**测试**：POSIX 上可以删掉仍被打开的文件，Windows 不行，
+ * 于是 afterEach 里 rmSync 临时目录会抛 EBUSY，而连接还攥在缓存里。
+ * CI 的 windows-latest 上实测就是这么红的。
+ *
+ * 顺带补上一个真实缺口：一个只进不出的连接缓存，本来就该有关闭入口。
+ */
+export function closeCachedReads(): void {
+  for (const db of cache.values()) {
+    try { db.close(); } catch { /* 已关的连接再关一次不是错误 */ }
+  }
+  cache.clear();
+}
+
 export function readDb(p: string = dbPath()): Database.Database | null {
   const r = openRead(p);
   return r.ok ? r.db : null;

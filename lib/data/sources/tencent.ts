@@ -27,7 +27,8 @@ const num = (v: string | undefined): number => {
 // [32]涨跌幅% [33]最高 [34]最低 [38]换手率 [43]振幅
 export function parseGtimg(text: string): Quote[] {
   const out: Quote[] = [];
-  for (const line of text.split("\n")) {
+  // 按 /\r?\n/ 切：HTTP 响应用 CRLF 是合法的，按 "\n" 切会把 \r 留在最后一个字段里
+  for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^v_([a-z]{2}\d{6})="([^"]*)";?$/);
     if (!m) continue;              // 跳过 v_pv_none_match 等噪声行
     const f = m[2].split("~");

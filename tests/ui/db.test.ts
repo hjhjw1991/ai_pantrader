@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { openDb } from "@/lib/db";
-import { openRead, readDb, dbUnavailable } from "@/lib/ui/db";
+import { openRead, readDb, dbUnavailable, closeCachedReads } from "@/lib/ui/db";
 
 /**
  * 这组测试盯的是**故障文案说不说真话**。
@@ -16,7 +16,12 @@ import { openRead, readDb, dbUnavailable } from "@/lib/ui/db";
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-uidb-")); });
-afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  // 先关连接再删目录：Windows 上删不掉仍被打开的文件（EBUSY），
+  // 而这组测试有意把连接留在缓存里（它测的就是缓存命中）
+  closeCachedReads();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe("ui/db 接不上库时的原因区分", () => {
   it("文件不存在 → kind=missing，并带上探测过的路径", () => {

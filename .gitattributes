@@ -1,0 +1,17 @@
+# 仓库里的文本一律以 LF 检出，Windows 也不例外。
+#
+# 为什么必须钉死：很多测试是**按内容**断言的 —— 策略 YAML 的行号定位、
+# 逐行改写参数、腾讯行情的分隔符解析、纯度扫描的正则。Windows 默认
+# core.autocrlf=true 会把 \n 换成 \r\n，于是 /^id: v2$/m 匹配不上
+# （行尾多了个 \r），gtimg fixture 切出 0 条而不是 3 条。
+#
+# 这类失败极难认：代码没错、测试没错，错的是工作区里的字节。
+* text=auto eol=lf
+
+# 二进制不要碰
+*.node   binary
+*.db     binary
+*.ptbak  binary
+*.png    binary
+*.jpg    binary
+*.ico    binary
