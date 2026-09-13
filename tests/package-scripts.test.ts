@@ -41,6 +41,28 @@ describe("package.json scripts", () => {
     ).toEqual([]);
   });
 
+  /**
+   * 反过来的一半：script 加了、README 没跟上。
+   * 这条是被人工 review 抓出来的 —— env:setup 改名后真能用了，却只在脚注里
+   * 露了一面，没进任何命令表。加命令忘了写文档不该靠人眼发现。
+   *
+   * 匹配放宽到代码块里的裸写法（README 的安装段落用的就是 `pnpm db:export` 这种），
+   * 负向断言挡住 `pnpm test` 误配到 `pnpm test:live`。
+   */
+  it("每个 script 在两个 README 里都有记录", () => {
+    for (const file of ["README.md", "README.en.md"]) {
+      const md = readFileSync(resolve(__dirname, "..", file), "utf8");
+      const undocumented = Object.keys(pkg.scripts).filter(
+        (name) =>
+          !new RegExp(`pnpm (?:run )?${name.replace(/[:\-]/g, "\\$&")}(?![\\w:-])`).test(md)
+      );
+      expect(
+        undocumented,
+        `${file} 没有记录这些命令：${undocumented.join(", ")}`
+      ).toEqual([]);
+    }
+  });
+
   it("README 里出现的 pnpm 子命令都真的存在", () => {
     const names = new Set(Object.keys(pkg.scripts));
     for (const file of ["README.md", "README.en.md"]) {

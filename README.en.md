@@ -198,10 +198,12 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run daemon` | Standalone collection daemon |
 | `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm test` | Unit tests (**no network**) |
+| `pnpm test:watch` | Unit tests, watch mode |
 | `pnpm test:live` | Smoke tests against the real endpoints |
 | `pnpm run migrate` | Run migrations |
 | `pnpm run seed-strategies` | Seed real strategy files from `*.yaml.example` (idempotent, never overwrites) |
 | `pnpm env:doctor` | Environment check-up (read-only): Node / toolchain / disk / scheduled tasks |
+| `pnpm env:setup --check` | Install gate (read-only). Without flags it really installs: deps → database → data → build. For a first deployment see [One-command install](#one-command-install), which uses `node scripts/setup.mjs` because pnpm and the dependencies may not be in place yet |
 
 > `import` / `setup` / `doctor` are built-in pnpm commands and **hijack** scripts of the same name: what runs is
 > pnpm's own, and it **still exits 0** — it looks like it passed while our script never ran at all. Silent false pass,

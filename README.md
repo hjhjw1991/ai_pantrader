@@ -210,10 +210,12 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run daemon` | 独立采集守护进程 |
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm test` | 单元测试（**不打网络**） |
+| `pnpm test:watch` | 单元测试，watch 模式 |
 | `pnpm test:live` | 打真实接口的 smoke 测试 |
 | `pnpm run migrate` | 跑迁移 |
 | `pnpm run seed-strategies` | 从 `*.yaml.example` 播种策略实文件（幂等，不覆盖已有） |
 | `pnpm env:doctor` | 环境体检（只读）：Node/工具链/磁盘/定时任务 |
+| `pnpm env:setup --check` | 安装闸门（只读）。不带参数则真装：依赖 → 建库 → 灌数据 → 构建。首次部署见[一键安装](#一键安装)，那里用 `node scripts/setup.mjs`，因为那时 pnpm 和依赖都可能还没就位 |
 
 > `import` / `setup` / `doctor` 是 pnpm 的内置命令，会**劫持**同名 script：敲下去跑的是 pnpm 自己那个，
 > **退出码还是 0**，看着像通过了，其实我们的脚本一次都没执行 —— 静默假通过，最难发现的那种。
