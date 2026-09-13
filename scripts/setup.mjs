@@ -107,7 +107,10 @@ if (PM === "npm") {
   ok("pnpm 可用");
 }
 
-// better-sqlite3 是 N-API，官方对三大平台都发预编译产物，正常路径用不到编译器。
+// better-sqlite3 是 N-API，v13 起把三大平台的预编译产物**打进 npm 包**（prebuilds/），
+// 不用下载、也不用编译。所以 package.json 的 pnpm.onlyBuiltDependencies 里**特意没有它** ——
+// 列进去 pnpm 会因为包里有 binding.gyp 而隐式跑 node-gyp rebuild，
+// 在没有 VS Build Tools 的 Windows 上直接装不上（CI 六个平台全红过一次就是这个原因）。
 // 真缺工具链的情形（冷门平台 / 要从源码编）交给 `node scripts/doctor.mjs` 按平台报，那里能给出具体装法
 info("缺什么环境依赖（编译器、磁盘、定时任务指向的 Node）用 `node scripts/doctor.mjs` 看");
 
