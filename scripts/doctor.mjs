@@ -68,6 +68,19 @@ if (major < MIN) {
 }
 ok("平台", `${OS} ${arch()}　内存 ${(totalmem() / 1024 ** 3).toFixed(1)} GB`);
 
+/**
+ * 版本行是给 bug 报告用的：issue 模板让人把本段输出整段贴上来，
+ * 没有版本号与 commit，维护者拿到报告的第一件事仍然是回头问"你哪个版本"。
+ * git 可能没装、或者用户是下载 zip 解压的（没有 .git），那两种情况下
+ * 只报 package.json 的版本，不报错 —— 体检不该因为拿不到 commit 就变红。
+ */
+{
+  const git = sh("git", ["-C", ROOT, "rev-parse", "--short", "HEAD"]);
+  const dirty = git.ok && sh("git", ["-C", ROOT, "status", "--porcelain"]).out !== "";
+  const rev = git.ok ? `${firstLine(git.out)}${dirty ? "-dirty" : ""}` : "非 git 检出";
+  ok("版本", `${pkg.name} ${pkg.version}　${rev}`);
+}
+
 // ───────────────────────────── 包管理器 ─────────────────────────────
 
 if (has("pnpm")) {
