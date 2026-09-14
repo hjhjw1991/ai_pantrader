@@ -30,3 +30,12 @@ tmp/
 # ~/PanTraderData/strategy-backups/：每次写回都留一份 <文件名>.YYYYMMDD-HHmmss，
 # 而且天然在 git 之外、随 DB 一起备份，不会被 git clean 或重装项目连带删掉。
 config/strategies/*.yaml
+
+# 数据目录放在仓库内的选项（PANTRADER_DATA_DIR 指到 <仓库>/data 时用）。
+#
+# 默认位置仍然是仓库外的 ~/PanTraderData —— 免费数据源随时会封，攒下的历史
+# 是不可再生资产。放进仓库内换来的是"一个目录带走整套东西"，代价要认清楚：
+# **.gitignore 挡不住 `git clean -xdf`**，-x 恰恰是"连被忽略的文件一起删"。
+# 那条命令是很多人清工作区的习惯动作，在这里会把整个库删掉。
+# 所以放仓库内就更要有独立备份（pnpm db:export 生成的 .ptbak 放到别处）。
+/data/

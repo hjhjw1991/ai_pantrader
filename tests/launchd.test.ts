@@ -153,3 +153,63 @@ describe("Windows 计划任务安装器", () => {
     expect(tr).toContain(String.raw`\"C:\My Projects\pantrader\scripts\job.ts\"`);
   });
 });
+
+/**
+ * launchd 不继承 shell 环境变量 —— 它由 launchd 直接拉起，看不到 .zshrc 里的 export。
+ * 所以数据目录必须固化进 plist。不固化的后果是静默的：网页和 daemon 用
+ * PANTRADER_DATA_DIR 指的新路径，定时采集写回默认路径，一份数据分裂成两个库。
+ */
+describe("plist 里的数据目录", () => {
+  const base = {
+    label: "com.pantrader.night",
+    workdir: "/Users/x/workspace/pantrader",
+    logDir: "/Users/x/PanTraderData/logs",
+    nodeBin: "/usr/local/bin/node",
+    script: "/Users/x/workspace/pantrader/scripts/job.ts",
+    jobArgs: ["night", "--runner=launchd"],
+    calendar: { Hour: 22, Minute: 0 },
+  };
+
+  it("给了 dataDir 就写进 EnvironmentVariables", () => {
+    const plist = buildPlist({ ...base, dataDir: "/Volumes/ext/PanTraderData" });
+    expect(plist).toContain("<key>EnvironmentVariables</key>");
+    expect(plist).toContain("<key>PANTRADER_DATA_DIR</key>");
+    expect(plist).toContain("<string>/Volumes/ext/PanTraderData</string>");
+  });
+
+  it("没给就不写这一段，沿用默认位置", () => {
+    expect(buildPlist(base)).not.toContain("EnvironmentVariables");
+  });
+});
+
+/**
+ * 与 launchd 侧对称：数据目录要固化进任务本身，不指望计划任务继承用户环境变量。
+ * 它通常会继承（setx 写的是 HKCU\Environment），但"通常"不够 —— 一旦没继承到，
+ * 网页用新路径、采集写默认路径，两个库都不报错，等发现时已经岔开好几天。
+ */
+describe("计划任务里的数据目录", () => {
+  const task = (dataDir?: string) =>
+    buildTasks("C:\\Program Files\\nodejs\\node.exe", "C:\\repo\\ai_pantrader", dataDir)[0];
+
+  it("给了 dataDir 就用 cmd /c set 固化进 /TR", () => {
+    const args = schtasksArgs(task("C:\\repo\\ai_pantrader\\data"));
+    const tr = args[args.indexOf("/TR") + 1];
+    expect(tr).toContain("cmd /c set PANTRADER_DATA_DIR=C:\\repo\\ai_pantrader\\data");
+    expect(tr).toContain("job.ts");
+    expect(tr).toContain("--runner=schtasks");
+  });
+
+  it("set 后面紧跟 && 不留空格 —— 留了空格会被算进变量值", () => {
+    const args = schtasksArgs(task("C:\\data"));
+    const tr = args[args.indexOf("/TR") + 1];
+    expect(tr).toContain("PANTRADER_DATA_DIR=C:\\data&&");
+    expect(tr).not.toContain("PANTRADER_DATA_DIR=C:\\data &&");
+  });
+
+  it("没给 dataDir 就不加 cmd 包装", () => {
+    const args = schtasksArgs(task());
+    const tr = args[args.indexOf("/TR") + 1];
+    expect(tr).not.toContain("cmd /c");
+    expect(tr).toContain("job.ts");
+  });
+});

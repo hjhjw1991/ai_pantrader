@@ -15,6 +15,8 @@ export interface PlistOpts {
   calendar: CalEntry | CalEntry[];
   workdir: string;
   logDir: string;
+  /** 固化进任务的数据目录。不传则不写 EnvironmentVariables（沿用默认位置） */
+  dataDir?: string;
   nodeBin: string;
   /** 直接指定完整命令行，绕过 node/tsx 包装（保持唤醒的 agent 用） */
   argv?: string[];
@@ -39,6 +41,18 @@ export function buildPlist(o: PlistOpts): string {
   const args = o.argv ?? ["/usr/bin/caffeinate", "-i", o.nodeBin, "--import=tsx", o.script, ...o.jobArgs];
   const argXml = args.map(a => `    <string>${a}</string>`).join("\n");
 
+  /**
+   * launchd **不继承**你 shell 里的环境变量 —— 它由 launchd 直接拉起，
+   * 看不到 .zshrc 里 export 的任何东西。所以数据目录必须固化进 plist：
+   * 不写的话，你把 PANTRADER_DATA_DIR 指到别处，网页和 daemon 用新路径、
+   * 定时采集却写回默认路径，于是一份数据分裂成两个库，而且两边都不报错。
+   */
+  const envBlock = o.dataDir === undefined ? "" : `  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PANTRADER_DATA_DIR</key>
+    <string>${o.dataDir}</string>
+  </dict>`;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51,6 +65,7 @@ ${argXml}
   </array>
   <key>WorkingDirectory</key>
   <string>${o.workdir}</string>
+${envBlock}
   <key>StandardOutPath</key>
   <string>${path.posix.join(o.logDir, `${o.label}.out.log`)}</string>
   <key>StandardErrorPath</key>
@@ -120,7 +135,7 @@ if (invokedDirectly) {
   for (const k of KEEPAWAKE_SCHEDULE) {
     const xml = buildPlist({
       label: k.label, script: "", jobArgs: [], calendar: k.calendar,
-      workdir, logDir, nodeBin,
+      workdir, logDir, nodeBin, dataDir: cfg.dataDir,
       argv: ["/usr/bin/caffeinate", "-is", "-t", String(k.seconds)],
     });
     const dest = path.join(agents, `${k.label}.plist`);
