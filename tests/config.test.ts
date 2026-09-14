@@ -23,6 +23,29 @@ describe("getConfig", () => {
     expect(c.dbPath).toBe(path.join(OTHER, "pantrader.db"));
   });
 
+  /**
+   * 这条盯的是一次真实的跨平台事故：原先 home 解析写成 `env.HOME ?? "/tmp"`，
+   * 而 Windows 根本不设 HOME。用户把库拷到 C:\\Users\\名字\\PanTraderData，
+   * 系统却去 C:\\tmp\\PanTraderData 开了个空库，界面显示"没有数据"。
+   */
+  it("Windows 没有 HOME 时用 USERPROFILE，不落到 /tmp", () => {
+    const c = getConfig({ USERPROFILE: OTHER });
+    // 非 Windows 上 USERPROFILE 不参与解析，会回落到真实 home —— 两种情况都不该是 /tmp
+    expect(c.dataDir.startsWith(path.join(path.sep, "tmp"))).toBe(false);
+    if (process.platform === "win32") {
+      expect(c.dataDir).toBe(path.join(OTHER, "PanTraderData"));
+    }
+  });
+
+  it("PANTRADER_DATA_DIR 压过一切，换机器换盘靠它", () => {
+    const c = getConfig({ HOME, USERPROFILE: OTHER, PANTRADER_DATA_DIR: OTHER });
+    expect(c.dataDir).toBe(OTHER);
+  });
+
+  it("什么都没给也不会把库放进临时目录", () => {
+    expect(getConfig({}).dataDir.startsWith(path.join(path.sep, "tmp"))).toBe(false);
+  });
+
   it("数据库路径绝不落在项目目录内", () => {
     const c = getConfig({ HOME });
     expect(c.dbPath.includes(path.join("pantrader", "lib"))).toBe(false);
