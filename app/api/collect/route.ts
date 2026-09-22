@@ -86,6 +86,7 @@ async function runCollect(line: (o: unknown) => void): Promise<void> {
       sina: createClient("sina", { db, minIntervalMs: 350 }),
       tencent: createClient("tencent", { db, minIntervalMs: 250 }),
       eastmoney: createClient("eastmoney", { db, minIntervalMs: 600 }),
+      sw: createClient("sw", { db, minIntervalMs: 800 }),
     };
     const at = new Date();
     const ts = shanghaiTs(at);

@@ -85,6 +85,8 @@ export function startAutostart(
     sina: createClient("sina", { db, minIntervalMs: 350 }),
     tencent: createClient("tencent", { db, minIntervalMs: 250 }),
     eastmoney: createClient("eastmoney", { db, minIntervalMs: 600 }),
+    // 申万 WAF 对并发极敏感（≥3 并发即开始拦截），限速桶给得比别家宽
+    sw: createClient("sw", { db, minIntervalMs: 800 }),
   };
 
   const scheduler = createScheduler({

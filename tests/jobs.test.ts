@@ -25,6 +25,9 @@ const clients = () => ({
   sina: stub("[]") as any,
   tencent: stub('v_sh601012="";') as any,
   eastmoney: stub(JSON.stringify({ data: { pool: [] }, result: { pages: 1, data: [] } })) as any,
+  // 申万快照：index_name 返回空名单 → 三级为空 → 只走 31 个一级且都是空成分。
+  // 既不打网络，也不产生缺口，不干扰这些用例本来要断言的东西。
+  sw: stub('{"code":"200","data":[]}') as any,
 });
 
 describe("runJob", () => {

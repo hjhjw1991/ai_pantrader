@@ -11,6 +11,7 @@ import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { INDICES } from "@/lib/data/indices";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps, recordGap } from "@/lib/data/gap";
+import { collectSwIndustry, swSnapshotDue } from "@/lib/data/collectors/sw-industry";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { systemStartDate } from "@/lib/data/meta";
 import { refreshTableCounts } from "@/lib/data/table-counts";
@@ -40,7 +41,11 @@ export type JobName =
 
 export interface JobDeps {
   db: Db;
-  clients: { sina: SourceClient; tencent: SourceClient; eastmoney: SourceClient };
+  /**
+   * sw = 申万宏源。单独一个 client 而不是复用 eastmoney：它有自己的 WAF 与节流特性
+   * （并发 ≥3 就被拦），熔断器和限速桶必须与东财互相隔离，否则申万被拦会连累东财退避。
+   */
+  clients: { sina: SourceClient; tencent: SourceClient; eastmoney: SourceClient; sw: SourceClient };
   now: Date;
   /**
    * 批次级进度回调，可选。只有手动采集（页面按钮）会传 ——
@@ -354,6 +359,30 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
             console.error(`[night] 行业映射刷新失败：${msg}`);
             recordGap(db, date, "eastmoney", "security_sector", `行业映射刷新抛错：${msg}`, true);
           }
+        }
+      }
+
+      /**
+       * 申万行业快照，周频。
+       *
+       * 它采的不是"今天的行业"，而是**行业变更的时间序列** —— 申万把历史变更轨迹的
+       * 对外渠道停了（带结束日期的文件冻结在 2022-03-25 且该列全空），
+       * 退出日期只能靠相邻两张快照差分推出来。所以这条序列断一次，
+       * 断掉那段的行业变更就永久推不出来了，宁可多采也不能漏采。
+       *
+       * 与东财那路互不影响：不同的源、不同的限速桶与熔断器。
+       * 失败不上抛 —— 快照刷不到不该让夜间 job 挂掉，后面还有日线、对账要跑。
+       */
+      if (swSnapshotDue(db, now)) {
+        try {
+          const sw = await collectSwIndustry(db, clients.sw, { snapshotDate: date, pauseMs: 120 });
+          stats.swLevel1Rows = sw.level1;
+          stats.swLevel3Rows = sw.level3;
+          stats.swFailed = sw.failed.length;
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(`[night] 申万行业快照失败：${msg}`);
+          recordGap(db, date, clients.sw.source, "sw_industry", `快照采集抛错：${msg}`, true);
         }
       }
 

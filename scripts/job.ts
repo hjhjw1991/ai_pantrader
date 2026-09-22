@@ -66,6 +66,7 @@ const clients = {
   sina: createClient("sina", { minIntervalMs: 300, db }),
   tencent: createClient("tencent", { minIntervalMs: 300, db }),
   eastmoney: createClient("eastmoney", { minIntervalMs: 500, db }),
+  sw: createClient("sw", { minIntervalMs: 800, db }),
 };
 
 try {

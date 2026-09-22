@@ -29,6 +29,9 @@ const clients = () => ({
   sina: stub("[]") as any,
   tencent: stub('v_sh000001="1~x~000001~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~20260805100000~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1~1";') as any,
   eastmoney: stub(JSON.stringify({ data: { pool: [] }, result: { pages: 1, data: [] } })) as any,
+  // 申万快照：index_name 返回空名单 → 三级为空 → 只走 31 个一级且都是空成分。
+  // 既不打网络，也不产生缺口，不干扰这些用例本来要断言的东西。
+  sw: stub('{"code":"200","data":[]}') as any,
 });
 
 describe("时刻表", () => {
@@ -199,7 +202,7 @@ describe("jobOutcome：没抛错不等于成功", () => {
     db.prepare("INSERT INTO security (code,name,board) VALUES ('601012','x','主板')").run();
     const s = createScheduler({
       db,
-      clients: { sina: dead as any, tencent: dead as any, eastmoney: dead as any },
+      clients: { sina: dead as any, tencent: dead as any, eastmoney: dead as any, sw: dead as any },
       now: () => at("09:36"),
     });
     await s.tickOnce();
