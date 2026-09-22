@@ -18,6 +18,10 @@ export interface BakMeta {
 
 export const BAK_TABLES = [
   "kline_daily", "kline_min", "quote_snapshot", "zt_pool", "dt_pool",
+  // 周/月线。看着像派生数据（确实能由日线重算），但重算依赖复权因子，
+  // 而因子要重新打 5888 次新浪 —— 换机后到下一次刷新之间，多周期指标全是空的。
+  // 体积也不大：一只票四年约 200 根周线 + 48 根月线。
+  "kline_period",
   "sector_rank", "lhb", "lhb_seat", "macro", "security", "trading_calendar",
   "data_gap", "source_health",
   // 策略与台账。预测/成交/持仓是不可再生的历史资产，必须跟数据一起搬。

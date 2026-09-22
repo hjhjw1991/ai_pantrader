@@ -49,7 +49,21 @@ export function createClient(source: string, o: ClientOpts = {}): SourceClient {
       }
       await bucket.take();
       const r = await httpGet(url, opts);
-      breaker.record(r.ok);
+      /**
+       * 404 不计入熔断。
+       *
+       * 熔断器是用来躲开**不健康的主机**的，而 404 恰恰说明主机很健康 ——
+       * 它正常应答了，只是这个页面不存在。
+       *
+       * 实测 2026-09-23 踩到：回填复权因子时，新浪不提供北交所的 hfq.js，
+       * 343 只票稳定 404。3 次之后熔断打开，剩下 340 只全部拿到 "circuit open"
+       * —— 一个**可回补**的错误。于是一批永远不存在的页面，
+       * 既把整个源打趴下，又把自己伪装成了"今晚没采到，明天再来"。
+       *
+       * 429 与 5xx 仍然照常计入：那才是主机在喊停或出问题。
+       */
+      const notFound = !r.ok && r.status === 404;
+      if (!notFound) breaker.record(r.ok);
       if (o.db) recordHealth(o.db, `${source}:${host}`, r.ok, r.latencyMs, r.ok ? undefined : r.error);
       return r;
     },

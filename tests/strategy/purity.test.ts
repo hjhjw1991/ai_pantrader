@@ -6,16 +6,33 @@
  * 所以这里的正则也照字面来，别聪明地只查代码不查注释。
  */
 import { describe, it, expect } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 
 const DIR = join(process.cwd(), "lib", "strategy");
-const files = readdirSync(DIR).filter(f => f.endsWith(".ts"));
+
+/**
+ * 递归枚举，**必须递归**：v2 的槽位实现都在 lib/strategy/v2/ 子目录里，
+ * 而原来这里只扫顶层 —— 也就是说新加的五个槽从落地那天起就不在纯度断言的射程内。
+ * 一条只覆盖一半目录的架构断言，比没有更危险：它让人以为已经守住了。
+ */
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(dir)) {
+    const full = join(dir, e);
+    if (statSync(full).isDirectory()) out.push(...walk(full));
+    else if (e.endsWith(".ts")) out.push(relative(DIR, full));
+  }
+  return out;
+}
+
+const files = walk(DIR);
 const read = (f: string): string => readFileSync(join(DIR, f), "utf8");
 
 describe("lib/strategy 纯度", () => {
-  it("源文件可枚举", () => {
+  it("源文件可枚举，且包含 v2 子目录", () => {
     expect(files.length).toBeGreaterThanOrEqual(5);
+    expect(files.some(f => f.includes("v2"))).toBe(true);
   });
 
   it("断言 3：不许直接碰存储", () => {
@@ -44,6 +61,26 @@ describe("lib/strategy 纯度", () => {
       const src = read(f);
       expect(src, `${f}`).not.toContain("f" + "etch(");
       expect(src, `${f}`).not.toContain("ax" + "ios");
+    }
+  });
+
+  /**
+   * 复权价与原始价不可混用。
+   *
+   * 触发价、止损价要挂进券商，必须是市场上真实存在的数字；涨跌停阈值判定同理
+   * （后复权价早就不在 ±10% 的格子上了）。而复权价只服务于技术指标。
+   *
+   * 混用不会报错，只会让挂单价落在一个不存在的价位上 —— 而人看信号卡时
+   * 并不会觉得 162.61 这个数字有什么不对，它看起来就是一个价格。
+   */
+  it("定价与涨跌停判定不许碰复权价", () => {
+    // adjBars 与 periodBars **都**返回后复权价，两个都要挡。
+    // 只挡一个的守卫比没有更危险：它让人以为这条约束已经守住了。
+    const limitUp = readFileSync(join(process.cwd(), "lib", "factors", "limit-up.ts"), "utf8");
+    for (const adj of ["adjBars", "periodBars"]) {
+      expect(read("engine.ts"), `v1 引擎的触发价/止损价必须用原始价（命中 ${adj}）`)
+        .not.toContain(adj);
+      expect(limitUp, `涨跌停阈值判定必须用原始价（命中 ${adj}）`).not.toContain(adj);
     }
   });
 

@@ -89,8 +89,26 @@ export interface PointInTimeView {
   /** 视图时点。因子层取"现在"只能用它，不许 Date.now() */
   readonly asOf: string;
 
-  /** code 最近 n 根日线，升序，最后一根不晚于 asOf */
+  /**
+   * code 最近 n 根日线，升序，最后一根不晚于 asOf。**原始价，不复权。**
+   *
+   * 触发价、止损价、涨跌停判定一律用它 —— 那些价格要挂进券商，
+   * 必须是市场上真实存在的数字。技术指标请改用 adjBars。
+   */
   dailyBars(code: string, n: number): DailyBar[];
+  /**
+   * 同 dailyBars，但 OHLC 已乘上当日复权因子（**后复权**）。成交量不乘。
+   *
+   * 为什么是独立方法而不是让调用方自己乘 adjFactor：让每个消费方各自决定，
+   * 漏一处就是静默的错 —— 而"某个指标悄悄跑在未复权价上"这种错，
+   * 表现只是结论偶尔怪怪的，几乎不可能被发现。分成两个方法，调用点即声明。
+   */
+  adjBars(code: string, n: number): DailyBar[];
+  /**
+   * 周线 / 月线，升序，**后复权**。由复权日线本地聚合而来（见 016 迁移的说明）。
+   * 没有数据返回空数组：新股与长期停牌票天然没有。
+   */
+  periodBars(code: string, period: "W" | "M", n: number): DailyBar[];
   minuteBars(code: string, period: number, n: number): MinuteBar[];
   /** asOf 时点最新快照；无数据返回 null（停牌/未上市），不许返回 0 价 */
   quote(code: string): Quote | null;

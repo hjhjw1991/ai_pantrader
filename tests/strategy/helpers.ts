@@ -24,6 +24,8 @@ export interface ViewFixture {
   sectors?: Record<string, SectorRankRow[]>;
   lhb?: Record<string, LhbRow[]>;
   securities?: SecurityRow[];
+  /** 周/月线。键是 `${code}|${period}` */
+  periods?: Record<string, DailyBar[]>;
   tradingDays?: string[];
   gaps?: Record<string, string[]>;
 }
@@ -38,6 +40,20 @@ export function makeView(f: ViewFixture): PointInTimeView {
     asOf: f.asOf,
     dailyBars: (code, n) => {
       const all = (bars[code] ?? []).filter(b => b.date <= asOfDate);
+      return n <= 0 ? [] : all.slice(Math.max(0, all.length - n));
+    },
+    // 后复权：在原始价上乘因子，与 sqlite-view 同一口径
+    adjBars: (code: string, n: number) => {
+      const all = (bars[code] ?? []).filter(b => b.date <= asOfDate);
+      const take = n <= 0 ? [] : all.slice(Math.max(0, all.length - n));
+      return take.map(b => ({
+        ...b,
+        o: b.o * b.adjFactor, h: b.h * b.adjFactor,
+        l: b.l * b.adjFactor, c: b.c * b.adjFactor,
+      }));
+    },
+    periodBars: (code: string, period: "W" | "M", n: number) => {
+      const all = (f.periods?.[`${code}|${period}`] ?? []).filter(b => b.date <= asOfDate);
       return n <= 0 ? [] : all.slice(Math.max(0, all.length - n));
     },
     minuteBars: (): MinuteBar[] => [],

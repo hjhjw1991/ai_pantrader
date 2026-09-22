@@ -56,3 +56,31 @@ describe("SourceClient 熔断粒度", () => {
     expect(tried).toContain("good.host");
   });
 });
+
+describe("404 不计入熔断", () => {
+  it("连续 404 不会把主机熔断 —— 熔断是用来躲不健康主机的，而 404 恰恰说明主机正常应答了", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    const c = createClient("t404", { minIntervalMs: 0, breakerThreshold: 3 });
+
+    for (let i = 0; i < 6; i++) {
+      const r = await c.get("https://nf.host/x", { retries: 0 });
+      expect(r.ok).toBe(false);
+      expect(r.status).toBe(404);
+    }
+    expect(c.breakerFor("nf.host").isOpen()).toBe(false);
+  });
+
+  it("**真正的**失败仍然照常熔断 —— 这条修的是 404，不是把熔断关掉", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 500 })));
+    const c = createClient("t500", { minIntervalMs: 0, breakerThreshold: 3 });
+    for (let i = 0; i < 3; i++) await c.get("https://bad2.host/x", { retries: 0 });
+    expect(c.breakerFor("bad2.host").isOpen()).toBe(true);
+  });
+
+  it("429 仍然熔断 —— 那是限流，是主机在喊停，与 404 完全不同", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 429 })));
+    const c = createClient("t429", { minIntervalMs: 0, breakerThreshold: 3 });
+    for (let i = 0; i < 3; i++) await c.get("https://busy.host/x", { retries: 0 });
+    expect(c.breakerFor("busy.host").isOpen()).toBe(true);
+  });
+});

@@ -50,6 +50,13 @@ export function makeView(f: ViewFixture): PointInTimeView {
       const all = (bars[code] ?? []).filter(b => b.date <= f.asOf);
       return all.slice(Math.max(0, all.length - n));
     },
+    adjBars(code: string, n: number) {
+      return this.dailyBars(code, n).map((b: any) => ({
+        ...b, o: b.o * b.adjFactor, h: b.h * b.adjFactor,
+        l: b.l * b.adjFactor, c: b.c * b.adjFactor,
+      }));
+    },
+    periodBars(): any[] { return []; },
     minuteBars(code, period, n) {
       const all = (f.minutes ?? {})[`${code}:${period}`] ?? [];
       return all.slice(Math.max(0, all.length - n));

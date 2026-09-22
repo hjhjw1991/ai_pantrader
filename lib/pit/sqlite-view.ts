@@ -230,6 +230,38 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
       });
     },
 
+    /**
+     * 后复权日线。在 dailyBars 之上乘因子，不另查库 —— 两条路径查同一张表
+     * 迟早会在过滤条件上分岔，而分岔的那天没人会注意到。
+     *
+     * 量不乘：复权调的是价格。把量也乘上去，"放量"的判定会在除权日前后凭空翻倍。
+     */
+    adjBars(code: string, n: number): DailyBar[] {
+      return this.dailyBars(code, n).map(b => ({
+        ...b,
+        o: b.o * b.adjFactor, h: b.h * b.adjFactor,
+        l: b.l * b.adjFactor, c: b.c * b.adjFactor,
+      }));
+    },
+
+    periodBars(code: string, period: "W" | "M", n: number): DailyBar[] {
+      if (n <= 0) return [];
+      const rs = rows(
+        `SELECT code, date, o, h, l, c, vol, amount
+           FROM kline_period
+          WHERE code = ? AND period = ? AND date <= ?
+          ORDER BY date DESC LIMIT ?`,
+        code, period, asOfDate, n
+      );
+      return rs.reverse().map(r => ({
+        code: String(r["code"]), date: String(r["date"]),
+        o: num(r["o"], 0), h: num(r["h"], 0), l: num(r["l"], 0), c: num(r["c"], 0),
+        vol: num(r["vol"], 0), amount: num(r["amount"], 0),
+        // 表里存的已经是后复权价，因子已经用掉了，这里给 1 表示"无需再乘"
+        adjFactor: 1,
+      }));
+    },
+
     minuteBars(code: string, period: number, n: number): MinuteBar[] {
       if (n <= 0) return [];
       const expr = tsLocalExpr("ts");

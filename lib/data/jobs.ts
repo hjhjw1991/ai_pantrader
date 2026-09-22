@@ -12,8 +12,10 @@ import { INDICES } from "@/lib/data/indices";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 import { coverageReport, detectGaps, recordGap } from "@/lib/data/gap";
 import { collectSwIndustry, swSnapshotDue } from "@/lib/data/collectors/sw-industry";
+import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
+import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
-import { systemStartDate } from "@/lib/data/meta";
+import { getMeta, setMeta, systemStartDate } from "@/lib/data/meta";
 import { refreshTableCounts } from "@/lib/data/table-counts";
 import { reconcile } from "@/lib/ledger/reconcile";
 import { attributeSettled } from "@/lib/ledger/attribution";
@@ -35,6 +37,19 @@ const SECTOR_RANK_EVERY_MIN = 15;
  * 限流也影响不到盘中采集。
  */
 const SECTOR_MEMBERS_MAX_AGE_DAYS = 7;
+
+/**
+ * 复权因子多久全量刷一次（天）。
+ *
+ * 刷一次是 5,888 次新浪请求，与全量日线同源同量 —— 一个夜里打两遍新浪，
+ * 限频风险实打实。而因子只在**除权日**变，一只票一年通常只有一两次，
+ * 按周刷已经远快于它的变化速度。
+ *
+ * 代价是除权日当天到下次刷新之间，那只票的复权价偏旧。影响范围是技术指标，
+ * 而非触发价（那条走原始价），所以可以接受。
+ */
+const ADJ_FACTOR_MAX_AGE_DAYS = 7;
+const ADJ_FACTOR_META_KEY = "adj_factor_refreshed_at";
 
 export type JobName =
   | "selfcheck" | "preopen" | "plan" | "intraday" | "close" | "post" | "night";
@@ -401,6 +416,49 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.dailyFailed = daily.failed.length;
       // 源上无 K 线序列的代码（新股/定向转让），不是缺口但要能看见数量变化
       stats.dailyNoData = daily.noData.length;
+
+      /**
+       * 复权因子，按周刷。放在全量日线**之后**：
+       * 日线是当晚的主线任务，先把它拿到；因子晚几分钟无所谓，
+       * 而且真被限频了也不该连累日线。
+       *
+       * 失败不上抛：因子刷不到的后果是技术指标用旧因子，而触发价与涨跌停
+       * 走的是原始价，不受影响。让整个夜间 job 挂掉的代价大得多。
+       */
+      {
+        const last = getMeta(db, ADJ_FACTOR_META_KEY);
+        const lastMs = last === null ? NaN : Date.parse(`${last.slice(0, 10)}T00:00:00Z`);
+        const stale = !Number.isFinite(lastMs)
+          || (now.getTime() - lastMs) / 86_400_000 >= ADJ_FACTOR_MAX_AGE_DAYS;
+        if (stale) {
+          try {
+            const adj = await collectAdjustFactors(db, clients.sina, allCodes(db), { date });
+            stats.adjUpdated = adj.updated;
+            stats.adjNoRecord = adj.noAdjust.length;
+            stats.adjUnsupported = adj.unsupported.length;
+            stats.adjFailed = adj.failed.length;
+            // 只要不是全军覆没就记刷新时间：少数票失败已经各自记了缺口，
+            // 不该因此让整批在下一个夜里重打一遍 5,888 次请求
+            if (adj.updated > 0) setMeta(db, ADJ_FACTOR_META_KEY, date);
+          } catch (e) {
+            const msg = (e as Error).message;
+            console.error(`[night] 复权因子刷新失败：${msg}`);
+            recordGap(db, date, clients.sina.source, "adj_factor", `批量刷新抛错：${msg}`, true);
+          }
+        }
+      }
+
+      /**
+       * 周线 / 月线：每晚从复权日线重算。
+       *
+       * 每晚全量而不是增量：复权因子会**回头改**（一次除权重写该票全部历史的因子），
+       * 增量必然算错。而这是纯本地计算，不打任何源。
+       */
+      {
+        const p = buildPeriodBars(db, allCodes(db));
+        stats.periodBars = p.bars;
+      }
+
 
       // 日线刚更新完，紧接着刷新上市日/ST 观测。
       // 新股每天在增加，它们的序列还没触顶，今天推不出来明天也推不出来

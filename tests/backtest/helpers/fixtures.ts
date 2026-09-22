@@ -81,6 +81,20 @@ class FixtureView implements PointInTimeView {
     return upto.slice(Math.max(0, upto.length - n));
   }
 
+  /** 后复权：与 sqlite-view 同一口径，在原始价上乘因子，量不乘 */
+  adjBars(code: string, n: number): DailyBar[] {
+    return this.dailyBars(code, n).map((b) => ({
+      ...b,
+      o: b.o * b.adjFactor, h: b.h * b.adjFactor,
+      l: b.l * b.adjFactor, c: b.c * b.adjFactor,
+    }));
+  }
+
+  /** 回放夹具不造周月线：需要它的用例自己另建替身，免得这里凭空生出一段历史 */
+  periodBars(_code: string, _period: "W" | "M", _n: number): DailyBar[] {
+    return [];
+  }
+
   minuteBars(_code: string, _period: number, _n: number): MinuteBar[] {
     return [];
   }
