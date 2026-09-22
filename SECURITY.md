@@ -11,10 +11,10 @@ Please do **not** open a public issue. Use GitHub's private security advisory in
 
 ## 这个项目的攻击面 / Threat model
 
-PanTrader 是**本地优先**的：没有服务端、没有账号体系、不上传任何数据。
+候潮是**本地优先**的：没有服务端、没有账号体系、不上传任何数据。
 网页默认只监听 `127.0.0.1:3111`。所以值得关注的主要是这几类：
 
-PanTrader is **local-first**: no server, no accounts, nothing uploaded. The web UI listens on
+HouChao is **local-first**: no server, no accounts, nothing uploaded. The web UI listens on
 `127.0.0.1:3111` by default. The things worth reporting:
 
 - **本地数据库泄露路径** —— `~/PanTraderData/` 下有你的持仓与交易记录。

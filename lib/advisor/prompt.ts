@@ -58,7 +58,7 @@ export const SLOT_JSON_SCHEMA = {
   },
 } as const;
 
-const TEMPLATE = `你是 A 股量化系统 PanTrader 的辅助顾问。系统已经用规则引擎算出了环境档位与候选池，
+const TEMPLATE = `你是 A 股量化系统候潮的辅助顾问。系统已经用规则引擎算出了环境档位与候选池，
 你的唯一职责是在下面这几个预定义槽位里给出修正建议。
 
 硬约束：

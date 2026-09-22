@@ -296,7 +296,7 @@ const width = (s) => [...s].reduce((n, ch) => n + (/[\u1100-\u115F\u2E80-\uA4CF\
 const NAME_COLS = Math.max(...results.map((r) => width(r.name)));
 const pad = (s) => s + " ".repeat(NAME_COLS - width(s));
 
-console.log(`\n${C.bold}PanTrader 环境体检${C.off}　${C.dim}只读，不会改任何东西${C.off}\n`);
+console.log(`\n${C.bold}候潮 环境体检${C.off}　${C.dim}只读，不会改任何东西${C.off}\n`);
 for (const r of results) {
   console.log(`  ${icon[r.level]} ${pad(r.name)}  ${r.detail}`);
   if (r.fix) console.log(`      ${C.cyan}→ ${r.fix}${C.off}`);

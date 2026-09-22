@@ -1,4 +1,4 @@
-# PanTrader
+# HouChao · 候潮
 
 A-share market quant system · local-first · human-in-the-loop · self-calibrating closed loop
 

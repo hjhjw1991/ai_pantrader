@@ -20,7 +20,7 @@ const lockPath = path.join(getConfig().dataDir, "scheduler.pid");
 const lock = acquireLock(lockPath);
 
 if (!lock.acquired) {
-  console.log(`[PanTrader daemon] 已有采集进程在运行（pid ${lock.heldBy}），本进程退出`);
+  console.log(`[候潮 daemon] 已有采集进程在运行（pid ${lock.heldBy}），本进程退出`);
   process.exit(0);
 }
 
@@ -29,13 +29,13 @@ const r = startAutostart(process.env, {
   planPreopen: runPreopenPlan, signalWatch: runSignalWatch, weeklyReview: runWeeklyReview,
 });
 console.log(
-  `[PanTrader daemon] 平台=${currentPlatform()} pid=${process.pid} ` +
+  `[候潮 daemon] 平台=${currentPlatform()} pid=${process.pid} ` +
   `runner=${process.env.PANTRADER_RUNNER ?? "manual"} ${r.reason}`
 );
 if (!r.started) { releaseLock(lockPath); process.exit(1); }
 
 function shutdown(sig: string): void {
-  console.log(`\n[PanTrader daemon] 收到 ${sig}，停止采集`);
+  console.log(`\n[候潮 daemon] 收到 ${sig}，停止采集`);
   stopAutostart();
   releaseLock(lockPath);
   process.exit(0);

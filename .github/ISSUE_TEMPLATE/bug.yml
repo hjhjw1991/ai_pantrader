@@ -31,7 +31,7 @@ body:
         Node version and ABI, project version and commit, native module state, disk, and
         where the scheduled tasks point.
       placeholder: |
-        PanTrader 环境体检　只读，不会改任何东西
+        候潮 环境体检　只读，不会改任何东西
 
           ✓ Node 版本       24.11.1（ABI 137，engines >=22）
           ✓ 平台            darwin arm64　内存 48.0 GB

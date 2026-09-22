@@ -7,7 +7,7 @@ import { StatusRail } from "@/components/StatusRail";
 import { systemStatus } from "@/lib/ui/status";
 
 export const metadata: Metadata = {
-  title: "PanTrader",
+  title: "候潮",
   description: "A股本地量化作战台",
 };
 

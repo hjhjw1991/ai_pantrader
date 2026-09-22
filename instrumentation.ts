@@ -13,7 +13,7 @@
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.PANTRADER_NO_SCHEDULER === "1") {
-    console.log("[PanTrader] PANTRADER_NO_SCHEDULER=1，未启动采集");
+    console.log("[候潮] PANTRADER_NO_SCHEDULER=1，未启动采集");
     return;
   }
 
@@ -31,8 +31,8 @@ export async function register(): Promise<void> {
     stdio: "ignore",
     env: { ...process.env, PANTRADER_RUNNER: "instrumentation" },
   });
-  child.on("error", e => console.error(`[PanTrader] 采集守护进程启动失败：${e.message}`));
+  child.on("error", e => console.error(`[候潮] 采集守护进程启动失败：${e.message}`));
   // detach：网页进程退出后采集继续跑
   child.unref();
-  console.log(`[PanTrader] 采集守护进程已拉起（pid ${child.pid}），跨平台进程内调度`);
+  console.log(`[候潮] 采集守护进程已拉起（pid ${child.pid}），跨平台进程内调度`);
 }
