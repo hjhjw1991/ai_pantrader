@@ -213,6 +213,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm start` / `pnpm dev` | 启动网页（生产 / 开发） |
 | `pnpm run daemon` | 独立采集守护进程 |
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
+| `pnpm run parity [天数]` | v1↔v2 引擎对照：真实因子跑最近 N 个交易日，逐字段比信号卡。不一致即退出码非 0 |
 | `pnpm test` | 单元测试（**不打网络**） |
 | `pnpm test:watch` | 单元测试，watch 模式 |
 | `pnpm test:live` | 打真实接口的 smoke 测试 |

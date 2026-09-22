@@ -40,6 +40,7 @@
     "test:watch": "vitest",
     "test:live": "PANTRADER_LIVE=1 vitest run --config vitest.live.config.ts",
     "job": "tsx scripts/job.ts",
+    "parity": "tsx scripts/parity.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
     "seed-strategies": "tsx scripts/seed-strategies.ts",
     "install-launchd": "tsx scripts/install-launchd.ts",

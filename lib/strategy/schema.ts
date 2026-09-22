@@ -44,6 +44,12 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const 触发值 = z.union([z.number().finite(), z.boolean(), z.string()]);
 
 /** 账户规则的值形态很杂：止损可以是 -0.05 也可以是"逻辑破坏"，止盈是 ["0.08减半","0.15清"] */
+/** 一个槽位的选择：用哪份实现 + 给它什么参数。参数结构由各实现自己解释，这里不管 */
+const 槽位选择 = z.looseObject({
+  用: z.string().min(1, "槽位必须指名用哪份实现"),
+  参数: z.record(z.string(), z.unknown()).optional(),
+});
+
 const 账户规则值 = z.union([
   z.number().finite(), z.boolean(), z.string(),
   z.array(z.union([z.number().finite(), z.string()])),
@@ -51,6 +57,8 @@ const 账户规则值 = z.union([
 
 export const StrategyConfigSchema = z.looseObject({
   id: z.string().min(1),
+  // 空串比不写更糟：界面上会显示成一片空白，而"没配"至少能回落到 id
+  名称: z.string().min(1, "策略名写了就不能是空串（不想起名就整行删掉）").optional(),
   version: z.string().regex(SEMVER, "必须是语义化版本，形如 1.0.0"),
 
   择时: z.looseObject({
@@ -95,6 +103,21 @@ export const StrategyConfigSchema = z.looseObject({
   }),
 
   因子参数: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+
+  /**
+   * v2 槽位选择。整段可选 —— 不写就用 baseline 组合。
+   *
+   * 候选源那一项要求非空数组，理由与必查链不可为空同源：
+   * 空数组是一个"合法地把候选来源全关掉"的开关，配出来的策略每天零候选，
+   * 而它在影子盘里会表现为"从不亏钱"，然后凭一个从没开过仓的记录赢下排行榜。
+   */
+  槽位: z.looseObject({
+    择时器: 槽位选择.optional(),
+    主线识别器: 槽位选择.optional(),
+    候选源: z.array(槽位选择).min(1, "候选源不可为空数组（全关掉等于永远没有候选）").optional(),
+    评估器: 槽位选择.optional(),
+    离场器: 槽位选择.optional(),
+  }).optional(),
 });
 
 /* ------------------------------- 结果类型 ------------------------------- */

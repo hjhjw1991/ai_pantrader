@@ -24,7 +24,7 @@ const cand = (code: string, action: Candidate["action"] = "买入"): Candidate =
 });
 
 const card = (gear: any, cands: Candidate[]): SignalCard => ({
-  ts: "2026-08-05 10:00:00.000", phase: "盘中", strategyId: "t",
+  ts: "2026-08-05 10:00:00.000", phase: "盘中", strategyId: "t", strategyName: "t",
   env: { gear, targetPosition: 0.4, reasons: [], factors: [], lowConfidenceFactors: [] },
   candidates: cands, holdings: [], warnings: [], advisorInfluenced: false,
 });

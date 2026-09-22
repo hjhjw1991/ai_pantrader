@@ -21,7 +21,7 @@ function card(over: Partial<SignalCard> = {}): SignalCard {
   return {
     ts: "2026-08-04T09:15:00+08:00",
     phase: "盘前",
-    strategyId: "s1",
+    strategyId: "s1", strategyName: "s1",
     env: { gear: "中性", targetPosition: 0.4, reasons: [], factors: [], lowConfidenceFactors: [] },
     candidates: [c("300502", "买入")],
     holdings: [c("600519", "持有")],

@@ -59,7 +59,10 @@ export interface Candidate {
 export interface SignalCard {
   ts: string;
   phase: Phase;
+  /** 台账归因键，等于 StrategyConfig.id。**不要拿它做展示**，它不能改 */
   strategyId: string;
+  /** 展示名。配了 名称 就是它，没配则回落到 strategyId —— 永远不为空 */
+  strategyName: string;
   env: EnvAssessment;
   candidates: Candidate[];
   /** 持仓动作与新开仓分开，早上照着做不用再想 */
@@ -75,6 +78,15 @@ export interface SignalCard {
  */
 export interface StrategyConfig {
   id: string;
+  /**
+   * 显示名，给人看的。可不填，不填就用 id。
+   *
+   * 与 id 分开是必须的：id 是台账的归因键（prediction.strategy_id），
+   * 改了会让历史预测对不上一个存在的策略。于是 id 事实上不能改，
+   * 而界面上只能显示一个不敢改的技术标识 —— 人看不出自己现在跑的是哪一套。
+   * 显示名与它脱钩之后，名字随便改，归因键纹丝不动。
+   */
+  名称?: string;
   version: string;
   择时: {
     仓位档位: Record<EnvGear, number>;
@@ -123,6 +135,13 @@ export interface StrategyConfig {
   };
   /** 因子参数覆盖：因子名 -> 参数段 */
   因子参数?: Record<string, Record<string, unknown>>;
+  /**
+   * v2 引擎的槽位选择。整段可以不写 —— 不写就用 baseline 组合（行为等价于 v1 引擎）。
+   *
+   * 现存的策略文件一份都没有这一段，它们理应继续按原样工作：
+   * 引擎升级不该让用户手里的 YAML 突然跑不起来。
+   */
+  槽位?: import("@/lib/contracts/slots").SlotConfig;
 }
 
 export interface StrategyEngineInput {

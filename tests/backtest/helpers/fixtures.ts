@@ -170,7 +170,7 @@ export function makeCard(
   ts: string, candidates: Candidate[], holdings: Candidate[] = [], phase: Phase = "盘后"
 ): SignalCard {
   return {
-    ts, phase, strategyId: "test-strat", env: NEUTRAL_ENV,
+    ts, phase, strategyId: "test-strat", strategyName: "test-strat", env: NEUTRAL_ENV,
     candidates, holdings, warnings: [], advisorInfluenced: false,
   };
 }

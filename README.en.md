@@ -201,6 +201,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm start` / `pnpm dev` | Start the web UI (production / development) |
 | `pnpm run daemon` | Standalone collection daemon |
 | `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
+| `pnpm run parity [days]` | v1 vs v2 engine parity: real factors over the last N trading days, field-by-field card diff. Non-zero exit on any mismatch |
 | `pnpm test` | Unit tests (**no network**) |
 | `pnpm test:watch` | Unit tests, watch mode |
 | `pnpm test:live` | Smoke tests against the real endpoints |

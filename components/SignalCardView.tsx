@@ -207,7 +207,9 @@ export function CardMeta({
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6">
       <KV label="时段">{card.phase}</KV>
-      <KV label="策略">{card.strategyId}</KV>
+      <KV label="策略" hint={`归因键 ${card.strategyId} —— 台账按它分组，不随改名变化`}>
+        {card.strategyName}
+      </KV>
       <KV label="Advisor 改过">{card.advisorInfluenced ? "是" : "否"}</KV>
       <KV label="在市标的" hint={`${universe.unknownListDate} 只上市日未知`}>
         <Num v={universe.total} kind="int" />

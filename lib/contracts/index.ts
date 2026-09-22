@@ -7,6 +7,7 @@
 export * from "@/lib/contracts/pit";
 export * from "@/lib/contracts/factor";
 export * from "@/lib/contracts/strategy";
+export * from "@/lib/contracts/slots";
 export * from "@/lib/contracts/advisor";
 export * from "@/lib/contracts/execution";
 export * from "@/lib/contracts/backtest";

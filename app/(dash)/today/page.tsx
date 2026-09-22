@@ -81,7 +81,12 @@ export default function TodayPage() {
         >
           {cfg.available ? (
             <>
-              <KV label="策略 id">{cfg.config.id ?? "—"}</KV>
+              <KV label="策略名" hint="在 YAML 顶部写 名称: 你的叫法；随便改，不影响台账">
+                {cfg.config.名称 ?? cfg.config.id ?? "—"}
+              </KV>
+              <KV label="策略 id" hint="台账归因键，改了历史预测就对不上，别动">
+                {cfg.config.id ?? "—"}
+              </KV>
               <KV label="版本">{cfg.config.version ?? "—"}</KV>
               <KV label="总仓位上限">
                 <Num v={cfg.config.组合风控?.总仓位上限} kind="ratio" />

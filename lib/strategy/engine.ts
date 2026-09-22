@@ -14,7 +14,7 @@
  */
 import type {
   AccountId, AccountType, Action, Candidate, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
-  Phase, PointInTimeView, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput } from "@/lib/contracts";
+  Phase, PointInTimeView, PoolRow, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput } from "@/lib/contracts";
 import { accountRule, takeProfitRules, unparsedTakeProfit } from "@/lib/strategy/loader";
 // 视图层的工具，不是因子实现 —— 引擎只依赖 PointInTimeView 这个契约
 import { completeDate } from "@/lib/pit/complete-date";
@@ -80,7 +80,7 @@ const strArray = (v: unknown): string[] =>
  * 账户名与权限都是用户的配置 —— 早期版本把 "主板→A 账户 / 创业板→B 账户" 写死在这里，
  * 那等于我替用户决定了他有几个账户、各自开了什么权限。
  */
-function accountBoards(config: StrategyConfig): Array<{ account: AccountId; boards: string[] }> {
+export function accountBoards(config: StrategyConfig): Array<{ account: AccountId; boards: string[] }> {
   const held = (config as unknown as { 持仓?: Record<string, unknown> }).持仓;
   if (held === null || typeof held !== "object") return [];
   const out: Array<{ account: AccountId; boards: string[] }> = [];
@@ -96,7 +96,7 @@ function accountBoards(config: StrategyConfig): Array<{ account: AccountId; boar
  * 板块 → 账户。命中多个账户时取 YAML 里靠前的那个（顺序即优先级，用户可自行调整）。
  * 没有任何账户能交易这个板块就返回 null，该标的不进候选 —— 出一个买不进的信号更糟。
  */
-function accountForBoard(
+export function accountForBoard(
   perms: Array<{ account: AccountId; boards: string[] }>, board: string
 ): AccountId | null {
   for (const { account, boards } of perms) if (boards.includes(board)) return account;
@@ -111,7 +111,7 @@ function accountForBoard(
  * （lib/factors 的 必查链关键词），引擎不 import 它，所以这里只做包含关系的双向匹配。
  * 代价是偶尔会多收一只同名板块的票，好过整条主线漏掉。
  */
-function matchesMainline(sector: string | null, mainlines: string[]): string | null {
+export function matchesMainline(sector: string | null, mainlines: string[]): string | null {
   if (sector === null || sector.length === 0) return null;
   for (const m of mainlines) {
     if (m.length === 0) continue;
@@ -135,7 +135,7 @@ function matchesMainline(sector: string | null, mainlines: string[]): string | n
  *
  * 回放历史某天时它是恒等的（那天数据本来就完整），回测行为不变。
  */
-function resolveDate(view: PointInTimeView): string {
+export function resolveDate(view: PointInTimeView): string {
   const asOfDate = view.asOf.slice(0, 10);
   const from = new Date(`${asOfDate}T00:00:00Z`);
   from.setUTCDate(from.getUTCDate() - 30);
@@ -145,7 +145,7 @@ function resolveDate(view: PointInTimeView): string {
 }
 
 /** 去重且保序的告警收集器。顺序确定 = 同份输入两次结果哈希一致 */
-function makeWarnings() {
+export function makeWarnings() {
   const seen = new Set<string>();
   const list: string[] = [];
   return {
@@ -160,12 +160,12 @@ function makeWarnings() {
 
 /* ------------------------------- 因子求值 ------------------------------- */
 
-interface FactorRunner {
+export interface FactorRunner {
   /** 拿不到读数时返回 null（未注册 / 求值抛错），并已记好告警。调用方必须判 null */
   run(name: string, extra?: Record<string, unknown>): FactorResult<any> | null;
 }
 
-function makeRunner(
+export function makeRunner(
   registry: FactorRegistry, config: StrategyConfig, view: PointInTimeView,
   date: string, warn: (m: string) => void
 ): FactorRunner {
@@ -200,19 +200,39 @@ function makeRunner(
 
 /* ------------------------------- 环境评估 ------------------------------- */
 
-function assessEnv(
-  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void,
-  /** 日历认定的当前交易日。横截面因子实际评估的日期可能比它早，见下方说明 */
-  calendarDate: string
-): { env: EnvAssessment; mainlines: string[] } {
-  const facts = new Map<string, FactorResult<any>>();
-  const need = (name: string, extra?: Record<string, unknown>): FactorResult<any> | null => {
-    const r = runner.run(name, extra);
-    if (r !== null) facts.set(name, r);
-    return r;
-  };
+/**
+ * 把因子读数收进一张按名字索引的表。env.factors 最终就是它排序后的产物，
+ * 所以谁往里塞、塞的顺序如何，直接决定卡片上那串因子。
+ */
+export type FactsMap = Map<string, FactorResult<any>>;
 
-  for (const name of ENV_FACTOR_NAMES) need(name);
+function needInto(
+  facts: FactsMap, runner: FactorRunner, name: string, extra?: Record<string, unknown>
+): FactorResult<any> | null {
+  const r = runner.run(name, extra);
+  if (r !== null) facts.set(name, r);
+  return r;
+}
+
+/** 环境档位要用的那批因子。单独抽出来是为了让 v2 的择时器槽能复用同一套读数 */
+export function collectEnvFacts(runner: FactorRunner): FactsMap {
+  const facts: FactsMap = new Map();
+  for (const name of ENV_FACTOR_NAMES) needInto(facts, runner, name);
+  return facts;
+}
+
+/**
+ * 主线识别。从 assessEnv 里切出来，因为 v2 把「择时」与「主线识别」拆成了两个槽 ——
+ * 想换一种识别主线的算法，不该被迫连档位判定一起换掉。
+ *
+ * facts 是传进来的：识别过程中求值的 主线识别 / 龙头温度计 要落进同一张表，
+ * 否则它们就不会出现在 env.factors 上，卡片上会少两条归因。
+ */
+export function detectMainlines(
+  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void, facts: FactsMap
+): string[] {
+  const need = (name: string, extra?: Record<string, unknown>) =>
+    needInto(facts, runner, name, extra);
 
   const 主线 = need("主线识别", {
     板块涨幅榜TopN: config.选股.主线识别.板块涨幅榜TopN,
@@ -236,6 +256,20 @@ function assessEnv(
     warn("未识别到主线板块 —— 候选池只会剩下必查链兜底能捞到的票，注意是不是板块榜快照缺了");
   }
   if (mainlines.length > 0) need("龙头温度计", { 板块: mainlines[0] });
+  return mainlines;
+}
+
+/**
+ * 档位判定。输入是**已经算好的**环境因子读数与主线名单，
+ * 所以换一个主线识别算法不会连带影响这里，反过来也一样。
+ */
+export function assessGear(
+  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void,
+  /** 日历认定的当前交易日。横截面因子实际评估的日期可能比它早，见下方说明 */
+  calendarDate: string, facts: FactsMap, mainlines: string[]
+): EnvAssessment {
+  const need = (name: string, extra?: Record<string, unknown>) =>
+    needInto(facts, runner, name, extra);
 
   /* 防守触发 */
   const fired: string[] = [];
@@ -341,18 +375,30 @@ function assessEnv(
     .sort();
 
   return {
-    env: {
-      gear, targetPosition, reasons,
-      factors: [...facts.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
-      lowConfidenceFactors,
-    },
-    mainlines,
+    gear, targetPosition, reasons,
+    factors: [...facts.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+    lowConfidenceFactors,
   };
+}
+
+/**
+ * v1 的环境评估：环境因子 → 主线 → 档位，顺序与拆分前逐字一致。
+ *
+ * 求值顺序必须保持，因为 warn 是按发生顺序累积的，而 warnings 的顺序
+ * 参与结果哈希（同份输入两次跑出来要字节相同）。
+ */
+function assessEnv(
+  config: StrategyConfig, runner: FactorRunner, warn: (m: string) => void,
+  calendarDate: string
+): { env: EnvAssessment; mainlines: string[] } {
+  const facts = collectEnvFacts(runner);
+  const mainlines = detectMainlines(config, runner, warn, facts);
+  return { env: assessGear(config, runner, warn, calendarDate, facts, mainlines), mainlines };
 }
 
 /* -------------------------------- 候选池 -------------------------------- */
 
-interface RawCandidate {
+export interface RawCandidate {
   code: string;
   name: string;
   account: AccountType;
@@ -369,14 +415,14 @@ interface RawCandidate {
 /** 进池的理由。写进 thesis，也让人在卡片上看得出这只票是怎么被捞出来的 */
 type PoolSource = "涨停池" | "主线领涨" | "量价";
 
-interface PoolRow {
-  code: string;
-  sector: string | null;
-  /** 连板数与封单额只有涨停池那一路有；另两路为 0，排序时自然靠后 */
-  lbc: number;
-  sealAmt: number;
-  source: PoolSource;
-}
+/**
+ * 候选池的一行。直接用契约里的定义，不再本地复制一份 ——
+ * v2 的候选源槽产出的也是它，两边各定义一份必然分岔。
+ *
+ * 注意 source 是开放的 string 而不是窄联合：新槽会带来新的来源名，
+ * 窄联合会让"加一个候选源"变成要改契约类型的事。
+ */
+export type { PoolRow };
 
 const 量价默认 = { 均量窗口: 5, 放量倍数: 1.5, 新高窗口: 20, 多头排列: true };
 
@@ -411,7 +457,7 @@ const 买点默认 = { 相对昨收: -0.01, 不高于MA5: false };
  * 用原始收盘价而非复权价：与触发价同源。窗口只有几十天，除权概率低，
  * 混用的误差远小于"复权因子本身缺失"（spec R1）带来的误差。
  */
-function passesVolumePrice(
+export function passesVolumePrice(
   view: PointInTimeView, code: string, date: string,
   p: { 均量窗口: number; 放量倍数: number; 新高窗口: number; 多头排列: boolean }
 ): boolean {
@@ -454,7 +500,7 @@ function passesVolumePrice(
  * 全市场 5,888 只降到几百只。反过来写的话，光这一路就要给回测每天加约 0.3 秒，
  * 相对现在 0.38 秒/交易日 是近乎翻倍。
  */
-function candidatePool(
+export function candidatePool(
   input: StrategyEngineInput, mainlines: string[], date: string, warn: (m: string) => void
 ): PoolRow[] {
   const { view, config } = input;
@@ -539,17 +585,37 @@ function buildCandidates(
     const mainline = matchesMainline(row.sector, mainlines);
     if (mainline === null) continue;                    // 不在主线上的不追
 
+    const c = evaluateRow(input, runner, row, mainline, perms, 阈值, warn);
+    if (c !== null) out.push(c);
+  }
+
+  return out.sort((a, b) => b.score - a.score || (a.code < b.code ? -1 : 1));
+}
+
+/**
+ * 一行候选 → 过筛、定价、讲逻辑、打分。返回 null = 被否决（原因已写进 warnings）。
+ *
+ * 从 buildCandidates 的循环体里原样切出来，因为 v2 把「评估」做成了可替换的槽：
+ * 想换一种定价或打分方式，不该被迫连候选源一起换掉。
+ */
+export function evaluateRow(
+  input: StrategyEngineInput, runner: FactorRunner, row: PoolRow, mainline: string,
+  perms: Array<{ account: AccountId; boards: string[] }>,
+  阈值: Record<string, number>, warn: (m: string) => void
+): RawCandidate | null {
+  const { view, config } = input;
+  {
     const sec = view.security(row.code);
     if (sec === null) {
       warn(`标的元数据缺失：${row.code} 查不到板与上市信息，跳过（不猜板别就不会猜错涨跌幅限制）`);
-      continue;
+      return null;
     }
     const account = accountForBoard(perms, sec.board);
     // 没有账户开通该板块权限：不出信号（出了也买不进）
-    if (account === null) continue;
+    if (account === null) return null;
 
     const filt = runner.run("过滤器", { ...阈值, code: row.code, 账户: account });
-    if (filt === null) continue;
+    if (filt === null) return null;
     const rejected = strArray(filt.inputs?.["否决"]);
     const unevaluated = strArray(filt.inputs?.["未判定"]);
     if (unevaluated.length > 0) {
@@ -557,13 +623,13 @@ function buildCandidates(
     }
     if (rejected.length > 0) {
       warn(`${row.code} 被七道筛否决：${rejected.join(" / ")}，不进候选池`);
-      continue;
+      return null;
     }
 
     const bars = view.dailyBars(row.code, 20);
     if (bars.length === 0) {
       warn(`${row.code} 没有日线，定不出触发价，跳过`);
-      continue;
+      return null;
     }
     // 用原始收盘价而不是复权价：触发价是要挂进券商的真实价格。
     // 5 日窗口内除权概率极低，MA5 与收盘价混用的误差可以忽略。
@@ -578,7 +644,7 @@ function buildCandidates(
     const triggerPx = round2(bp.不高于MA5 ? Math.min(base, ma5) : base);
     if (!(triggerPx > 0)) {
       warn(`${row.code} 算不出正的触发价，跳过`);
-      continue;
+      return null;
     }
 
     const 止损 = asNum(accountRule(config, account)["止损"]);
@@ -598,7 +664,7 @@ function buildCandidates(
     }
     for (const name of STOCK_FACTOR_NAMES) {
       const r = runner.run(name, { code: row.code });
-      if (r === null) continue;
+      if (r === null) return null;
       stockFacts.push(r);
       // confidence 0 的因子只是"没数据"，不能当成论据
       if (r.confidence > 0 && r.label !== undefined && r.label.length > 0 && asNum(r.value) !== null) {
@@ -608,7 +674,7 @@ function buildCandidates(
     // 只有"主线xx"一句不算逻辑：那是板块判断，不是买这只票的理由
     if (parts.length <= 1) {
       warn(`${row.code} 讲不出买入逻辑（因子读数不足），不进候选池`);
-      continue;
+      return null;
     }
 
     const dir = asNum(stockFacts.find(f => f.name === "均线方向")?.value) ?? 0;
@@ -622,7 +688,7 @@ function buildCandidates(
       0.15 * (netAmt > 0 ? 1 : 0)
     );
 
-    out.push({
+    return {
       code: row.code, name: sec.name, account,
       sector: row.sector ?? mainline, mainline,
       triggerPx, stopPx,
@@ -630,10 +696,8 @@ function buildCandidates(
       passedFilters: strArray(filt.inputs?.["通过"]),
       factors: stockFacts,
       score,
-    });
+    };
   }
-
-  return out.sort((a, b) => b.score - a.score || (a.code < b.code ? -1 : 1));
 }
 
 /* ------------------------------- 组合风控 ------------------------------- */
@@ -705,13 +769,26 @@ export function applyPortfolioCaps(
 function buildHoldings(
   input: StrategyEngineInput, gear: EnvGear, date: string, warn: (m: string) => void
 ): Candidate[] {
-  const { view, config, phase, positions } = input;
-  const out: Candidate[] = [];
-
-  const sorted = [...positions].sort((a, b) =>
+  const sorted = [...input.positions].sort((a, b) =>
     (a.account < b.account ? -1 : a.account > b.account ? 1 : 0) || (a.code < b.code ? -1 : 1));
+  return sorted.map(p => decideHolding(input, p, gear, warn));
+}
 
-  for (const p of sorted) {
+/**
+ * 单笔持仓的动作判定。从 buildHoldings 的循环体里原样切出来 ——
+ * v2 把「离场」做成可替换的槽：不同账户的离场纪律本来就可以完全不同
+ * （吃波动的按价格机械止损、扛逻辑的按逻辑破坏），换其中一套不该牵动另一套。
+ *
+ * 判定顺序即优先级，不可重排：
+ * 无价格 → 防守清仓 → 灾难位 → 破止损 → 止盈 → 非价格止损复核 → 持有。
+ */
+export function decideHolding(
+  input: StrategyEngineInput,
+  p: { account: AccountId; code: string; cost: number; qty: number; stopPx: number | null },
+  gear: EnvGear, warn: (m: string) => void
+): Candidate {
+  const { view, config, phase } = input;
+  {
     const rule = accountRule(config, p.account);
     const 止损 = asNum(rule["止损"]);
     const 灾难位 = asNum(rule["灾难位"]);
@@ -735,76 +812,68 @@ function buildHoldings(
 
     if (px === null) {
       warn(`持仓 ${p.code} 拿不到价格（停牌或当日未采集），动作无法判定`);
-      out.push({ ...base, action: "观察", size: 1, thesis: "无价格数据（停牌或未采集），本轮不判定，人工确认" });
-      continue;
+      return { ...base, action: "观察", size: 1, thesis: "无价格数据（停牌或未采集），本轮不判定，人工确认" };
     }
 
     const pnl = p.cost === 0 ? 0 : px / p.cost - 1;
 
     if (gear === "防守") {
-      out.push({
+      return {
         ...base, action: "清仓", size: 0,
         thesis: `防守档目标仓位 0，清空持仓（现价 ${px}，浮动 ${pct(pnl)}）`,
-      });
-      continue;
+      };
     }
 
     if (灾难位 !== null && pnl <= 灾难位) {
       // 灾难位存在的唯一理由就是越过"收盘确认"：跌到这儿再等收盘已经不是纪律问题了
-      out.push({
+      return {
         ...base, action: "清仓", size: 0,
         thesis: `跌破灾难位 ${pct(灾难位)}（当前 ${pct(pnl)}），不等收盘确认，直接走`,
-      });
-      continue;
+      };
     }
 
     const brokeStop = (stopPx !== null && px <= stopPx) || (止损 !== null && pnl <= 止损);
     if (brokeStop) {
       if (止损确认 === "收盘" && phase === "盘中") {
         // 政策底/外围硬驱动的反弹日，盘中单次冲高回落多数是洗盘不是见光死（2026-07-21 实盘验证）
-        out.push({
+        return {
           ...base, action: "观察", size: 1,
           thesis: `已破止损${stopPx === null ? "" : ` ${stopPx}`}（现价 ${px}，浮动 ${pct(pnl)}），按"止损确认=收盘"等收盘再决定`,
-        });
+        };
       } else {
-        out.push({
+        return {
           ...base, action: "清仓", size: 0,
           thesis: `破止损${stopPx === null ? "" : ` ${stopPx}`}（现价 ${px}，浮动 ${pct(pnl)}），按纪律出`,
-        });
+        };
       }
-      continue;
     }
 
     // 止盈从高到低找第一个命中的档
     const hit = [...tp].reverse().find(r => pnl >= r.pnl);
     if (hit !== undefined) {
-      out.push({
+      return {
         ...base,
         action: hit.action,
         // 持仓动作的 size 是**对该笔持仓的操作比例**（0=清空，0.5=减半，1=不动），
         // 与新开仓 Candidate.size（占总资产比例）语义不同 —— 契约里没区分，见最终报告
         size: hit.action === "清仓" ? 0 : 0.5,
         thesis: `浮盈 ${pct(pnl)} 触发止盈档 ${hit.raw}（现价 ${px}）`,
-      });
-      continue;
+      };
     }
 
     if (止损 === null && pnl < 0) {
       const 止损说明 = typeof rule["止损"] === "string" ? rule["止损"] as string : "未配置";
-      out.push({
+      return {
         ...base, action: "观察", size: 1,
         thesis: `浮亏 ${pct(pnl)}，该账户止损条件是"${止损说明}"（非价格），需人工复核逻辑是否已破`,
-      });
-      continue;
+      };
     }
 
-    out.push({
+    return {
       ...base, action: "持有", size: 1,
       thesis: `未触发任何纪律线（现价 ${px}，浮动 ${pct(pnl)}）`,
-    });
+    };
   }
-
-  return out;
 }
 
 /* --------------------------------- 引擎 --------------------------------- */
@@ -865,6 +934,7 @@ export function createStrategyEngine(deps: EngineDeps): StrategyEngine {
       ts: view.asOf,
       phase: phase as Phase,
       strategyId: config.id,
+      strategyName: config.名称 ?? config.id,
       env,
       candidates,
       holdings,
