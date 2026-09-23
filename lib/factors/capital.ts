@@ -10,6 +10,7 @@
  */
 import type { FactorSpec } from "@/lib/contracts";
 import { mean, pnum, requireCode, round6, evalDate } from "@/lib/factors/util";
+import { percentileRank } from "@/lib/factors/sentiment";
 
 const V = "1.0.0";
 
@@ -28,6 +29,30 @@ function changeRate(first: number | null, last: number | null): number | null {
   return (last - first) / first;
 }
 
+/** 每个位置上"窗口 w 的变化率"序列（前 w 个位置没有） */
+function rollingChanges(xs: Array<number | null>, w: number): number[] {
+  const out: number[] = [];
+  for (let i = w; i < xs.length; i++) {
+    const c = changeRate(xs[i - w], xs[i]);
+    if (c !== null) out.push(c);
+  }
+  return out;
+}
+
+/**
+ * 分位口径：历史样本够长时，标签看当前读数在自身历史里的分位；不够长就回落固定阈值。
+ *
+ * 为什么不直接用固定阈值：两融余额 5 日 +1% 在 2024-10 是平淡，在 2024-01 是罕见的加杠杆。
+ * 固定线今年调好了，明年市场换了量级就错。固定阈值只留作样本不足时的兜底，
+ * 并且在 inputs 里写明这次用的是哪种口径 —— 两种口径的标签不能混着读。
+ */
+function pctMode(
+  params: Record<string, unknown>, series: number[], v: number
+): { 口径: "分位" | "固定阈值"; 分位: number | null } {
+  if (series.length < pnum(params, "最少样本", 60)) return { 口径: "固定阈值", 分位: null };
+  return { 口径: "分位", 分位: percentileRank(series, v) };
+}
+
 /* ------------------------------- 两融情绪 ------------------------------- */
 
 /**
@@ -41,11 +66,15 @@ function changeRate(first: number | null, last: number | null): number | null {
  */
 const 两融情绪: FactorSpec<number> = {
   name: "两融情绪", version: V, group: "env",
-  defaults: { 窗口: 5, 加杠杆阈值: 0.01, 去杠杆阈值: -0.01, 最大滞后天数: 10 },
+  defaults: {
+    窗口: 5, 加杠杆阈值: 0.01, 去杠杆阈值: -0.01, 最大滞后天数: 10,
+    分位窗口: 250, 最少样本: 60, 高分位: 0.8, 低分位: 0.2,
+  },
   fn: ctx => {
     const date = evalDate(ctx.view, ctx.params);
     const w = Math.max(1, Math.floor(pnum(ctx.params, "窗口", 5)));
-    const rows = ctx.view.marginMarket(w + 1);
+    const hist = ctx.view.marginMarket(w + 1 + Math.max(0, Math.floor(pnum(ctx.params, "分位窗口", 250))));
+    const rows = hist.slice(-(w + 1));
     if (rows.length < 2) {
       return { name: "两融情绪", version: V, value: 0, label: "无数据", provenance: "real",
         confidence: 0, inputs: { 日期: date, 样本: rows.length } };
@@ -66,10 +95,14 @@ const 两融情绪: FactorSpec<number> = {
       return { name: "两融情绪", version: V, value: 0, label: "无数据", provenance: "real",
         confidence: 0, inputs };
     }
+    const m = pctMode(ctx.params, rollingChanges(hist.map(r => r.rzye), w), chg);
     const up = pnum(ctx.params, "加杠杆阈值", 0.01), dn = pnum(ctx.params, "去杠杆阈值", -0.01);
-    const label = chg >= up ? "加杠杆" : chg <= dn ? "去杠杆" : "平稳";
+    const hi = pnum(ctx.params, "高分位", 0.8), lo = pnum(ctx.params, "低分位", 0.2);
+    const label = m.分位 !== null
+      ? (m.分位 >= hi ? "加杠杆" : m.分位 <= lo ? "去杠杆" : "平稳")
+      : (chg >= up ? "加杠杆" : chg <= dn ? "去杠杆" : "平稳");
     return { name: "两融情绪", version: V, value: round6(chg), label, provenance: "real",
-      confidence: 1, inputs };
+      confidence: 1, inputs: { ...inputs, ...m } };
   },
 };
 
@@ -85,7 +118,10 @@ const 两融情绪: FactorSpec<number> = {
  */
 const 个股融资: FactorSpec<number> = {
   name: "个股融资", version: V, group: "fund",
-  defaults: { 窗口: 5, 涌入阈值: 0.1, 撤离阈值: -0.1, 拥挤阈值: 0.1 },
+  defaults: {
+    窗口: 5, 涌入阈值: 0.1, 撤离阈值: -0.1, 拥挤阈值: 0.1,
+    分位窗口: 250, 最少样本: 60, 高分位: 0.8, 低分位: 0.2,
+  },
   fn: ctx => {
     const code = requireCode(ctx.params, "个股融资");
     const date = evalDate(ctx.view, ctx.params);
@@ -96,7 +132,8 @@ const 个股融资: FactorSpec<number> = {
         confidence: 0, inputs: { 代码: code, 日期: date } };
     }
     const latest = market[0].date;
-    const rows = ctx.view.marginStock(code, w + 1);
+    const hist = ctx.view.marginStock(code, w + 1 + Math.max(0, Math.floor(pnum(ctx.params, "分位窗口", 250))));
+    const rows = hist.slice(-(w + 1));
     if (rows.length === 0 || rows[rows.length - 1].date < latest) {
       return { name: "个股融资", version: V, value: 0, label: "非两融标的", provenance: "real",
         confidence: 1, inputs: { 代码: code, 日期: date, 汇总最新日: latest,
@@ -106,13 +143,18 @@ const 个股融资: FactorSpec<number> = {
     const crowded = last.rzyezb !== null && last.rzyezb >= pnum(ctx.params, "拥挤阈值", 0.1);
     const chg = rows.length >= 2 ? changeRate(rows[0].rzye, last.rzye) : null;
     const up = pnum(ctx.params, "涌入阈值", 0.1), dn = pnum(ctx.params, "撤离阈值", -0.1);
-    const base = chg === null ? "样本不足" : chg >= up ? "融资涌入" : chg <= dn ? "融资撤离" : "平稳";
+    const hi = pnum(ctx.params, "高分位", 0.8), lo = pnum(ctx.params, "低分位", 0.2);
+    // 拥挤度仍是绝对线：它说的是"杠杆盘占了流通盘多少"，与这只票自己的历史无关
+    const m = chg === null ? { 口径: "固定阈值" as const, 分位: null } : pctMode(ctx.params, rollingChanges(hist.map(r => r.rzye), w), chg);
+    const base = chg === null ? "样本不足"
+      : m.分位 !== null ? (m.分位 >= hi ? "融资涌入" : m.分位 <= lo ? "融资撤离" : "平稳")
+      : chg >= up ? "融资涌入" : chg <= dn ? "融资撤离" : "平稳";
     return {
       name: "个股融资", version: V, value: chg === null ? 0 : round6(chg),
       label: crowded ? `${base}·拥挤` : base,
       provenance: "real", confidence: chg === null ? 0 : 1,
       inputs: { 代码: code, 日期: date, 最新日期: last.date, 融资余额: last.rzye,
-        占流通: last.rzyezb, 拥挤: crowded, 样本: rows.length },
+        占流通: last.rzyezb, 拥挤: crowded, 样本: rows.length, ...m },
     };
   },
 };
@@ -130,11 +172,17 @@ const 个股融资: FactorSpec<number> = {
  */
 const 北向活跃度: FactorSpec<number> = {
   name: "北向活跃度", version: V, group: "env",
-  defaults: { 均值窗口: 20, 最少样本: 5, 放量倍数: 1.3, 缩量倍数: 0.7 },
+  defaults: {
+    均值窗口: 20, 最少样本: 5, 放量倍数: 1.3, 缩量倍数: 0.7,
+    分位窗口: 250, 分位最少样本: 60, 高分位: 0.8, 低分位: 0.2,
+  },
   fn: ctx => {
     const date = evalDate(ctx.view, ctx.params);
     const w = Math.max(1, Math.floor(pnum(ctx.params, "均值窗口", 20)));
-    const rows = ctx.view.mutualDeal(w + 1);
+    const all = ctx.view.mutualDeal(w + 1 + Math.max(0, Math.floor(pnum(ctx.params, "分位窗口", 250))));
+    const allNorth = all.filter(r => r.mutualType === "005" && r.dealAmt !== null);
+    const lastDates = new Set([...new Set(all.map(r => r.date))].slice(-(w + 1)));
+    const rows = all.filter(r => lastDates.has(r.date));
     const north = rows.filter(r => r.mutualType === "005" && r.dealAmt !== null);
     const south = rows.filter(r => r.mutualType === "006");
     const lastSouth = south.length > 0 ? south[south.length - 1] : null;
@@ -154,10 +202,21 @@ const 北向活跃度: FactorSpec<number> = {
         confidence: 0, inputs };
     }
     const ratio = (lastNorth.dealAmt as number) / prior;
-    const label = ratio >= pnum(ctx.params, "放量倍数", 1.3) ? "北向放量"
-      : ratio <= pnum(ctx.params, "缩量倍数", 0.7) ? "北向缩量" : "平常";
+    // 每一天"当日 / 前 w 日均值"的历史序列，用来给今天的倍数排分位
+    const amts = allNorth.map(r => r.dealAmt as number);
+    const series: number[] = [];
+    for (let i = w; i < amts.length; i++) {
+      const m0 = mean(amts.slice(i - w, i));
+      if (m0 > 0) series.push(amts[i] / m0);
+    }
+    const m = pctMode({ ...ctx.params, 最少样本: pnum(ctx.params, "分位最少样本", 60) }, series, ratio);
+    const hi = pnum(ctx.params, "高分位", 0.8), lo = pnum(ctx.params, "低分位", 0.2);
+    const label = m.分位 !== null
+      ? (m.分位 >= hi ? "北向放量" : m.分位 <= lo ? "北向缩量" : "平常")
+      : (ratio >= pnum(ctx.params, "放量倍数", 1.3) ? "北向放量"
+        : ratio <= pnum(ctx.params, "缩量倍数", 0.7) ? "北向缩量" : "平常");
     return { name: "北向活跃度", version: V, value: round6(ratio), label, provenance: "real",
-      confidence: 1, inputs };
+      confidence: 1, inputs: { ...inputs, ...m } };
   },
 };
 

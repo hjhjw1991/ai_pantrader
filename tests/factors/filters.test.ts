@@ -13,6 +13,8 @@ function viewFor(opts: {
   closes: number[]; board?: "主板" | "创业板" | "科创板" | "北交所";
   turnover?: number; amplitude?: number; noQuote?: boolean;
   lastBar?: Partial<DailyBar>; code?: string;
+  /** 被测票的 PE；给了就造一份 12 只同行（PE 10..120）的估值横截面 */
+  pe?: number;
 }) {
   const code = opts.code ?? "600000";
   const dates = ds.slice(ds.length - opts.closes.length);
@@ -25,6 +27,17 @@ function viewFor(opts: {
     quotes: opts.noQuote ? {} : {
       [code]: quote(code, { turnover: opts.turnover ?? 5, amplitude: opts.amplitude ?? 4 }),
     },
+    ...(opts.pe === undefined ? {} : {
+      valuationCs: {
+        date: dates[dates.length - 1],
+        rows: [
+          { code, pe: opts.pe, pb: null, mktcap: null },
+          ...Array.from({ length: 12 }, (_, i) => ({ code: `3000${String(i).padStart(2, "0")}`, pe: 10 + i * 10, pb: null, mktcap: null })),
+        ],
+      },
+      industries1: [code, ...Array.from({ length: 12 }, (_, i) => `3000${String(i).padStart(2, "0")}`)]
+        .map(c => ({ code: c, indexCode: "801080", indexName: "半导体" })),
+    }),
   });
 }
 
@@ -107,16 +120,65 @@ describe("过滤器 2 换手·振幅", () => {
 });
 
 describe("过滤器 3/4 缺数据源 —— 不许假装筛过了", () => {
-  it("估值基本面 与 催化真伪 永远是未判定，并出现在 UNSUPPORTED_FILTERS 里", () => {
+  it("催化真伪永远是未判定，并出现在 UNSUPPORTED_FILTERS 里", () => {
     const rep = runFilters(viewFor({ closes: calm }), "600000", "卫星");
-    for (const name of ["估值基本面", "催化真伪"]) {
-      const o = rep.outcomes.find(o => o.name === name)!;
-      expect(o.evaluated).toBe(false);
-      expect(o.reason).toMatch(/未采集|无数据源/);
-      expect(rep.unevaluated).toContain(name);
-    }
-    expect(UNSUPPORTED_FILTERS.map(u => u.name)).toEqual(
-      expect.arrayContaining(["估值基本面", "催化真伪"]));
+    const o = rep.outcomes.find(o => o.name === "催化真伪")!;
+    expect(o.evaluated).toBe(false);
+    expect(o.reason).toMatch(/未采集|无数据源/);
+    expect(rep.unevaluated).toContain("催化真伪");
+    expect(UNSUPPORTED_FILTERS.map(u => u.name)).toEqual(["催化真伪"]);
+  });
+
+  it("估值基本面没有估值快照时是未判定（partial），而不是通过", () => {
+    const rep = runFilters(viewFor({ closes: calm }), "600000", "卫星");
+    const o = rep.outcomes.find(o => o.name === "估值基本面")!;
+    expect(o.evaluated).toBe(false);
+    expect(o.partial).toBe(true);
+    expect(o.reason).toMatch(/无估值数据/);
+    expect(rep.unevaluated).toContain("估值基本面");
+  });
+});
+
+describe("过滤器 3 估值基本面（行业内 PE 分位，业绩半边缺）", () => {
+  it("行业内最贵的 5% → 否决，理由里写出分位与同行倍数", () => {
+    const rep = runFilters(viewFor({ closes: calm, pe: 500 }), "600000", "卫星");
+    const o = rep.outcomes.find(o => o.name === "估值基本面")!;
+    expect(o.pass).toBe(false);
+    expect(o.evaluated).toBe(true);
+    expect(o.partial).toBe(true);
+    expect(o.reason).toMatch(/半导体内第 100 百分位/);
+    expect(o.reason).toMatch(/同行中位的 7\.7 倍/);
+    expect(o.reason).toMatch(/且 ≥ 2 倍，否决/);
+    expect(rep.passedAll).toBe(false);
+  });
+
+  it("行业中游 → 通过（仍标 partial：业绩部分没判）", () => {
+    const o = runFilters(viewFor({ closes: calm, pe: 60 }), "600000", "卫星").outcomes.find(o => o.name === "估值基本面")!;
+    expect(o.pass).toBe(true);
+    expect(o.partial).toBe(true);
+    expect(o.reason).toMatch(/业绩部分未判定/);
+  });
+
+  it("亏损默认不否决；亏损即否决 = true 时否决", () => {
+    const loose = runFilters(viewFor({ closes: calm, pe: -20 }), "600000", "卫星").outcomes.find(o => o.name === "估值基本面")!;
+    expect(loose.pass).toBe(true);
+    expect(loose.reason).toMatch(/亏损/);
+    const strict = runFilters(viewFor({ closes: calm, pe: -20 }), "600000", "卫星", { 亏损即否决: true })
+      .outcomes.find(o => o.name === "估值基本面")!;
+    expect(strict.pass).toBe(false);
+  });
+
+  it("分位高但只比同行贵一点（< 2 倍）→ 不否决：那是龙头溢价，不是畸高（工行在银行业排 0.95 分位）", () => {
+    // 同行 PE 10..120，中位 65；PE 125 排第一，但只是中位的 1.9 倍
+    const o = runFilters(viewFor({ closes: calm, pe: 125 }), "600000", "卫星").outcomes.find(o => o.name === "估值基本面")!;
+    expect(o.reason).toMatch(/第 100 百分位/);
+    expect(o.pass).toBe(true);
+  });
+
+  it("估值否决分位 = 1.01 等于关掉", () => {
+    const o = runFilters(viewFor({ closes: calm, pe: 500 }), "600000", "卫星", { 估值否决分位: 1.01 })
+      .outcomes.find(o => o.name === "估值基本面")!;
+    expect(o.pass).toBe(true);
   });
 
   it("未判定不计入 passedAll 的通过项", () => {

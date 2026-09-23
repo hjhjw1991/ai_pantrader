@@ -9,14 +9,16 @@ export { createV2Engine, type V2Deps, type V2Input } from "@/lib/strategy/v2/eng
 export { createSlotRegistry } from "@/lib/strategy/v2/registry";
 export { BASELINE_SLOTS, BASELINE_CHOICE } from "@/lib/strategy/v2/slots/baseline";
 export { 评估器_可配权重打分, 默认权重 } from "@/lib/strategy/v2/slots/weighted-score";
+export { 评估器_结构位定价 } from "@/lib/strategy/v2/slots/structure-pricing";
 
 import { createSlotRegistry } from "@/lib/strategy/v2/registry";
 import { BASELINE_SLOTS } from "@/lib/strategy/v2/slots/baseline";
 import { 评估器_可配权重打分 } from "@/lib/strategy/v2/slots/weighted-score";
+import { 评估器_结构位定价 } from "@/lib/strategy/v2/slots/structure-pricing";
 
 /**
  * 默认槽位注册表：模块加载时构建一次。
  * 要往里加槽的调用方应当自己 createSlotRegistry()，别往共享实例上挂 ——
  * 否则回测与实盘会看到不同的槽集合，而这正是"结果无法归因"的经典起点。
  */
-export const defaultSlotRegistry = createSlotRegistry([...BASELINE_SLOTS, 评估器_可配权重打分]);
+export const defaultSlotRegistry = createSlotRegistry([...BASELINE_SLOTS, 评估器_可配权重打分, 评估器_结构位定价]);

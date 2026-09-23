@@ -37,6 +37,10 @@ export interface ViewFixture {
   marginStock?: Record<string, Array<{ date: string; rzye: number | null; rzmre: number | null; rzjme: number | null; rzyezb: number | null }>>;
   mutualDeal?: Array<{ date: string; mutualType: string; dealAmt: number | null; netAmt: number | null }>;
   mutualTop10?: Record<string, Array<{ date: string; mutualType: string; rank: number | null; dealAmt: number | null; mutualRatio: number | null }>>;
+  /** 估值横截面（某一快照日的全部行） */
+  valuationCs?: { date: string; rows: Array<{ code: string; pe: number | null; pb: number | null; mktcap: number | null }> };
+  /** 申万一级归属横截面 */
+  industries1?: Array<{ code: string; indexCode: string; indexName: string }>;
   /** 周/月线（后复权），键是 `${code}|W` / `${code}|M` */
   periods?: Record<string, DailyBar[]>;
   /** 情绪截面派生表的行，升序 */
@@ -75,7 +79,9 @@ export function makeView(f: ViewFixture): PointInTimeView {
       return n <= 0 ? [] : all.slice(-n);
     },
   industryAt(): null { return null; },
-  valuation(): null { return null; },
+  valuation(code: string): any { const x = f.valuationCs?.rows.find(r => r.code === code); return x ? { date: f.valuationCs!.date, pe: x.pe, pb: x.pb, mktcap: x.mktcap, floatMktcap: null } : null; },
+  valuationCrossSection(): any { return f.valuationCs ?? null; },
+  industryCrossSection(level: 1 | 3): any[] { return level === 1 ? (f.industries1 ?? []) : []; },
   liftsAhead(code: string): any[] { return (f.lifts ?? {})[code] ?? []; },
   reductionPlans(code: string): any[] { return (f.plans ?? {})[code] ?? []; },
   marginMarket(n: number): any[] { const a = f.marginMarket ?? []; return n <= 0 ? [] : a.slice(-n); },

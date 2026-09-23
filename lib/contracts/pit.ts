@@ -169,6 +169,22 @@ export interface PointInTimeView {
   } | null;
 
   /**
+   * 全市场估值横截面：不晚于评估日的**最近一个快照日**的全部行。没有快照返回 null。
+   *
+   * 只取同一天的快照，不按票各取"最近一条" —— 混了不同日子的 PE 算分位，
+   * 等于拿今天的价格和上周的价格比贵贱。调用方要自己看 date 判断新鲜度。
+   */
+  valuationCrossSection(): {
+    date: string;
+    rows: Array<{ code: string; pe: number | null; pb: number | null; mktcap: number | null }>;
+  } | null;
+  /**
+   * 评估日那天全市场的申万行业归属（一次查完）。查不到归属的票不在结果里 ——
+   * 与 industryAt 同一口径：null 是"不知道"，不是"不属于任何行业"。
+   */
+  industryCrossSection(level: 1 | 3): Array<{ code: string; indexCode: string; indexName: string }>;
+
+  /**
    * [asOf, asOf + days] 内的限售解禁，**含当天**（解禁日当天抛压就在眼前）。
    *
    * 解禁日在发行时就定了，所以这份日历对回测基本可用；残余前视只来自

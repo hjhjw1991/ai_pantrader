@@ -417,6 +417,9 @@ export interface RawCandidate {
   passedFilters: string[];
   factors: FactorResult<any>[];
   score: number;
+  /** 带定价的评估器才给（v2）。v1 永远不带，见 Candidate.targetPx */
+  targetPx?: number | null;
+  rrRatio?: number | null;
 }
 
 /** 进池的理由。写进 thesis，也让人在卡片上看得出这只票是怎么被捞出来的 */
@@ -757,6 +760,8 @@ export function applyPortfolioCaps(
       triggerPx: c.triggerPx, stopPx: c.stopPx,
       thesis: c.thesis, passedFilters: c.passedFilters,
       factors: c.factors, score: c.score,
+      // 只在有目标位时才带上这两个键：baseline 的 targetPx 是 null，带上 null 就改了对照组的卡片形状
+      ...(typeof c.targetPx === "number" ? { targetPx: c.targetPx, rrRatio: c.rrRatio ?? null } : {}),
     };
 
     if (size <= 1e-9) {

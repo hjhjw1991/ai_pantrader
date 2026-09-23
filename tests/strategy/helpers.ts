@@ -75,6 +75,14 @@ export function makeView(f: ViewFixture): PointInTimeView {
     mutualTop10: () => [],
     holderChanges: () => [],
     sentimentHistory: () => [],
+    valuationCrossSection: () => {
+      const vs = Object.entries(f.valuations ?? {});
+      if (vs.length === 0) return null;
+      return { date: vs[0][1].date, rows: vs.map(([code, v]) => ({ code, pe: v.pe, pb: v.pb, mktcap: v.mktcap })) };
+    },
+    industryCrossSection: (level: 1 | 3) => Object.entries(f.industries ?? {})
+      .filter(([k]) => k.endsWith(`|${level}`))
+      .map(([k, v]) => ({ code: k.split("|")[0], ...v })),
     minuteBars: (): MinuteBar[] => [],
     quote: code => (f.quotes ?? {})[code] ?? null,
     ztPool: date => (f.zt ?? {})[dateOf(date)] ?? [],

@@ -4,7 +4,7 @@
  * 七道筛的原始定义来自 ghzw 情绪妖股过滤器，任一红灯即降级/剔除：
  *   1. 位置        近 N 日涨幅过大 / 创新高追高段
  *   2. 换手·振幅   天量换手、日内巨振 = 高位剧烈分歧
- *   3. 估值vs基本面 PE 畸高、纯概念无业绩            ← 系统尚未采集基本面
+ *   3. 估值vs基本面 PE 畸高、纯概念无业绩            ← 估值半边已接（行业内 PE 分位），业绩半边仍缺
  *   4. 催化真伪    硬催化（政策/订单/涨价函/业绩）还是游资情绪 ← 系统尚未采集公告与新闻
  *   5. 权限×账户   按各账户在 YAML 里声明的"可交易板块"分派，没账户能交易的板块不出信号
  *   6. 打法匹配    需盯盘秒级应对的大振幅妖股，用户执行不了
@@ -19,6 +19,7 @@ import type { AccountType, Board, DailyBar, FactorSpec, PointInTimeView, Securit
 import { adjClose, barsUpTo, mean, pctChange, pobj, requireCode, round6, evalDate } from "@/lib/factors/util";
 import { judgeBarLimitUp } from "@/lib/factors/limit-up";
 import { RISK_FACTORS } from "@/lib/factors/risk";
+import { VALUATION_FACTORS } from "@/lib/factors/valuation";
 
 export const FILTER_NAMES = [
   "位置", "换手振幅", "估值基本面", "催化真伪", "权限账户", "打法匹配", "目标匹配",
@@ -33,11 +34,6 @@ export type FilterName = typeof FILTER_NAMES[number];
  * 不是注释里的免责声明。
  */
 export const UNSUPPORTED_FILTERS: Array<{ name: FilterName; missing: string; reason: string }> = [
-  {
-    name: "估值基本面",
-    missing: "PE / PB / 营收 / 净利润",
-    reason: "无数据源：M0 只采了行情、涨停池、龙虎榜，没有财务表",
-  },
   {
     name: "催化真伪",
     missing: "公告 / 新闻 / 政策事件",
@@ -74,6 +70,21 @@ export interface FilterParams {
    * 所以必须留开关，由人决定要不要。
    */
   超买否决分: number;
+  /**
+   * PE 在行业内的分位达到它就否决（0~1）。默认 0.95 = 只否行业里最贵的 5%。
+   * 设成 1.01 就等于关掉。
+   */
+  估值否决分位: number;
+  /**
+   * 同时还要 PE ≥ 同行中位 × 它才否决。默认 2。
+   *
+   * 只看分位会误伤低离散度的行业：实测工商银行 PE 8.27 在银行业排 0.951 分位，
+   * 可它只是同行中位（5.2）的 1.6 倍 —— 那是大行溢价，不是估值畸高。
+   * 两个条件同时满足才否决：既是行业里最贵的一撮，又贵得离谱。
+   */
+  估值否决倍数: number;
+  /** 亏损（PE 为负）是否直接否决。默认否：资金炒的龙头常常还没盈利 */
+  亏损即否决: boolean;
 }
 
 /** 默认值对齐 spec §9.1 的 YAML 示例：位置涨幅上限 50 / 换手上限 15 / 振幅上限 10 */
@@ -101,6 +112,9 @@ export const DEFAULT_FILTER_PARAMS: FilterParams = {
   解禁否决比例: 0.15,
   减持否决比例: 0.03,
   超买否决分: 3,
+  估值否决分位: 0.95,
+  估值否决倍数: 2,
+  亏损即否决: false,
 };
 
 export interface FilterOutcome {
@@ -197,7 +211,28 @@ export function runFilters(
     });
   }
 
-  /* 3 & 4. 缺数据源，硬编码为未判定 */
+  /* 3. 估值基本面：估值半边（行业内 PE 分位）能判，业绩半边缺财务表，所以永远 partial */
+  {
+    const spec = VALUATION_FACTORS[0];
+    const r = spec.fn({ view, params: { ...spec.defaults, code, 日期: date } });
+    const ind = r.inputs?.["口径"] === "行业" ? `${r.inputs?.["行业"]}内` : "全市场";
+    if (r.confidence === 0) {
+      outcomes.push({ name: "估值基本面", pass: false, evaluated: false, partial: true,
+        reason: `估值${r.label}；业绩部分缺营收 / 净利润数据源` });
+    } else if (r.label === "亏损") {
+      outcomes.push({ name: "估值基本面", pass: !p.亏损即否决, evaluated: true, partial: true,
+        reason: `亏损（PE ${r.inputs?.["PE"]}）${p.亏损即否决 ? "，按配置否决" : "，不否决（资金龙头常未盈利）"}；业绩部分未判定` });
+    } else {
+      const v = r.value as number;
+      const rel = r.inputs?.["相对中位"] as number;
+      const hit = v >= p.估值否决分位 && rel >= p.估值否决倍数;
+      outcomes.push({ name: "估值基本面", pass: !hit, evaluated: true, partial: true,
+        reason: `PE ${r.inputs?.["PE"]} 处于${ind}第 ${Math.round(v * 100)} 百分位，是同行中位的 ${rel.toFixed(1)} 倍` +
+          `${hit ? `（≥ ${Math.round(p.估值否决分位 * 100)} 分位且 ≥ ${p.估值否决倍数} 倍，否决）` : ""}；业绩部分未判定` });
+    }
+  }
+
+  /* 4. 缺数据源，硬编码为未判定 */
   for (const u of UNSUPPORTED_FILTERS) {
     outcomes.push({ name: u.name, pass: false, evaluated: false, reason: `${u.reason}（缺 ${u.missing}）` });
   }

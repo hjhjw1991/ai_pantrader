@@ -309,6 +309,31 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
       return { indexCode: String(r[0]["index_code"]), indexName: String(r[0]["index_name"]) };
     },
 
+    valuationCrossSection() {
+      const d = one(`SELECT MAX(date) AS d FROM valuation_daily WHERE date <= ?`, asOfDate);
+      const date = d === null || d["d"] === null ? null : String(d["d"]);
+      if (date === null) return null;
+      const n = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      return {
+        date,
+        rows: rows(`SELECT code, pe, pb, mktcap FROM valuation_daily WHERE date = ?`, date)
+          .map(r => ({ code: String(r["code"]), pe: n(r["pe"]), pb: n(r["pb"]), mktcap: n(r["mktcap"]) })),
+      };
+    },
+
+    industryCrossSection(level: 1 | 3) {
+      // 同一只票理论上只有一段区间覆盖评估日；万一差分出了重叠，取 from_date 最新的那段（与 industryAt 一致）
+      return rows(
+        `SELECT code, index_code, index_name FROM (
+           SELECT code, index_code, index_name,
+                  ROW_NUMBER() OVER (PARTITION BY code ORDER BY from_date DESC) AS rn
+             FROM sw_industry_span
+            WHERE level = ? AND from_date <= ? AND (to_date IS NULL OR to_date > ?)
+         ) WHERE rn = 1`,
+        level, asOfDate, asOfDate
+      ).map(r => ({ code: String(r["code"]), indexCode: String(r["index_code"]), indexName: String(r["index_name"]) }));
+    },
+
     valuation(code: string) {
       const r = rows(
         `SELECT date, pe, pb, mktcap, float_mktcap FROM valuation_daily

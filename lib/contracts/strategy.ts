@@ -54,6 +54,12 @@ export interface Candidate {
   rejectedBy?: string[];
   factors: FactorResult<any>[];
   score: number;
+  /**
+   * 目标位与盈亏比。**可选**：只有带定价的评估器（如「结构位定价」）才给。
+   * baseline 不带这两个键 —— 对照组的卡片形状与历史口径逐字一致，影子盘才比得出高下。
+   */
+  targetPx?: number;
+  rrRatio?: number | null;
 }
 
 export interface SignalCard {

@@ -17,11 +17,12 @@ import { RISK_FACTORS } from "@/lib/factors/risk";
 import { CAPITAL_FACTORS } from "@/lib/factors/capital";
 import { CYCLE_FACTORS } from "@/lib/factors/cycle";
 import { STRUCTURE_FACTORS } from "@/lib/factors/structure";
+import { VALUATION_FACTORS } from "@/lib/factors/valuation";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
   ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS, ...CAPITAL_FACTORS,
-  ...CYCLE_FACTORS, ...STRUCTURE_FACTORS,
+  ...CYCLE_FACTORS, ...STRUCTURE_FACTORS, ...VALUATION_FACTORS,
 ];
 
 export function createDefaultRegistry() {
@@ -77,3 +78,4 @@ export {
   STRUCTURE_FACTORS, ema, macd, crosses, atr, pivots, structureLevels, doublePattern,
 } from "@/lib/factors/structure";
 export type { Macd, CrossEvent, Pivot, DoublePattern } from "@/lib/factors/structure";
+export { VALUATION_FACTORS } from "@/lib/factors/valuation";

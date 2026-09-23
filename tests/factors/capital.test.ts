@@ -228,3 +228,51 @@ describe("股东增减持（已实施，近 60 天公告）", () => {
     expect(r.confidence).toBeCloseTo(0.5, 9);
   });
 });
+
+/* --------------------- 分位口径（历史够长时取代固定阈值） --------------------- */
+
+describe("资金面因子的分位口径", () => {
+  // 约 260 个交易日，最后一天紧挨评估日（否则会被判成数据过旧）
+  const long = weekdays("2025-06-02", 400).filter(d => d < ASOF).slice(-260);
+
+  it("两融情绪：历史够长时标签看窗口变化率的分位，固定阈值只是兜底", () => {
+    // 前面一路 +2%/5 日地加杠杆，最后 5 天 +1.2%：绝对值过了固定阈值（1%），在自身历史里却偏低
+    let x = 100;
+    const rows = long.map((d, i) => {
+      x *= i >= long.length - 5 ? 1.0024 : 1.004;
+      return mrow(d, x, 0.026, 1e9);
+    });
+    const r = run<any>("两融情绪", makeView({ ...base, marginMarket: rows }));
+    expect(r.value).toBeGreaterThan(0.01);
+    expect(r.inputs?.口径).toBe("分位");
+    expect(r.inputs?.分位).toBeLessThan(0.2);
+    expect(r.label).toBe("去杠杆");
+  });
+
+  it("两融情绪：历史不足 → 回落固定阈值，inputs 标明口径", () => {
+    const r = run<any>("两融情绪", makeView({ ...base, marginMarket: days6.map((d, i) => mrow(d, [100, 100.5, 101, 101.2, 101.6, 102][i])) }));
+    expect(r.inputs?.口径).toBe("固定阈值");
+    expect(r.inputs?.分位).toBeNull();
+  });
+
+  it("北向活跃度：历史够长时按成交额倍数的分位定放量 / 缩量", () => {
+    const ds = long.slice(-120);
+    const amts = ds.map((_, i) => 2e11 * (1 + 0.1 * Math.sin(i / 3)));
+    amts[amts.length - 1] = 2e11 * 1.25;   // 绝对倍数不到 1.3，在自身历史里却是高位
+    const r = run<any>("北向活跃度", makeView({
+      ...base, mutualDeal: ds.map((d, i) => ({ date: d, mutualType: "005", dealAmt: amts[i], netAmt: null })),
+    }));
+    expect(r.inputs?.口径).toBe("分位");
+    expect(r.inputs?.分位).toBeGreaterThanOrEqual(0.8);
+    expect(r.label).toBe("北向放量");
+  });
+
+  it("个股融资：历史够长时涌入 / 撤离看自身历史分位，拥挤仍是绝对线", () => {
+    const market = long.map(d => mrow(d, 1e12));
+    let x = 100;
+    const rows = long.map((d, i) => { x *= i >= long.length - 5 ? 0.99 : 1 + 0.01 * Math.sin(i); return mrow(d, x, 0.12); });
+    const r = run<any>("个股融资", makeView({ ...base, marginMarket: market, marginStock: { "600000": rows } }));
+    expect(r.inputs?.口径).toBe("分位");
+    expect(r.label).toMatch(/^融资撤离·拥挤$/);
+  });
+});
