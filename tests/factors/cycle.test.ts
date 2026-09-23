@@ -91,9 +91,10 @@ describe("情绪周期因子：读派生表，值是原始读数，标签看 250
 
   it("七个因子都注册了，且都读同一张派生表", () => {
     expect(CYCLE_FACTORS.map(f => f.name).sort()).toEqual(
-      ["首板晋级率", "连板晋级率", "涨停溢价", "高度板溢价", "炸板溢价", "日线炸板率", "涨跌中位数"].sort()
+      ["情绪阶段", "首板晋级率", "连板晋级率", "涨停溢价", "高度板溢价", "炸板溢价", "日线炸板率", "涨跌中位数"].sort()
     );
-    for (const f of CYCLE_FACTORS) {
+    // 情绪阶段要 560 天历史，260 天的夹具不够，它的行为在 cycle-stage.test.ts 里测
+    for (const f of CYCLE_FACTORS.filter(x => x.name !== "情绪阶段")) {
       const r = f.fn({ view: view(hist({})), params: { ...f.defaults } });
       expect(r.confidence, f.name).toBeGreaterThan(0);
     }

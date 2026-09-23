@@ -88,7 +88,7 @@ export function createV2Engine(deps: V2Deps) {
     const mainline = ml.slot.detect(ctx, ml.params);
 
     const tm = pick<TimerSlot>(deps.slots, "择时器", sc.择时器 ?? BASELINE_CHOICE.择时器);
-    const { env } = tm.slot.assess(ctx, tm.params, mainline);
+    const { env, stage } = tm.slot.assess(ctx, tm.params, mainline);
 
     const heldCodes = new Set(input.positions.map(p => p.code));
     if (input.positions.length > 0) {
@@ -152,6 +152,8 @@ export function createV2Engine(deps: V2Deps) {
       holdings,
       warnings: w.list,
       advisorInfluenced: false,
+      // 只在判出阶段时才带这个键：baseline 择时器不判阶段，带上 undefined 也会改卡片形状
+      ...(stage !== undefined ? { stage } : {}),
     };
   };
 }

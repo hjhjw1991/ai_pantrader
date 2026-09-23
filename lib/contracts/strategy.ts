@@ -1,5 +1,6 @@
 import type { FactorResult } from "@/lib/contracts/factor";
 import type { PointInTimeView } from "@/lib/contracts/pit";
+import type { CycleStage } from "@/lib/contracts/slots";
 
 /** 仓位档位。防守档 = 0 仓，不是"轻仓"。 */
 export type EnvGear = "进攻" | "中性" | "防守";
@@ -76,6 +77,11 @@ export interface SignalCard {
   /** 数据覆盖率警告：有缺口就必须出现在卡上 */
   warnings: string[];
   advisorInfluenced: boolean;
+  /**
+   * 情绪周期阶段。**可选**：只有判阶段的择时器（五段状态机）才给，判不出来也不给。
+   * 它是影子盘按阶段分组统计的键 —— 猜一个出来会污染分组，所以宁缺毋滥。
+   */
+  stage?: CycleStage;
 }
 
 /**
