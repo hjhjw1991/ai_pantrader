@@ -37,7 +37,7 @@ describe("selfcheck 的缺口起算点", () => {
     for (const d of ["2022-05-17", "2024-01-02", "2026-07-30", "2026-07-31"]) cal.run(d);
 
     const clients = {
-      sina: {} as any, tencent: {} as any, eastmoney: {} as any, sw: {} as any,
+      sina: {} as any, tencent: {} as any, eastmoney: {} as any, sw: {} as any, ths: {} as any,
     };
     const r = await runJob("selfcheck", { db, clients, now: new Date("2026-07-31T02:00:00Z") });
 

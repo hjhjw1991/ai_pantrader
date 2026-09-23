@@ -30,7 +30,10 @@ const V = "1.0.0";
  * 这两个适配器把口径对上，且**只在这里做**——别让 v1 的内部形状漏到别的槽里去。
  */
 function runnerOf(ctx: SlotCtx): FactorRunner {
-  return { run: (name, extra) => ctx.runFactor(name, extra) };
+  return {
+    run: (name, extra) => ctx.runFactor(name, extra),
+    has: name => ctx.registry.get(name) !== undefined,
+  };
 }
 
 function inputOf(ctx: SlotCtx): StrategyEngineInput {
@@ -156,7 +159,7 @@ export const 评估器_七道筛打分: EvaluatorSlot = {
 export const 离场器_账户纪律: ExitSlot = {
   kind: "离场器", name: "账户纪律", version: V,
   decide(ctx: SlotCtx, _params: SlotParams, position, env: EnvAssessment): Candidate {
-    return decideHolding(inputOf(ctx), position, env.gear, ctx.warn);
+    return decideHolding(inputOf(ctx), position, env.gear, ctx.warn, runnerOf(ctx));
   },
 };
 

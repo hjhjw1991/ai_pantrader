@@ -558,3 +558,171 @@ export async function fetchValuations(
   }
   return out;
 }
+
+/* -------------------------------- 解禁 -------------------------------- */
+
+export interface LiftRow {
+  code: string;
+  /** 解禁日 */
+  freeDate: string;
+  /** 解禁股数，**股**（东财给的是万股，这里换算过） */
+  freeShares: number | null;
+  /** 解禁市值，**元**（东财给的是万元，这里换算过） */
+  liftMktcap: number | null;
+  /** 占解禁前流通股的比例，**小数**（0.05 = 5%），不是百分数 */
+  freeRatio: number | null;
+  /** 占总股本的比例，小数 */
+  totalRatio: number | null;
+  /** 限售股类型：首发原股东 / 定向增发机构配售 / 股权激励 … */
+  shareType: string;
+}
+
+const WAN = 1e4;
+
+function numOrNullLift(v: unknown): number | null {
+  if (v === null || v === undefined || v === "" || v === "-") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 解析 RPT_LIFT_STAGE 的一页。
+ *
+ * 单位换算在这里一次做完：东财的股数是万股、市值是万元，而比例是小数。
+ * 三种口径混在一张表里，下游一旦拿"万股"去除"股"，比例就错四个数量级，
+ * 而那个错的数字看起来仍然像个比例。
+ *
+ * 9201（返回数据为空）是合法的空：那段日期确实没有解禁。
+ * 其它失败码一律抛错 —— 9501 是报表名写错、9701 是报表下线，都不是"没有解禁"。
+ */
+export function parseLiftPage(text: string): { rows: LiftRow[]; pages: number } {
+  let j: any;
+  try { j = JSON.parse(text); }
+  catch { throw new Error(`em lift unexpected payload: ${text.slice(0, 80)}`); }
+
+  if (j?.success === false) {
+    if (Number(j?.code) === 9201) return { rows: [], pages: 0 };
+    throw new Error(`em lift failed: code=${j?.code} msg=${j?.message}`);
+  }
+  const data = j?.result?.data;
+  if (!Array.isArray(data)) {
+    throw new Error(`em lift result.data 不是数组：${JSON.stringify(j?.result)?.slice(0, 60)}`);
+  }
+  const mul = (v: unknown, k: number): number | null => {
+    const n = numOrNullLift(v);
+    return n === null ? null : Math.round(n * k * 100) / 100;
+  };
+  return {
+    pages: Number(j?.result?.pages ?? 1),
+    rows: data.map((x: any) => ({
+      code: String(x.SECURITY_CODE),
+      freeDate: String(x.FREE_DATE ?? "").slice(0, 10),
+      freeShares: mul(x.CURRENT_FREE_SHARES, WAN),
+      liftMktcap: mul(x.LIFT_MARKET_CAP, WAN),
+      freeRatio: numOrNullLift(x.FREE_RATIO),
+      totalRatio: numOrNullLift(x.TOTAL_RATIO),
+      shareType: String(x.FREE_SHARES_TYPE ?? ""),
+    })),
+  };
+}
+
+const LIFT_PAGE_SIZE = 500;
+
+/**
+ * 按解禁日区间拉全市场解禁日历。
+ *
+ * 为什么能用来回测：解禁日在限售股**发行时**就定了（首发 1~3 年、定增 6~18 个月），
+ * 所以"未来 90 天有没有解禁"在评估日那天几乎总是已知的。
+ * 残余的前视只来自"评估日之后才完成的定增" —— 那批股份的解禁日离评估日至少半年，
+ * 落进 90 天窗口的概率很低。
+ */
+export async function fetchLiftSchedule(
+  client: SourceClient, from: string, to: string,
+  onPage?: (page: number, pages: number, got: number) => void
+): Promise<LiftRow[]> {
+  const out: LiftRow[] = [];
+  for (let page = 1; ; page++) {
+    const filter = encodeURIComponent(`(FREE_DATE>='${from}')(FREE_DATE<='${to}')`);
+    const url = "https://datacenter-web.eastmoney.com/api/data/v1/get" +
+      `?reportName=RPT_LIFT_STAGE&columns=SECURITY_CODE,FREE_DATE,CURRENT_FREE_SHARES,` +
+      `LIFT_MARKET_CAP,FREE_RATIO,TOTAL_RATIO,FREE_SHARES_TYPE` +
+      `&source=WEB&client=WEB&pageNumber=${page}&pageSize=${LIFT_PAGE_SIZE}` +
+      `&sortColumns=FREE_DATE,SECURITY_CODE&sortTypes=1,1&filter=${filter}`;
+    const r = await client.get(url, { referer: "https://data.eastmoney.com/" });
+    if (!r.ok) throw new Error(`em lift request failed page ${page}: ${r.error}`);
+    const { rows, pages } = parseLiftPage(r.text);
+    out.push(...rows);
+    onPage?.(page, pages, out.length);
+    if (rows.length === 0 || page >= pages) break;
+  }
+  return out;
+}
+
+/* ------------------------------- 公告列表 ------------------------------- */
+
+export interface NoticeRow {
+  code: string;
+  noticeDate: string;
+  title: string;
+}
+
+/**
+ * 标题是不是一份**减持计划**（而不是计划的进展、完成或终止）。
+ *
+ * 东财"持股变动"栏目里预披露与实施结果混在一起 —— 实测某一天 71 条里约一半是
+ * "实施完成 / 期限届满 / 实施结果 / 提前终止"。把它们当成新计划，会让一只
+ * 刚减完、已经没有抛压的票被判成"未来三个月有减持"。
+ *
+ * 规则：含"减持"且含"预披露"或"计划"，同时不含任何表示"已经结束或只是进展"的词。
+ * 增持计划不算 —— 它是利好，混进来会把利好当利空。
+ */
+export function isReductionPlanTitle(title: string): boolean {
+  if (!title.includes("减持")) return false;
+  if (!/预披露|计划/.test(title)) return false;
+  /**
+   * "变更"**不**排除：变更可能是把减持比例调高。这里的代价不对称 ——
+   * 多判一条只是多抓一次 F10 页（它显示的总是最新版本），漏判则是漏掉一个加重了的风险。
+   * "提前"也不单独排除："提前终止"已被"终止"覆盖，单独的"提前"反而会误伤。
+   */
+  return !/完成|届满|结果|终止|进展|实施情况|增持/.test(title);
+}
+
+export function parseNoticePage(text: string): { rows: NoticeRow[]; total: number } {
+  let j: any;
+  try { j = JSON.parse(text); }
+  catch { throw new Error(`em notice unexpected payload: ${text.slice(0, 80)}`); }
+  const list = j?.data?.list;
+  if (!Array.isArray(list)) {
+    throw new Error(`em notice data.list 不是数组：${JSON.stringify(j?.data)?.slice(0, 60)}`);
+  }
+  const rows: NoticeRow[] = [];
+  for (const x of list) {
+    const code = x?.codes?.[0]?.stock_code;
+    if (typeof code !== "string") continue;
+    rows.push({
+      code,
+      noticeDate: String(x?.notice_date ?? "").slice(0, 10),
+      title: String(x?.title ?? ""),
+    });
+  }
+  return { rows, total: Number(j?.data?.total_hits ?? 0) };
+}
+
+/** "持股变动"类公告（f_node=7），按公告日区间分页 */
+export async function fetchHoldingChangeNotices(
+  client: SourceClient, from: string, to: string
+): Promise<NoticeRow[]> {
+  const out: NoticeRow[] = [];
+  const pz = 100;
+  for (let page = 1; ; page++) {
+    const url = "https://np-anotice-stock.eastmoney.com/api/security/ann" +
+      `?page_size=${pz}&page_index=${page}&ann_type=A&client_source=web&f_node=7` +
+      `&begin_time=${from}&end_time=${to}`;
+    const r = await client.get(url, { referer: "https://data.eastmoney.com/" });
+    if (!r.ok) throw new Error(`em notice request failed page ${page}: ${r.error}`);
+    const { rows, total } = parseNoticePage(r.text);
+    out.push(...rows);
+    if (rows.length < pz || out.length >= total) break;
+  }
+  return out;
+}

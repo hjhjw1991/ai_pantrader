@@ -151,6 +151,26 @@ export interface PointInTimeView {
     mktcap: number | null; floatMktcap: number | null;
   } | null;
 
+  /**
+   * [asOf, asOf + days] 内的限售解禁，**含当天**（解禁日当天抛压就在眼前）。
+   *
+   * 解禁日在发行时就定了，所以这份日历对回测基本可用；残余前视只来自
+   * "评估日之后才完成的定增"，其解禁日离评估日至少半年，很少落进短窗口。
+   */
+  liftsAhead(code: string, days: number): Array<{
+    date: string; freeRatio: number | null; liftMktcap: number | null; shareType: string;
+  }>;
+  /**
+   * 执行窗口与 [asOf, asOf + days] 有交集的**减持**计划（不含增持）。
+   *
+   * 只返回 first_seen <= asOf 的 —— 我们还没看到的计划不能拿来判断，
+   * 否则就是未来函数。代价是这份数据从接入那天才开始有（源只保留最近约 2 条）。
+   */
+  reductionPlans(code: string, days: number): Array<{
+    actor: string; startDate: string; endDate: string;
+    maxRatio: number | null; maxShares: number | null; firstSeen: string;
+  }>;
+
   /** 该日是否有已知数据缺口。回测遇到必须跳过并计入覆盖率（spec §10.5） */
   hasGap(date: string, kind?: string): boolean;
 }

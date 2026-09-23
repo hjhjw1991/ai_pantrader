@@ -13,10 +13,11 @@ import { TECH_FACTORS } from "@/lib/factors/tech";
 import { FUND_FACTORS } from "@/lib/factors/fund";
 import { FILTER_FACTORS } from "@/lib/factors/filters";
 import { SECTOR_FACTORS } from "@/lib/factors/sectors";
+import { RISK_FACTORS } from "@/lib/factors/risk";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
-  ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS,
+  ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS,
 ];
 
 export function createDefaultRegistry() {
@@ -61,3 +62,5 @@ export {
   必查链, 必查链关键词, chainOf, identifyMainlines, SECTOR_FACTORS,
 } from "@/lib/factors/sectors";
 export type { MainlineHit, MainlineResult, MainlineOpts } from "@/lib/factors/sectors";
+
+export { RISK_FACTORS, rsi, bias, kdj, tdxSma } from "@/lib/factors/risk";

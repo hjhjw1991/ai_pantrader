@@ -18,9 +18,13 @@
 import type { AccountType, Board, DailyBar, FactorSpec, PointInTimeView, SecurityRow } from "@/lib/contracts";
 import { adjClose, barsUpTo, mean, pctChange, pobj, requireCode, round6, evalDate } from "@/lib/factors/util";
 import { judgeBarLimitUp } from "@/lib/factors/limit-up";
+import { RISK_FACTORS } from "@/lib/factors/risk";
 
 export const FILTER_NAMES = [
   "位置", "换手振幅", "估值基本面", "催化真伪", "权限账户", "打法匹配", "目标匹配",
+  // 风险否决三道（三层分离设计里的第四层）。它们只做否决、不参与打分：
+  // 一只 ST 票的风险不该被三个好看的技术分冲淡
+  "ST", "解禁减持", "超买",
 ] as const;
 export type FilterName = typeof FILTER_NAMES[number];
 
@@ -56,6 +60,20 @@ export interface FilterParams {
   振幅容忍倍数: number;
   MA20偏离上限: number;
   账户可交易板块: Record<AccountType, Board[]>;
+  /** ST 状态的观测起点：早于它的日期"没看到 ST"只代表没看见（见 risk.ts） */
+  ST观测起点: string;
+  /** 减持计划的观测起点：源只留最近约 2 条，更早的查不到不等于没有 */
+  减持观测起点: string;
+  /** 未来 90 天解禁占流通股比例达到它就否决（小数） */
+  解禁否决比例: number;
+  /** 未来 90 天减持计划上限占总股本比例达到它就否决（小数） */
+  减持否决比例: number;
+  /**
+   * 超买超卖分达到它就否决。分值 [−4, +4]，默认 3 = "严重超买"。
+   * 设成 99 就等于关掉 —— 这道筛与"不限制打板"天然有张力（连板股 RSI 几乎必过 90），
+   * 所以必须留开关，由人决定要不要。
+   */
+  超买否决分: number;
 }
 
 /** 默认值对齐 spec §9.1 的 YAML 示例：位置涨幅上限 50 / 换手上限 15 / 振幅上限 10 */
@@ -78,6 +96,11 @@ export const DEFAULT_FILTER_PARAMS: FilterParams = {
    * 未配置的账户，这道筛报"未判定"而不是默默放行或默默否决。
    */
   账户可交易板块: {},
+  ST观测起点: "2026-08-04",
+  减持观测起点: "2026-09-23",
+  解禁否决比例: 0.15,
+  减持否决比例: 0.03,
+  超买否决分: 3,
 };
 
 export interface FilterOutcome {
@@ -241,6 +264,64 @@ export function runFilters(
     });
   }
 
+  /* 8~10. 风险否决：直接调风险因子本身，阈值只有一处真相，不在这里再抄一遍 */
+  const risk = (name: string, extra: Record<string, unknown> = {}) => {
+    const spec = RISK_FACTORS.find(f => f.name === name)!;
+    return spec.fn({ view, params: { ...spec.defaults, code, 日期: date, ...extra } });
+  };
+
+  /* 8. ST */
+  {
+    const r = risk("ST状态", { ST观测起点: p.ST观测起点 });
+    if (r.confidence === 0) {
+      outcomes.push({ name: "ST", pass: false, evaluated: false, reason: `ST 状态${r.label}（${JSON.stringify(r.inputs?.["观测起点"] ?? "")} 之前没有观测）` });
+    } else {
+      const st = r.value === 1;
+      outcomes.push({
+        name: "ST", pass: !st, evaluated: true,
+        reason: st ? `${r.inputs?.["名称"] ?? code} 处于风险警示期（涨跌幅 5%、有退市风险）` : "非 ST",
+      });
+    }
+  }
+
+  /* 9. 解禁减持：两个口径（占流通 / 占总股本），分开判、任一越线即否决 */
+  {
+    const lift = risk("解禁压力");
+    const plan = risk("减持计划", { 观测起点: p.减持观测起点 });
+    const liftR = lift.value as number, planR = plan.value as number;
+    const pct = (x: number) => `${Math.round(x * 10000) / 100}%`;
+    const hitLift = liftR >= p.解禁否决比例;
+    const hitPlan = plan.confidence > 0 && planR >= p.减持否决比例;
+    const bits: string[] = [];
+    if (lift.label !== "无解禁") bits.push(`未来 90 天解禁 ${pct(liftR)} 流通股（${lift.label}，最近 ${lift.inputs?.["最近解禁日"]}）`);
+    if (plan.confidence === 0) bits.push("减持计划未观测");
+    else if (plan.label !== "无计划") bits.push(`减持计划上限 ${pct(planR)} 总股本（${plan.label}）`);
+    outcomes.push({
+      name: "解禁减持", pass: !(hitLift || hitPlan), evaluated: true,
+      // 减持那半没观测到时照样出结论（解禁那半是能判的），但标 partial ——
+      // 整道筛因为一半缺数据就失明，等于把"解禁 30% 流通股"这种硬风险也一起放过
+      partial: plan.confidence === 0 ? true : undefined,
+      reason: bits.length === 0 ? "未来 90 天无解禁、无减持计划" : bits.join("；"),
+    });
+  }
+
+  /* 10. 超买 */
+  {
+    const r = risk("超买超卖");
+    if (r.confidence === 0) {
+      outcomes.push({ name: "超买", pass: false, evaluated: false, reason: "日线不足，超买超卖无法判定" });
+    } else {
+      const v = r.value as number;
+      const hit = v >= p.超买否决分;
+      const inp = r.inputs ?? {};
+      outcomes.push({
+        name: "超买", pass: !hit, evaluated: true,
+        reason: `${r.label}（RSI ${inp["RSI"]} / 乖离 ${inp["乖离率"]}% / J ${inp["KDJ_J"]}）` +
+          (hit ? "：买在这里止损近、目标远，盈亏比天然差" : ""),
+      });
+    }
+  }
+
   // 按 FILTER_NAMES 的顺序输出，保证同一份输入的报告字段顺序稳定（哈希可比）
   const ordered = FILTER_NAMES.map(n => outcomes.find(o => o.name === n)!);
   return {
@@ -261,11 +342,16 @@ function paramsFrom(raw: Record<string, unknown>): Partial<FilterParams> {
   for (const k of [
     "位置涨幅上限", "位置回溯日", "新高回溯日", "近期涨停次数上限", "换手上限", "振幅上限",
     "平均振幅回溯日", "止损幅度", "振幅容忍倍数", "MA20偏离上限",
+    "解禁否决比例", "减持否决比例", "超买否决分",
   ] as const) {
     const v = raw[k];
     if (typeof v === "number" && Number.isFinite(v)) (out as Record<string, unknown>)[k] = v;
   }
   if (typeof raw["新高即否决"] === "boolean") out.新高即否决 = raw["新高即否决"];
+  for (const k of ["ST观测起点", "减持观测起点"] as const) {
+    const v = raw[k];
+    if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) out[k] = v;
+  }
   const boards = pobj(raw, "账户可交易板块");
   if (Object.keys(boards).length > 0) out.账户可交易板块 = boards as Record<AccountType, Board[]>;
   return out;
@@ -287,10 +373,10 @@ const 过滤器: FactorSpec<number> = {
       name: "过滤器", version: "1.0.0",
       value: rep.rejected.length,
       label: rep.rejected.length === 0
-        ? `七道筛无否决（${rep.unevaluated.length} 道未判定）`
+        ? `${FILTER_NAMES.length} 道筛无否决（${rep.unevaluated.length} 道未判定）`
         : `否决：${rep.rejected.join("/")}`,
       provenance: "real",
-      // 置信度 = 真正跑过的筛数 / 7。缺基本面与消息面时它上不去 5/7，这个数字要露出来
+      // 置信度 = 真正跑过的筛数 / 筛总数。缺基本面与消息面时它上不去满分，这个数字要露出来
       confidence: round6((rep.passed.length + rep.rejected.length) / FILTER_NAMES.length),
       inputs: {
         代码: code, 日期: date, 账户: account ?? "未指定",

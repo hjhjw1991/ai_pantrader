@@ -32,6 +32,8 @@ const clients = () => ({
   // 申万快照：index_name 返回空名单 → 三级为空 → 只走 31 个一级且都是空成分。
   // 既不打网络，也不产生缺口，不干扰这些用例本来要断言的东西。
   sw: stub('{"code":"200","data":[]}') as any,
+  // 同花顺：返回空页 → 解析不出计划，不打网络也不产生缺口
+  ths: stub("") as any,
 });
 
 describe("时刻表", () => {
@@ -202,7 +204,7 @@ describe("jobOutcome：没抛错不等于成功", () => {
     db.prepare("INSERT INTO security (code,name,board) VALUES ('601012','x','主板')").run();
     const s = createScheduler({
       db,
-      clients: { sina: dead as any, tencent: dead as any, eastmoney: dead as any, sw: dead as any },
+      clients: { sina: dead as any, tencent: dead as any, eastmoney: dead as any, sw: dead as any, ths: dead as any },
       now: () => at("09:36"),
     });
     await s.tickOnce();

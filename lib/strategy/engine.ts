@@ -163,6 +163,12 @@ export function makeWarnings() {
 export interface FactorRunner {
   /** 拿不到读数时返回 null（未注册 / 求值抛错），并已记好告警。调用方必须判 null */
   run(name: string, extra?: Record<string, unknown>): FactorResult<any> | null;
+  /**
+   * 该因子是否已注册。只给"叠加项"用：持仓风险预警是在纪律线之上加的一层，
+   * 注册表里没有风险因子（测试替身常见）时应当安静地不叠加，
+   * 而不是每只持仓都报一条"因子未注册"把告警刷满。
+   */
+  has?(name: string): boolean;
 }
 
 export function makeRunner(
@@ -171,6 +177,7 @@ export function makeRunner(
 ): FactorRunner {
   const seenLowConf = new Set<string>();
   return {
+    has: name => registry.get(name) !== undefined,
     run(name, extra = {}) {
       const spec = registry.get(name);
       if (spec === undefined) {
@@ -619,10 +626,10 @@ export function evaluateRow(
     const rejected = strArray(filt.inputs?.["否决"]);
     const unevaluated = strArray(filt.inputs?.["未判定"]);
     if (unevaluated.length > 0) {
-      warn(`七道筛未判定：${unevaluated.join(" / ")}（无数据源）—— 未判定不等于通过`);
+      warn(`过滤器未判定：${unevaluated.join(" / ")}（缺数据）—— 未判定不等于通过`);
     }
     if (rejected.length > 0) {
-      warn(`${row.code} 被七道筛否决：${rejected.join(" / ")}，不进候选池`);
+      warn(`${row.code} 被过滤器否决：${rejected.join(" / ")}，不进候选池`);
       return null;
     }
 
@@ -767,11 +774,12 @@ export function applyPortfolioCaps(
 /* -------------------------------- 持仓动作 -------------------------------- */
 
 function buildHoldings(
-  input: StrategyEngineInput, gear: EnvGear, date: string, warn: (m: string) => void
+  input: StrategyEngineInput, gear: EnvGear, date: string, warn: (m: string) => void,
+  runner?: FactorRunner
 ): Candidate[] {
   const sorted = [...input.positions].sort((a, b) =>
     (a.account < b.account ? -1 : a.account > b.account ? 1 : 0) || (a.code < b.code ? -1 : 1));
-  return sorted.map(p => decideHolding(input, p, gear, warn));
+  return sorted.map(p => decideHolding(input, p, gear, warn, runner));
 }
 
 /**
@@ -782,7 +790,61 @@ function buildHoldings(
  * 判定顺序即优先级，不可重排：
  * 无价格 → 防守清仓 → 灾难位 → 破止损 → 止盈 → 非价格止损复核 → 持有。
  */
+/**
+ * 持仓动作 = 纪律判定 + 风险叠加。
+ *
+ * 叠加而不是插进纪律判定里：那段判定的**顺序即优先级**，是一次次复盘排出来的，
+ * 把风险检查塞进中间就得重新论证每一处先后。放在出口处叠加，
+ * 纪律线一条都不动，风险只能"加重"动作、永远不能"减轻"它。
+ *
+ *   - ST 戴帽 → 清仓。结构性风险（涨跌幅 5%、有退市风险），与浮盈浮亏无关
+ *   - 解禁/减持严重、严重超买 → 原本"持有"的改"观察"；其余动作只附注原因
+ *   - 预警级不改动作：只有越线才动，否则每只持仓天天都在"观察"，信号就失效了
+ */
 export function decideHolding(
+  input: StrategyEngineInput,
+  p: { account: AccountId; code: string; cost: number; qty: number; stopPx: number | null },
+  gear: EnvGear, warn: (m: string) => void, runner?: FactorRunner
+): Candidate {
+  const base = decideHoldingCore(input, p, gear, warn);
+  if (runner === undefined) return base;
+
+  const read = (name: string) =>
+    runner.has !== undefined && !runner.has(name) ? null : runner.run(name, { code: p.code });
+
+  const st = read("ST状态");
+  const isSt = st !== null && st.confidence > 0 && st.value === 1;
+
+  const severe: string[] = [];
+  const lift = read("解禁压力");
+  if (lift !== null && lift.label === "严重") {
+    severe.push(`未来 90 天解禁 ${pct(asNum(lift.value) ?? 0)} 流通股（最近 ${lift.inputs?.["最近解禁日"] ?? "—"}）`);
+  }
+  const plan = read("减持计划");
+  if (plan !== null && plan.confidence > 0 && plan.label === "严重") {
+    severe.push(`股东减持计划上限 ${pct(asNum(plan.value) ?? 0)} 总股本`);
+  }
+  const ob = read("超买超卖");
+  if (ob !== null && ob.confidence > 0 && ob.label === "严重超买") {
+    severe.push("严重超买，可考虑兑现一部分");
+  }
+
+  if (isSt) {
+    const why = `处于风险警示期（ST：涨跌幅 5%、有退市风险）`;
+    if (base.action === "清仓") return { ...base, thesis: `${base.thesis}；另：${why}` };
+    return { ...base, action: "清仓", size: 0, thesis: `${why}，与盈亏无关，走；原判定：${base.thesis}` };
+  }
+  if (severe.length === 0) return base;
+
+  const note = `风险：${severe.join("；")}`;
+  if (base.action === "持有") {
+    return { ...base, action: "观察", thesis: `${base.thesis}；${note}` };
+  }
+  return { ...base, thesis: `${base.thesis}；${note}` };
+}
+
+/** 纪律判定本体。顺序即优先级，不可重排 —— 风险叠加见 decideHolding */
+function decideHoldingCore(
   input: StrategyEngineInput,
   p: { account: AccountId; code: string; cost: number; qty: number; stopPx: number | null },
   gear: EnvGear, warn: (m: string) => void
@@ -927,7 +989,7 @@ export function createStrategyEngine(deps: EngineDeps): StrategyEngine {
           buildCandidates(input, runner, mainlines, heldCodes, date, warn),
           config, env.targetPosition);
 
-    const holdings = buildHoldings(input, env.gear, date, warn);
+    const holdings = buildHoldings(input, env.gear, date, warn, runner);
 
     return {
       // 时间只来自视图。这里读一次系统时钟，就等于回测与实盘走了两条不同的路径

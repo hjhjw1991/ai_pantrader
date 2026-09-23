@@ -209,8 +209,8 @@ describe("过滤器 7 目标匹配", () => {
 });
 
 describe("过滤器整体", () => {
-  it("七道筛一道不少", () => {
-    expect(FILTER_NAMES).toHaveLength(7);
+  it("十道筛一道不少 —— 在原七道之上加了 ST / 解禁减持 / 超买三道风险否决", () => {
+    expect(FILTER_NAMES).toHaveLength(10);
     const rep = runFilters(viewFor({ closes: calm }), "600000", "卫星");
     expect(rep.outcomes.map(o => o.name)).toEqual([...FILTER_NAMES]);
   });
@@ -231,7 +231,7 @@ describe("过滤器整体", () => {
     }
   });
 
-  it("因子形态：置信度 = 已判定筛数 / 7", () => {
+  it("因子形态：置信度 = 已判定筛数 / 筛总数", () => {
     const spec = FILTER_FACTORS.find(f => f.name === "过滤器")!;
     const view = viewFor({ closes: calm });
     const r = spec.fn({ view, params: {
@@ -239,11 +239,130 @@ describe("过滤器整体", () => {
       账户可交易板块: { 我的账户: ["主板"] },
     } });
     expect(r.value).toBe(0);                       // 硬否决数
-    expect(r.confidence).toBeCloseTo(5 / 7, 6);
+    // 原 5 道 + ST + 超买 + 解禁减持（减持部分在观测起点前未观测，但解禁那半能判，按 partial 计入）
+    // 估值基本面、催化真伪仍无数据源
+    expect(r.confidence).toBeCloseTo(8 / 10, 6);
     expect(r.provenance).toBe("real");
   });
 });
 
 it("bar 直接构造可用", () => {
   expect(bar("600000", asOf, 10).c).toBe(10);
+});
+
+/* ---------------------------- 风险否决三道 ---------------------------- */
+
+describe("过滤器 8 ST", () => {
+  const stView = (hist: Array<{ from: string; to: string | null }>) => {
+    const dates = ds.slice(ds.length - 40);
+    return makeView({
+      asOf: dates[dates.length - 1],
+      securities: [sec("600000", "主板", { name: "*ST测试", isStHistory: hist })],
+      bars: { "600000": seriesFrom("600000", dates, calm) },
+      quotes: { "600000": quote("600000", { turnover: 5, amplitude: 4 }) },
+    });
+  };
+
+  it("戴帽 → 否决", () => {
+    const rep = runFilters(stView([{ from: "2026-01-01", to: null }]), "600000", "卫星");
+    const o = rep.outcomes.find(o => o.name === "ST")!;
+    expect(o.evaluated).toBe(true);
+    expect(o.pass).toBe(false);
+    expect(rep.rejected).toContain("ST");
+  });
+
+  it("未戴帽 → 通过", () => {
+    const o = runFilters(stView([]), "600000", "卫星").outcomes.find(o => o.name === "ST")!;
+    expect(o.evaluated).toBe(true);
+    expect(o.pass).toBe(true);
+  });
+
+  it("观测起点之前 → **未判定**，不是通过", () => {
+    const o = runFilters(stView([]), "600000", "卫星", { ST观测起点: "2099-01-01" } as any)
+      .outcomes.find(o => o.name === "ST")!;
+    expect(o.evaluated).toBe(false);
+  });
+});
+
+describe("过滤器 9 解禁减持", () => {
+  const riskView = (opt: { lift?: number; plan?: number }) => {
+    const dates = ds.slice(ds.length - 40);
+    const asOfD = dates[dates.length - 1];
+    return makeView({
+      asOf: asOfD,
+      securities: [sec("600000", "主板")],
+      bars: { "600000": seriesFrom("600000", dates, calm) },
+      quotes: { "600000": quote("600000", { turnover: 5, amplitude: 4 }) },
+      lifts: opt.lift === undefined ? {} : { "600000": [{ date: asOfD, freeRatio: opt.lift, liftMktcap: 1e8, shareType: "首发" }] },
+      plans: opt.plan === undefined ? {} : { "600000": [{
+        actor: "股东甲", startDate: asOfD, endDate: "2099-01-01", maxRatio: opt.plan, maxShares: 1e7, firstSeen: "2000-01-01",
+      }] },
+    });
+  };
+  const o = (v: any, extra: Record<string, unknown> = {}) =>
+    runFilters(v, "600000", "卫星", { 减持观测起点: "2000-01-01", ...extra } as any).outcomes.find(x => x.name === "解禁减持")!;
+
+  it("没有解禁、没有减持计划 → 通过", () => {
+    expect(o(riskView({}))).toMatchObject({ evaluated: true, pass: true });
+  });
+
+  it("解禁占流通 ≥ 否决线（默认 15%）→ 否决", () => {
+    expect(o(riskView({ lift: 0.2 })).pass).toBe(false);
+  });
+
+  it("解禁在预警区（5%~15%）→ 通过但说明里点名 —— 买点的赔率会被压，人要知道", () => {
+    const r = o(riskView({ lift: 0.08 }));
+    expect(r.pass).toBe(true);
+    expect(r.reason).toMatch(/解禁/);
+  });
+
+  it("减持计划上限 ≥ 否决线（默认 3% 总股本）→ 否决", () => {
+    expect(o(riskView({ plan: 0.03 })).pass).toBe(false);
+  });
+
+  it("**减持计划未观测时按 partial 计** —— 解禁那半能判，不能因为另一半缺数据整道筛失明", () => {
+    const r = runFilters(riskView({}), "600000", "卫星", { 减持观测起点: "2099-01-01" } as any)
+      .outcomes.find(x => x.name === "解禁减持")!;
+    expect(r.evaluated).toBe(true);
+    expect(r.partial).toBe(true);
+    expect(r.reason).toMatch(/未观测/);
+  });
+});
+
+describe("过滤器 10 超买", () => {
+  // 横盘后连拉 5 个板：RSI 100 / 乖离 19.9% / J 115 → 4 分，严重超买
+  const up = [...Array(35).fill(10), 11, 12.1, 13.31, 14.64, 16.1];
+
+  it("严重超买 → 否决 —— 买在这里，止损离得近、目标位离得远，盈亏比天然差", () => {
+    const o = runFilters(viewFor({ closes: up }), "600000", "卫星").outcomes.find(o => o.name === "超买")!;
+    expect(o.evaluated).toBe(true);
+    expect(o.pass).toBe(false);
+  });
+
+  it("否决线可调：设到 99 等于关掉 —— 这道筛与「不限制打板」天然有张力，得留开关", () => {
+    const o = runFilters(viewFor({ closes: up }), "600000", "卫星", { 超买否决分: 99 } as any)
+      .outcomes.find(o => o.name === "超买")!;
+    expect(o.pass).toBe(true);
+  });
+
+  it("平稳 → 通过", () => {
+    const o = runFilters(viewFor({ closes: calm }), "600000", "卫星").outcomes.find(o => o.name === "超买")!;
+    expect(o.pass).toBe(true);
+  });
+
+  /**
+   * 两道筛各管一件事，这条把分工钉住。
+   *
+   * 稳步连涨（每天 +5%）的 RSI 是 100，但乖离与 J 都不报警 —— 它们衡量的是相对短均线的
+   * **短期偏离**，稳步上涨时 MA5 跟得上。于是它只拿 2 分（超买），不被超买筛否决。
+   * 这是对的区分：稳步趋势能持续，抛物线式急拉才是经典的短期过热。
+   *
+   * 而累计涨幅过大（这只票 20 日 +165%）是**位置**筛的活，它照样会被否掉。
+   */
+  it("稳步连涨不被超买筛否决，但会被位置筛否决 —— 短期过热与累计涨幅是两件事", () => {
+    const steady = Array.from({ length: 40 }, (_, i) => 10 * Math.pow(1.05, i));
+    const rep = runFilters(viewFor({ closes: steady }), "600000", "卫星");
+    expect(rep.outcomes.find(o => o.name === "超买")!.pass).toBe(true);
+    expect(rep.rejected).toContain("位置");
+  });
 });

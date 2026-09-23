@@ -104,6 +104,14 @@ class FixtureView implements PointInTimeView {
     return null;
   }
 
+  liftsAhead(_code: string, _days: number): [] {
+    return [];
+  }
+
+  reductionPlans(_code: string, _days: number): [] {
+    return [];
+  }
+
   minuteBars(_code: string, _period: number, _n: number): MinuteBar[] {
     return [];
   }

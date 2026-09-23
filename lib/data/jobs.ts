@@ -14,6 +14,8 @@ import { coverageReport, detectGaps, recordGap, resolveGapsForKind } from "@/lib
 import { collectSwIndustry, swSnapshotDue } from "@/lib/data/collectors/sw-industry";
 import { buildIndustrySpans } from "@/lib/data/collectors/industry-span";
 import { collectValuation } from "@/lib/data/collectors/valuation";
+import { collectLiftSchedule } from "@/lib/data/collectors/lift";
+import { collectReductionPlans } from "@/lib/data/collectors/reduction-plan";
 import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
 import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
@@ -53,6 +55,13 @@ const SECTOR_MEMBERS_MAX_AGE_DAYS = 7;
 const ADJ_FACTOR_MAX_AGE_DAYS = 7;
 const ADJ_FACTOR_META_KEY = "adj_factor_refreshed_at";
 
+/**
+ * 解禁日历按周重拉。日历在发行时就定了，变化只来自新完成的定增与少数延期，
+ * 周频远快于它的变化速度；一次全量约 60 页东财请求。
+ */
+const LIFT_MAX_AGE_DAYS = 7;
+const LIFT_META_KEY = "lift_schedule_refreshed_at";
+
 export type JobName =
   | "selfcheck" | "preopen" | "plan" | "intraday" | "close" | "post" | "night";
 
@@ -62,7 +71,11 @@ export interface JobDeps {
    * sw = 申万宏源。单独一个 client 而不是复用 eastmoney：它有自己的 WAF 与节流特性
    * （并发 ≥3 就被拦），熔断器和限速桶必须与东财互相隔离，否则申万被拦会连累东财退避。
    */
-  clients: { sina: SourceClient; tencent: SourceClient; eastmoney: SourceClient; sw: SourceClient };
+  clients: {
+    sina: SourceClient; tencent: SourceClient; eastmoney: SourceClient; sw: SourceClient;
+    /** 同花顺 F10：只用于减持计划。独立熔断，免得它被拦时连累东财 */
+    ths: SourceClient;
+  };
   now: Date;
   /**
    * 批次级进度回调，可选。只有手动采集（页面按钮）会传 ——
@@ -507,6 +520,45 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         const msg = (e as Error).message;
         console.error(`[night] 估值快照失败：${msg}`);
         recordGap(db, date, clients.eastmoney.source, "valuation", `估值快照抛错：${msg}`, false);
+      }
+
+      /**
+       * 解禁日历，按周刷。窗口取过去一年到未来两年：
+       * 过去那段给回测用，未来那段是"未来 90 天有没有解禁"的判据本体。
+       */
+      try {
+        const last = getMeta(db, LIFT_META_KEY);
+        const lastMs = last === null ? NaN : Date.parse(`${last.slice(0, 10)}T00:00:00Z`);
+        if (!Number.isFinite(lastMs) || (now.getTime() - lastMs) / 86_400_000 >= LIFT_MAX_AGE_DAYS) {
+          const r = await collectLiftSchedule(db, clients.eastmoney, {
+            from: addDays(date, -365), to: addDays(date, 730), date,
+          });
+          stats.liftRows = r.written;
+          if (r.written > 0) setMeta(db, LIFT_META_KEY, date);
+        }
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 解禁日历失败：${msg}`);
+        recordGap(db, date, clients.eastmoney.source, "lift_schedule", `解禁日历抛错：${msg}`, true);
+      }
+
+      /**
+       * 减持计划，每晚。只看近 3 个交易日的公告：
+       * 每晚都跑的话 1 天就够，多看两天是给"某晚没跑成"留余量 —— 漏掉的那条预披露
+       * 要等它的执行窗口开始才会以别的形式出现，而那时已经晚了。
+       */
+      try {
+        const r = await collectReductionPlans(db, { em: clients.eastmoney, ths: clients.ths }, {
+          from: addDays(date, -4), to: date, date, pauseMs: 300,
+        });
+        stats.reductionNotices = r.notices;
+        stats.reductionPlanCodes = r.planCodes;
+        stats.reductionPlans = r.plans;
+        stats.reductionFailed = r.failed.length;
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 减持计划失败：${msg}`);
+        recordGap(db, date, clients.ths.source, "reduction_plan", `减持计划抛错：${msg}`, true);
       }
 
 

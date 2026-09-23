@@ -28,6 +28,10 @@ export interface ViewFixture {
   tradingDays?: string[];
   /** date -> kind[] */
   gaps?: Record<string, string[]>;
+  /** code -> 未来解禁（替身不按天数过滤，给什么返回什么） */
+  lifts?: Record<string, Array<{ date: string; freeRatio: number | null; liftMktcap: number | null; shareType: string }>>;
+  /** code -> 进行中/即将开始的减持计划 */
+  plans?: Record<string, Array<{ actor: string; startDate: string; endDate: string; maxRatio: number | null; maxShares: number | null; firstSeen: string }>>;
 }
 
 export function makeView(f: ViewFixture): PointInTimeView {
@@ -59,6 +63,8 @@ export function makeView(f: ViewFixture): PointInTimeView {
     periodBars(): any[] { return []; },
   industryAt(): null { return null; },
   valuation(): null { return null; },
+  liftsAhead(code: string): any[] { return (f.lifts ?? {})[code] ?? []; },
+  reductionPlans(code: string): any[] { return (f.plans ?? {})[code] ?? []; },
     minuteBars(code, period, n) {
       const all = (f.minutes ?? {})[`${code}:${period}`] ?? [];
       return all.slice(Math.max(0, all.length - n));

@@ -34,7 +34,11 @@ describe("默认 strategy.yaml", () => {
     const c = r.config;
     expect(c.择时.仓位档位).toEqual({ 进攻: 0.7, 中性: 0.4, 防守: 0.0 });
     expect(c.择时.防守触发).toEqual({ "跌停家数>": 30, 权重杀跌: true, 外围risk_off: true });
-    expect(c.选股.过滤器阈值).toEqual({ 位置涨幅上限: 50, 换手上限: 15, 振幅上限: 10 });
+    // 前三个是 spec §9.1 原文；后三个是 1.2.0 加的风险否决阈值，写进 YAML 是为了人看得见、调得动
+    expect(c.选股.过滤器阈值).toEqual({
+      位置涨幅上限: 50, 换手上限: 15, 振幅上限: 10,
+      超买否决分: 3, 解禁否决比例: 0.15, 减持否决比例: 0.03,
+    });
     expect(c.选股.主线识别.板块涨幅榜TopN).toBe(3);
     expect(c.选股.主线识别.必查链).toEqual(["半导体全链", "军工", "电网", "资源"]);
     expect(c.组合风控).toEqual({

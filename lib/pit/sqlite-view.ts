@@ -290,6 +290,43 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
       };
     },
 
+    liftsAhead(code: string, days: number) {
+      const n = (v: unknown): number | null =>
+        typeof v === "number" && Number.isFinite(v) ? v : null;
+      return rows(
+        `SELECT free_date, free_ratio, lift_mktcap, share_type FROM lift_schedule
+          WHERE code = ? AND free_date >= ? AND free_date <= date(?, ?)
+          ORDER BY free_date, share_type`,
+        code, asOfDate, asOfDate, `+${Math.max(0, Math.floor(days))} days`
+      ).map(r => ({
+        date: String(r["free_date"]),
+        freeRatio: n(r["free_ratio"]),
+        liftMktcap: n(r["lift_mktcap"]),
+        shareType: String(r["share_type"]),
+      }));
+    },
+
+    reductionPlans(code: string, days: number) {
+      const n = (v: unknown): number | null =>
+        typeof v === "number" && Number.isFinite(v) ? v : null;
+      return rows(
+        `SELECT actor, start_date, end_date, max_ratio, max_shares, first_seen FROM reduction_plan
+          WHERE code = ? AND direction = '减持'
+            AND first_seen <= ?
+            AND end_date >= ?
+            AND start_date <= date(?, ?)
+          ORDER BY start_date, actor`,
+        code, asOfDate, asOfDate, asOfDate, `+${Math.max(0, Math.floor(days))} days`
+      ).map(r => ({
+        actor: String(r["actor"]),
+        startDate: String(r["start_date"]),
+        endDate: String(r["end_date"]),
+        maxRatio: n(r["max_ratio"]),
+        maxShares: n(r["max_shares"]),
+        firstSeen: String(r["first_seen"]),
+      }));
+    },
+
     minuteBars(code: string, period: number, n: number): MinuteBar[] {
       if (n <= 0) return [];
       const expr = tsLocalExpr("ts");

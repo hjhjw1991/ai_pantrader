@@ -327,6 +327,8 @@ describe("调度器接入唤醒补偿", () => {
     eastmoney: stub(JSON.stringify({ data: { pool: [] }, result: { pages: 1, data: [] } })) as any,
     // 申万快照：空名单 → 只走 31 个一级空成分，不打网络也不产生缺口
     sw: stub('{"code":"200","data":[]}') as any,
+    // 同花顺：返回空页 → 解析不出计划，不打网络也不产生缺口
+    ths: stub("") as any,
   });
 
   it("第一轮 tick 就做唤醒评估，回收残留并记 missed", async () => {

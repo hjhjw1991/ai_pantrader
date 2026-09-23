@@ -28,6 +28,8 @@ export interface ViewFixture {
   periods?: Record<string, DailyBar[]>;
   /** 行业归属。键是 `${code}|${level}` */
   industries?: Record<string, { indexCode: string; indexName: string }>;
+  lifts?: Record<string, Array<{ date: string; freeRatio: number | null; liftMktcap: number | null; shareType: string }>>;
+  plans?: Record<string, Array<{ actor: string; startDate: string; endDate: string; maxRatio: number | null; maxShares: number | null; firstSeen: string }>>;
   /** 估值。键是 code */
   valuations?: Record<string, {
     date: string; pe: number | null; pb: number | null;
@@ -65,6 +67,8 @@ export function makeView(f: ViewFixture): PointInTimeView {
     },
     industryAt: (code: string, level: 1 | 3) => (f.industries ?? {})[`${code}|${level}`] ?? null,
     valuation: (code: string) => (f.valuations ?? {})[code] ?? null,
+    liftsAhead: (code: string) => (f.lifts ?? {})[code] ?? [],
+    reductionPlans: (code: string) => (f.plans ?? {})[code] ?? [],
     minuteBars: (): MinuteBar[] => [],
     quote: code => (f.quotes ?? {})[code] ?? null,
     ztPool: date => (f.zt ?? {})[dateOf(date)] ?? [],
