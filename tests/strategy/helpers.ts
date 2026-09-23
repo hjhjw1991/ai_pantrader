@@ -26,6 +26,13 @@ export interface ViewFixture {
   securities?: SecurityRow[];
   /** 周/月线。键是 `${code}|${period}` */
   periods?: Record<string, DailyBar[]>;
+  /** 行业归属。键是 `${code}|${level}` */
+  industries?: Record<string, { indexCode: string; indexName: string }>;
+  /** 估值。键是 code */
+  valuations?: Record<string, {
+    date: string; pe: number | null; pb: number | null;
+    mktcap: number | null; floatMktcap: number | null;
+  }>;
   tradingDays?: string[];
   gaps?: Record<string, string[]>;
 }
@@ -56,6 +63,8 @@ export function makeView(f: ViewFixture): PointInTimeView {
       const all = (f.periods?.[`${code}|${period}`] ?? []).filter(b => b.date <= asOfDate);
       return n <= 0 ? [] : all.slice(Math.max(0, all.length - n));
     },
+    industryAt: (code: string, level: 1 | 3) => (f.industries ?? {})[`${code}|${level}`] ?? null,
+    valuation: (code: string) => (f.valuations ?? {})[code] ?? null,
     minuteBars: (): MinuteBar[] => [],
     quote: code => (f.quotes ?? {})[code] ?? null,
     ztPool: date => (f.zt ?? {})[dateOf(date)] ?? [],

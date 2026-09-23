@@ -480,3 +480,81 @@ export async function fetchSectorMembers(
     .filter(x => /^\d{6}$/.test(x.f12))
     .map(x => ({ code: String(x.f12), name: String(x.f14 ?? "") }));
 }
+
+/* -------------------------------- 估值 -------------------------------- */
+
+export interface ValuationRow {
+  code: string;
+  /** 市盈率。**亏损股为负**，不要当成"便宜"，也不要当成缺数据 */
+  pe: number | null;
+  pb: number | null;
+  /** 总市值 / 流通市值，单位元 */
+  mktcap: number | null;
+  floatMktcap: number | null;
+}
+
+/**
+ * clist 的估值字段号与单票接口**不一样**，这里踩过：
+ * 单票 `qt/stock/get` 用 f162(PE)/f167(PB) 且数值放大 100 倍；
+ * 而 clist 用 **f9(PE) / f23(PB) / f20(总市值) / f21(流通市值)**，
+ * 配合 fltt=2 直接给可用数值。拿单票的字段号去查 clist，返回的是一片 "-"，
+ * 而那看起来就像"今天全市场都没有估值数据"。
+ */
+export const EM_VALUATION_FIELDS = "f12,f9,f23,f20,f21";
+
+/** 东财用字符串 "-" 表示没有值。转成 null —— 转成 0 会让亏损股和无数据混为一谈 */
+function numOrNull(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string" || v === "-" || v.trim() === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function parseValuationPage(text: string): { rows: ValuationRow[]; total: number } {
+  let j: any;
+  try { j = JSON.parse(text); }
+  catch { throw new Error(`em valuation unexpected payload: ${text.slice(0, 80)}`); }
+
+  const diff = j?.data?.diff;
+  // 限流常表现成结构不对（null / 对象而非数组），而不是一个空列表。
+  // 当成空列表会让这一轮"成功"地写入 0 条，缺口表里什么都不留
+  if (!Array.isArray(diff)) {
+    throw new Error(`em valuation diff 不是数组：${JSON.stringify(j?.data?.diff)?.slice(0, 60)}`);
+  }
+  return {
+    total: Number(j?.data?.total ?? 0),
+    rows: diff.map((x: any) => ({
+      code: String(x.f12),
+      pe: numOrNull(x.f9),
+      pb: numOrNull(x.f23),
+      mktcap: numOrNull(x.f20),
+      floatMktcap: numOrNull(x.f21),
+    })),
+  };
+}
+
+/**
+ * 全市场估值。按代码升序分页 —— 与 fetchSecurities 同一条理由：
+ * 按涨幅排序会让行在翻页间漂移，实测 36 页里重复 229 条，有重复就必然有遗漏。
+ */
+export async function fetchValuations(
+  client: SourceClient, o: RotationOpts & { pageSize?: number; onPage?: (pn: number, got: number, total: number) => void } = {}
+): Promise<ValuationRow[]> {
+  const pz = o.pageSize ?? 100;
+  const out: ValuationRow[] = [];
+  for (let pn = 1; ; pn++) {
+    const r = await getWithHostRotation(
+      client,
+      host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}` +
+        `&po=0&np=1&fltt=2&invt=2&fid=f12&fs=${EM_MARKET_FILTER}&fields=${EM_VALUATION_FIELDS}&ut=${UT}`,
+      `valuation page ${pn}`,
+      { rounds: o.rounds, backoffMs: o.backoffMs, retries: o.retries }
+    );
+    const { rows, total } = parseValuationPage(r.text);
+    if (rows.length === 0) break;
+    out.push(...rows);
+    o.onPage?.(pn, out.length, total);
+    if (out.length >= total || rows.length < pz) break;
+  }
+  return out;
+}

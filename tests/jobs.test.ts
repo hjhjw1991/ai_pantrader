@@ -140,3 +140,26 @@ describe("selfcheck 暴露调度覆盖率", () => {
     expect(r.stats.slotCoverage).toBe(1);
   });
 });
+
+describe("夜间 job 的故障隔离", () => {
+  /**
+   * 真故障注入：把表 drop 掉。
+   *
+   * 这比"用替身模拟抛错"更接近真实 —— 磁盘满、表损坏、迁移没跑全，
+   * 表现出来都是 SQL 直接炸，而不是某个函数礼貌地返回错误。
+   *
+   * 夜间 job 的契约是：**某一块挂了不该让整轮白跑**，后面还有日线、对账、行数快照。
+   * 所以这些块必须各自兜住异常并留痕，而不是把异常一路抛到顶。
+   */
+  const NIGHT_AT = new Date("2026-07-31T14:00:00Z");
+
+  for (const table of ["valuation_daily", "sw_industry_span", "kline_period"]) {
+    it(`${table} 不可用时，夜间 job 仍然跑完而不是整轮崩掉`, async () => {
+      db.prepare(`DROP TABLE ${table}`).run();
+      const r = await runJob("night", { db, clients: clients(), now: NIGHT_AT });
+      expect(r.skipped).toBe(false);
+      // 崩掉的话根本走不到返回值；能拿到 stats 就说明后续步骤仍然执行了
+      expect(r.stats).toBeTypeOf("object");
+    });
+  }
+});

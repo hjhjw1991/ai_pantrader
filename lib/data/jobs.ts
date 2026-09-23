@@ -10,8 +10,10 @@ import {
 import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { INDICES } from "@/lib/data/indices";
 import { collectLhb } from "@/lib/data/collectors/lhb";
-import { coverageReport, detectGaps, recordGap } from "@/lib/data/gap";
+import { coverageReport, detectGaps, recordGap, resolveGapsForKind } from "@/lib/data/gap";
 import { collectSwIndustry, swSnapshotDue } from "@/lib/data/collectors/sw-industry";
+import { buildIndustrySpans } from "@/lib/data/collectors/industry-span";
+import { collectValuation } from "@/lib/data/collectors/valuation";
 import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
 import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
@@ -402,6 +404,25 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       }
 
       /**
+       * 行业区间：每晚从快照差分重算。
+       *
+       * 每晚而不是只在采了新快照那晚：重算是纯本地操作（实测全市场秒级），
+       * 而"只在采集成功那天重算"会让一次采集失败连带把区间表也卡在旧版本上。
+       */
+      try {
+        const sp = buildIndustrySpans(db);
+        stats.industrySpans = sp.spans;
+        // 成功即销账。记了缺口却没人销，缺口表里就会攒下永久噪音，把真事故淹掉
+        resolveGapsForKind(db, "local", "sw_industry_span");
+      } catch (e) {
+        // 纯本地计算也会炸：磁盘满、表损坏、迁移没跑全。
+        // 夜间 job 后面还有日线、对账、行数快照，不该为此整轮白跑
+        const msg = (e as Error).message;
+        console.error(`[night] 行业区间重算失败：${msg}`);
+        recordGap(db, date, "local", "sw_industry_span", `区间重算抛错：${msg}`, true);
+      }
+
+      /**
        * 指数日线。放在个股全量之前：只有 6 个请求，先拿到能让"今天有没有数据"
        * 这件事更早成立；而且个股那 5,888 次一旦触发新浪限频，指数会跟着一起挂。
        */
@@ -454,9 +475,38 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
        * 每晚全量而不是增量：复权因子会**回头改**（一次除权重写该票全部历史的因子），
        * 增量必然算错。而这是纯本地计算，不打任何源。
        */
-      {
+      try {
         const p = buildPeriodBars(db, allCodes(db));
         stats.periodBars = p.bars;
+        resolveGapsForKind(db, "local", "kline_period");
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 周月线重算失败：${msg}`);
+        recordGap(db, date, "local", "kline_period", `周月线重算抛错：${msg}`, true);
+      }
+
+      /**
+       * 全市场估值快照。约 60 页东财请求。
+       *
+       * 放在夜里而不是收盘那一刻：PE 跟着价格走，收盘后就定了，不急在一时；
+       * 而 close job 的全市场快照本来就在跟东财抢限频额度。
+       *
+       * 不可回补 —— 东财只给此刻的 PE/PB，没有历史接口。所以失败记的是
+       * recoverable=false 的缺口：明天重来拿到的是明天的数，不是今天的。
+       */
+      try {
+        const v = await collectValuation(db, clients.eastmoney, { date });
+        stats.valuationWritten = v.written;
+        stats.valuationSkipped = v.skipped;
+      } catch (e) {
+        /**
+         * collectValuation 自己的 try 只罩住了网络请求，没罩住写库那段 ——
+         * 写库炸了（磁盘满/表损坏）会一路抛到这里。
+         * 不兜的话，一次写库失败会让整个夜间 job 崩在中途。
+         */
+        const msg = (e as Error).message;
+        console.error(`[night] 估值快照失败：${msg}`);
+        recordGap(db, date, clients.eastmoney.source, "valuation", `估值快照抛错：${msg}`, false);
       }
 
 

@@ -57,6 +57,8 @@ export function makeView(f: ViewFixture): PointInTimeView {
       }));
     },
     periodBars(): any[] { return []; },
+  industryAt(): null { return null; },
+  valuation(): null { return null; },
     minuteBars(code, period, n) {
       const all = (f.minutes ?? {})[`${code}:${period}`] ?? [];
       return all.slice(Math.max(0, all.length - n));

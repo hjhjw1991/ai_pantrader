@@ -95,6 +95,15 @@ class FixtureView implements PointInTimeView {
     return [];
   }
 
+  /** 同理：行业与估值都返回"不知道"，而不是编一个出来 */
+  industryAt(_code: string, _level: 1 | 3): null {
+    return null;
+  }
+
+  valuation(_code: string): null {
+    return null;
+  }
+
   minuteBars(_code: string, _period: number, _n: number): MinuteBar[] {
     return [];
   }

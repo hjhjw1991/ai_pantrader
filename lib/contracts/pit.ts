@@ -132,6 +132,25 @@ export interface PointInTimeView {
   tradingDays(from: string, to: string): string[];
   prevTradingDay(date: string, back?: number): string | null;
 
+  /**
+   * asOf 那天这只票属于哪个申万行业。查不到返回 null。
+   *
+   * **返回 null 的情况必须当成"不知道"，不能当成"不在主线上"**：
+   * 74.6% 的票 beginningdate 压在 2021-12-13（2021 版基期），在那之前
+   * 申万这套分类根本不存在，硬给一个行业等于用今天的定义解释历史。
+   */
+  industryAt(code: string, level: 1 | 3): { indexCode: string; indexName: string } | null;
+  /**
+   * 不晚于 asOf 的最近一条估值。**带上它的日期**，调用方要能判断新鲜度 ——
+   * 数据源只给当日快照，接入之前一片空白，中间也可能有缺口。
+   *
+   * pe 为负是亏损，是真实读数，不是缺数据。
+   */
+  valuation(code: string): {
+    date: string; pe: number | null; pb: number | null;
+    mktcap: number | null; floatMktcap: number | null;
+  } | null;
+
   /** 该日是否有已知数据缺口。回测遇到必须跳过并计入覆盖率（spec §10.5） */
   hasGap(date: string, kind?: string): boolean;
 }

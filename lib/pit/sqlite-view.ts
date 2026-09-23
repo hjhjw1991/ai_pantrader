@@ -262,6 +262,34 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
       }));
     },
 
+    industryAt(code: string, level: 1 | 3) {
+      const r = rows(
+        `SELECT index_code, index_name FROM sw_industry_span
+          WHERE code = ? AND level = ? AND from_date <= ?
+            AND (to_date IS NULL OR to_date > ?)
+          ORDER BY from_date DESC LIMIT 1`,
+        code, level, asOfDate, asOfDate
+      );
+      if (r.length === 0) return null;
+      return { indexCode: String(r[0]["index_code"]), indexName: String(r[0]["index_name"]) };
+    },
+
+    valuation(code: string) {
+      const r = rows(
+        `SELECT date, pe, pb, mktcap, float_mktcap FROM valuation_daily
+          WHERE code = ? AND date <= ? ORDER BY date DESC LIMIT 1`,
+        code, asOfDate
+      );
+      if (r.length === 0) return null;
+      const n = (v: unknown): number | null =>
+        typeof v === "number" && Number.isFinite(v) ? v : null;
+      return {
+        date: String(r[0]["date"]),
+        pe: n(r[0]["pe"]), pb: n(r[0]["pb"]),
+        mktcap: n(r[0]["mktcap"]), floatMktcap: n(r[0]["float_mktcap"]),
+      };
+    },
+
     minuteBars(code: string, period: number, n: number): MinuteBar[] {
       if (n <= 0) return [];
       const expr = tsLocalExpr("ts");
