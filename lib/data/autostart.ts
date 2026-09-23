@@ -64,6 +64,8 @@ export interface AutostartOpts {
   signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
   /** 周复盘实现，同样由组装根注入。不给就只是不出周报，对账照常 */
   weeklyReview?: (db: Db, from: string, to: string) => { stats: { settled: number }; notified: boolean };
+  /** 夜间派生表重建，同样由组装根注入。不给则夜间 job 统计里记 derivedSkipped */
+  buildDerived?: (db: Db, date: string) => Record<string, number>;
 }
 
 export function startAutostart(
@@ -96,6 +98,7 @@ export function startAutostart(
     ...(opts.planPreopen ? { planPreopen: opts.planPreopen } : {}),
     ...(opts.signalWatch ? { signalWatch: opts.signalWatch } : {}),
     ...(opts.weeklyReview ? { weeklyReview: opts.weeklyReview } : {}),
+    ...(opts.buildDerived ? { buildDerived: opts.buildDerived } : {}),
   });
   scheduler.start();
 

@@ -57,6 +57,9 @@ export const BAK_TABLES = [
   // 两融、互联互通、已实施增减持。三者都能从东财重拉，但回补两年两融要 4000+ 次请求、
   // 约 45 分钟，换机后这段时间里杠杆资金类判据全部失明；体积不大，带上
   "margin_market", "margin_stock", "mutual_deal", "mutual_top10", "holder_change",
+  // 情绪截面派生表。能从日线重算，但三年约 750 天 × 0.3 秒，而且没有它
+  // 情绪周期因子全报"未构建"；一天一行，体积可以忽略
+  "sentiment_daily",
 ];
 
 /**

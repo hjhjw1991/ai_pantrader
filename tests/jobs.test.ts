@@ -155,6 +155,25 @@ describe("夜间 job 的故障隔离", () => {
    */
   const NIGHT_AT = new Date("2026-07-31T14:00:00Z");
 
+  it("注入了 buildDerived 就在夜间跑，统计并进 job", async () => {
+    const r = await runJob("night", { db, clients: clients(), now: NIGHT_AT,
+      buildDerived: () => ({ sentimentBuilt: 7 }) });
+    expect(r.stats).toMatchObject({ derived_sentimentBuilt: 7 });
+  });
+
+  it("没注入 buildDerived 如实记 derivedSkipped，而不是假装跑过", async () => {
+    const r = await runJob("night", { db, clients: clients(), now: NIGHT_AT });
+    expect(r.stats).toMatchObject({ derivedSkipped: 1 });
+  });
+
+  it("buildDerived 抛错不让夜间 job 崩掉，记一条可回补缺口", async () => {
+    const r = await runJob("night", { db, clients: clients(), now: NIGHT_AT,
+      buildDerived: () => { throw new Error("disk full"); } });
+    expect(r.skipped).toBe(false);
+    const g = db.prepare("SELECT kind, reason FROM data_gap WHERE kind = 'sentiment'").get() as any;
+    expect(g.reason).toMatch(/disk full/);
+  });
+
   for (const table of [
     "valuation_daily", "sw_industry_span", "kline_period",
     "margin_market", "margin_stock", "mutual_deal", "mutual_top10", "holder_change",

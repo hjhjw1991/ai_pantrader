@@ -44,6 +44,26 @@ export interface SchedulerOpts {
   planPreopen?: (db: Db) => Promise<{ ok: boolean; reason?: string; candidates: unknown[] }>;
   /** 盘中信号盯守，见 JobDeps.signalWatch */
   signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
+  /** 周复盘，见 JobDeps.weeklyReview */
+  weeklyReview?: JobDeps["weeklyReview"];
+  /** 夜间派生表重建，见 JobDeps.buildDerived */
+  buildDerived?: JobDeps["buildDerived"];
+}
+
+/**
+ * 组装根注入的上层实现，原样转交给 runJob。
+ *
+ * 收成一个函数是因为以前两处调用各自手写展开，weeklyReview 在这里漏传过 ——
+ * autostart 注入了、类型也没报错（条件展开绕过了多余属性检查），
+ * 结果常驻进程下的周复盘从来没跑过，只有手动 `pnpm job` 才会出周报。
+ */
+function injected(o: SchedulerOpts): Partial<JobDeps> {
+  return {
+    ...(o.planPreopen ? { planPreopen: o.planPreopen } : {}),
+    ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
+    ...(o.weeklyReview ? { weeklyReview: o.weeklyReview } : {}),
+    ...(o.buildDerived ? { buildDerived: o.buildDerived } : {}),
+  };
 }
 
 export type SchedulerEvent =
@@ -178,11 +198,7 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
     }
     if (!claimSlot(o.db, date, job, slot, runner)) return;
     try {
-      const result = await runJob(job, {
-        db: o.db, clients: o.clients, now: at,
-        ...(o.planPreopen ? { planPreopen: o.planPreopen } : {}),
-        ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
-      });
+      const result = await runJob(job, { db: o.db, clients: o.clients, now: at, ...injected(o) });
       const outcome = jobOutcome(job, result.stats);
       if (outcome.ok) {
         finishSlot(o.db, date, job, slot, "done", result.stats);
@@ -246,12 +262,7 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
         }
 
         try {
-          const result = await runJob(d.job, {
-            db: o.db, clients: o.clients, now: at,
-            ...(o.planPreopen ? { planPreopen: o.planPreopen } : {}),
-            ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
-        ...(o.signalWatch ? { signalWatch: o.signalWatch } : {}),
-          });
+          const result = await runJob(d.job, { db: o.db, clients: o.clients, now: at, ...injected(o) });
           // 没抛错 ≠ 成功：采集器批次失败时记 gap 后继续，全军覆没也会正常返回
           const outcome = jobOutcome(d.job, result.stats);
           if (outcome.ok) {

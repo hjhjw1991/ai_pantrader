@@ -43,6 +43,25 @@ describe("limitUpThreshold —— 分板阈值（spec §8.1）", () => {
     expect(limitUpThreshold(s, "2022-06-01")).toBe(4.8);
     expect(limitUpThreshold(s, "2026-08-03")).toBe(9.8);
   });
+
+  it("主板 ST 自 2026-07-06 起与主板一致为 10%", () => {
+    const s = sec("002667", "主板", { isStHistory: [{ from: "2026-01-01", to: null }] });
+    expect(limitUpThreshold(s, "2026-07-03")).toBe(4.8);
+    expect(limitUpThreshold(s, "2026-07-06")).toBe(9.8);
+  });
+
+  it("创业板 / 科创板的 ST 不用 5%（2020-08-24 之后创业板 ST 也是 20%）", () => {
+    const st = { isStHistory: [{ from: "2021-01-01", to: null }] };
+    expect(limitUpThreshold(sec("301139", "创业板", st), "2026-06-01")).toBe(19.8);
+    expect(limitUpThreshold(sec("688066", "科创板", st), "2026-06-01")).toBe(19.8);
+  });
+
+  it("创业板注册制改革（2020-08-24）之前是 10%，ST 5%", () => {
+    expect(limitUpThreshold(sec("300750", "创业板"), "2020-08-21")).toBe(9.8);
+    expect(limitUpThreshold(sec("300750", "创业板"), "2020-08-24")).toBe(19.8);
+    const st = sec("300001", "创业板", { isStHistory: [{ from: "2019-01-01", to: null }] });
+    expect(limitUpThreshold(st, "2020-08-21")).toBe(4.8);
+  });
 });
 
 describe("judgeBarLimitUp —— 日线代理还原封板", () => {
@@ -53,6 +72,23 @@ describe("judgeBarLimitUp —— 日线代理还原封板", () => {
     const j = judgeBarLimitUp(s, sealedBar("600000", "2026-08-03", 10, 9.9), prev("600000", 10));
     expect(j.limitUp).toBe(true);
     expect(j.pct).toBeCloseTo(9.9, 4);
+  });
+
+  it("低价股按精确涨停价判：前收 1.64 → 涨停价 1.80（涨幅只有 9.76%）", () => {
+    const s = sec("600715", "主板");
+    const j = judgeBarLimitUp(s, bar("600715", "2026-08-11", 1.8, { h: 1.8, l: 1.7 }), bar("600715", "2026-08-10", 1.64));
+    expect(j.pct).toBeLessThan(9.8);
+    expect(j.limitUp).toBe(true);
+  });
+
+  it("低价股差一分不到涨停价 → 不算", () => {
+    const s = sec("600715", "主板");
+    expect(judgeBarLimitUp(s, bar("600715", "2026-08-11", 1.79, { h: 1.79, l: 1.7 }), bar("600715", "2026-08-10", 1.64)).limitUp).toBe(false);
+  });
+
+  it("低价股跌停同理：前收 1.64 → 跌停价 1.48", () => {
+    const s = sec("600715", "主板");
+    expect(judgeBarLimitDown(s, bar("600715", "2026-08-11", 1.48, { h: 1.6, l: 1.48 }), bar("600715", "2026-08-10", 1.64)).limitDown).toBe(true);
   });
 
   it("主板 9.9% 但收盘 < 最高（炸板）→ 不算涨停", () => {
@@ -129,10 +165,17 @@ describe("judgeBarLimitDown —— 跌停（防守触发要数跌停家数）", 
     const b = bar("600000", "2026-08-03", 9.01, { h: 9.6, l: 9.01 });
     expect(judgeBarLimitDown(s, b, bar("600000", "2026-07-31", 10)).limitDown).toBe(true);
   });
-  it("ST -4.9% 跌停", () => {
+  it("ST -4.9% 跌停（2026-07-06 规则调整前）", () => {
     const s = sec("600129", "主板", { isStHistory: [{ from: "2026-01-01", to: null }] });
-    const b = bar("600129", "2026-08-03", 9.51, { h: 9.9, l: 9.51 });
-    expect(judgeBarLimitDown(s, b, bar("600129", "2026-07-31", 10)).limitDown).toBe(true);
+    const b = bar("600129", "2026-07-03", 9.51, { h: 9.9, l: 9.51 });
+    expect(judgeBarLimitDown(s, b, bar("600129", "2026-07-02", 10)).limitDown).toBe(true);
+  });
+
+  it("规则调整后主板 ST -4.9% 不再是跌停，-9.9% 才是", () => {
+    const s = sec("600129", "主板", { isStHistory: [{ from: "2026-01-01", to: null }] });
+    const prev = bar("600129", "2026-07-31", 10);
+    expect(judgeBarLimitDown(s, bar("600129", "2026-08-03", 9.51, { h: 9.9, l: 9.51 }), prev).limitDown).toBe(false);
+    expect(judgeBarLimitDown(s, bar("600129", "2026-08-03", 9.01, { h: 9.9, l: 9.01 }), prev).limitDown).toBe(true);
   });
 });
 
@@ -145,6 +188,7 @@ describe("limitUpCodes / limitDownCodes —— 全市场扫描", () => {
       sec("300750", "创业板"),
       sec("832317", "北交所"),
       sec("600129", "主板", { isStHistory: [{ from: "2026-01-01", to: null }] }),
+      sec("600130", "主板", { isStHistory: [{ from: "2026-01-01", to: null }] }),
       sec("301999", "创业板", { listDate: "2026-08-03" }),
       sec("600900", "主板"),
       sec("600001", "主板", { delistDate: "2026-01-01" }),   // 已退市，不该进池子
@@ -153,7 +197,10 @@ describe("limitUpCodes / limitDownCodes —— 全市场扫描", () => {
       "600000": [bar("600000", ds[0], 10), sealedBar("600000", ds[1], 10, 9.9)],
       "300750": [bar("300750", ds[0], 10), sealedBar("300750", ds[1], 10, 19.9)],
       "832317": [bar("832317", ds[0], 10), sealedBar("832317", ds[1], 10, 29.8)],
-      "600129": [bar("600129", ds[0], 10), sealedBar("600129", ds[1], 10, 4.9)],
+      // 2026-08-03 已在主板 ST 放宽到 10% 之后：ST 的涨停也是 10%
+      "600129": [bar("600129", ds[0], 10), sealedBar("600129", ds[1], 10, 9.9)],
+      // 同为 ST、+4.9% 收在最高 —— 旧规则下是涨停，新规则下只是收在最高价
+      "600130": [bar("600130", ds[0], 10), sealedBar("600130", ds[1], 10, 4.9)],
       "301999": [sealedBar("301999", ds[1], 10, 43)],
       "600900": [bar("600900", ds[0], 10), bar("600900", ds[1], 9.01, { h: 9.6, l: 9.01 })],
       "600001": [bar("600001", ds[0], 10)],

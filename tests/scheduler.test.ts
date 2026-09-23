@@ -97,6 +97,19 @@ describe("dueSlots", () => {
 });
 
 describe("createScheduler", () => {
+  it("组装根注入的上层实现原样转交给 job —— weeklyReview 以前在这里漏传过", async () => {
+    const calls: string[] = [];
+    const s = createScheduler({
+      db, clients: clients(), now: () => at("22:05"),
+      buildDerived: (_db, date) => { calls.push(`derived@${date}`); return { sentimentBuilt: 1 }; },
+      onEvent: () => {},
+    });
+    await s.tickOnce();
+    expect(calls).toContain("derived@2026-08-05");
+    const night = db.prepare("SELECT stats_json FROM job_run WHERE date='2026-08-05' AND job='night'").get() as any;
+    expect(JSON.parse(night.stats_json)).toMatchObject({ derived_sentimentBuilt: 1 });
+  });
+
   it("启动即执行一轮 —— 跑起系统就自动采集", async () => {
     const events: string[] = [];
     const s = createScheduler({

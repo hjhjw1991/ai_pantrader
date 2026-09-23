@@ -37,6 +37,8 @@ export interface ViewFixture {
   marginStock?: Record<string, Array<{ date: string; rzye: number | null; rzmre: number | null; rzjme: number | null; rzyezb: number | null }>>;
   mutualDeal?: Array<{ date: string; mutualType: string; dealAmt: number | null; netAmt: number | null }>;
   mutualTop10?: Record<string, Array<{ date: string; mutualType: string; rank: number | null; dealAmt: number | null; mutualRatio: number | null }>>;
+  /** 情绪截面派生表的行，升序 */
+  sentiment?: import("@/lib/contracts").SentimentRow[];
   holderChanges?: Record<string, Array<{ holder: string; direction: "增持" | "减持"; noticeDate: string; endDate: string; changeFreeRatio: number | null; changeShares: number | null }>>;
 }
 
@@ -76,6 +78,7 @@ export function makeView(f: ViewFixture): PointInTimeView {
   mutualDeal(): any[] { return f.mutualDeal ?? []; },
   mutualTop10(code: string): any[] { return (f.mutualTop10 ?? {})[code] ?? []; },
   holderChanges(code: string): any[] { return (f.holderChanges ?? {})[code] ?? []; },
+  sentimentHistory(n: number): any[] { const a = (f.sentiment ?? []).filter(r => r.date <= f.asOf.slice(0, 10)); return n <= 0 ? [] : a.slice(-n); },
     minuteBars(code, period, n) {
       const all = (f.minutes ?? {})[`${code}:${period}`] ?? [];
       return all.slice(Math.max(0, all.length - n));

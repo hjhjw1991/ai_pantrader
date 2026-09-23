@@ -85,6 +85,23 @@ export interface SecurityRow {
   isStHistory: Array<{ from: string; to: string | null }>;
 }
 
+/**
+ * 某一交易日的情绪截面（由日线重建，见 lib/factors/sentiment.ts 与 023 迁移）。
+ * 家数为整数；比率在 [0, 1]；涨幅与溢价为百分点。分母为 0 的一律 null。
+ */
+export interface SentimentRow {
+  date: string;
+  up: number; down: number; flat: number; unknown: number;
+  medianPct: number | null; avgPct: number | null;
+  zt: number; dt: number; zb: number; zbRate: number | null;
+  maxLbc: number; lbCount: number;
+  firstPrev: number; firstPromo: number | null;
+  multiPrev: number; multiPromo: number | null;
+  ztPrem: number | null; ztOpenPrem: number | null;
+  firstPrem: number | null; multiPrem: number | null; zbPrem: number | null;
+  highLbcPrev: number; highPrem: number | null;
+}
+
 export interface PointInTimeView {
   /** 视图时点。因子层取"现在"只能用它，不许 Date.now() */
   readonly asOf: string;
@@ -211,6 +228,14 @@ export interface PointInTimeView {
     holder: string; direction: "增持" | "减持"; noticeDate: string; endDate: string;
     changeFreeRatio: number | null; changeShares: number | null;
   }>;
+
+  /**
+   * 情绪截面派生表里**不晚于评估日**的最近 n 行，升序。
+   *
+   * 每一行只用那天及以前的日线算出，所以按日期截断即无前视。
+   * 派生表由夜间任务在日线入库后重建；某天没有行 = 还没建（或那天日线缺），不是"情绪为零"。
+   */
+  sentimentHistory(n: number): SentimentRow[];
 
   /** 该日是否有已知数据缺口。回测遇到必须跳过并计入覆盖率（spec §10.5） */
   hasGap(date: string, kind?: string): boolean;

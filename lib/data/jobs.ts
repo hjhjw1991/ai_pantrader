@@ -106,6 +106,12 @@ export interface JobDeps {
    * 对账之后跑，把这一周的触发率 / 胜率 / 盈亏比汇成一条通知。
    */
   weeklyReview?: (db: Db, from: string, to: string) => { stats: { settled: number }; notified: boolean };
+  /**
+   * 夜间派生表重建（情绪截面等），同样由组装根注入（理由见 planPreopen）：
+   * 它要用因子层的纯函数，而 lib/data 不反向依赖上层。
+   * 在日线、复权因子、周月线都落库之后跑。返回的数字并进 job 统计。
+   */
+  buildDerived?: (db: Db, date: string) => Record<string, number>;
 }
 
 /** 进度事件。phase 是当前在做哪一步，done/total 是该步的批次进度 */
@@ -499,6 +505,24 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         const msg = (e as Error).message;
         console.error(`[night] 周月线重算失败：${msg}`);
         recordGap(db, date, "local", "kline_period", `周月线重算抛错：${msg}`, true);
+      }
+
+      /**
+       * 派生表（情绪截面）。必须在日线与复权因子之后：它读的就是今晚刚落库的日线。
+       * 没注入就不跑 —— 与 planPreopen 同理，如实记在统计里而不是假装跑过。
+       */
+      if (deps.buildDerived) {
+        try {
+          const r = deps.buildDerived(db, date);
+          for (const [k, v] of Object.entries(r)) stats[`derived_${k}`] = v;
+          resolveGapsForKind(db, "local", "sentiment");
+        } catch (e) {
+          const msg = (e as Error).message;
+          console.error(`[night] 派生表重建失败：${msg}`);
+          recordGap(db, date, "local", "sentiment", `情绪截面重建抛错：${msg}`, true);
+        }
+      } else {
+        stats.derivedSkipped = 1;
       }
 
       /**

@@ -8,6 +8,9 @@
  *    用 9.8% 一把切会把创业板的 10% 中阴线算成涨停。
  * 2. ST 状态随时间变化。用"今天是不是 ST"去判 2022 年的封板是错的 ——
  *    2022 年戴帽的票当年阈值是 5%，2023 摘帽后是 10%。所以必须查 isStHistory。
+ *    阈值还随**规则变更**变：创业板 2020-08-24 注册制改革前是 10%（ST 5%），之后一律 20%；
+ *    主板 ST 2026-07-06 起由 5% 放宽到 10%（沪深交易所修订交易规则）。科创板、北交所不分 ST。
+ *    按今天的规则判历史，2020 年以前创业板的每一个涨停都会被漏掉。
  * 3. 上市首日无涨跌幅限制。不排除的话新股首日涨 43% 会被算成一个涨停家数，
  *    情绪温度凭空升温。
  *
@@ -20,6 +23,11 @@ import { adjClose, barsUpTo, pctChange, round6 } from "@/lib/factors/util";
 export interface LimitThresholds {
   主板: number; 创业板: number; 科创板: number; 北交所: number; ST: number;
 }
+
+/** 创业板注册制改革：此日起创业板（含 ST）涨跌幅 20%，此前 10%（ST 5%） */
+export const CHINEXT_REFORM_DATE = "2020-08-24";
+/** 沪深主板风险警示股涨跌幅由 5% 调整为 10% 的实施日 */
+export const MAIN_ST_UNIFY_DATE = "2026-07-06";
 
 /** 阈值留 0.2~0.3 个百分点余量：四舍五入到分的收盘价算出来的涨幅不会正好等于 10% */
 export const DEFAULT_LIMIT_THRESHOLDS: LimitThresholds = {
@@ -61,7 +69,9 @@ export function isFirstListingDay(sec: SecurityRow, date: string): boolean {
 export function limitUpThreshold(
   sec: SecurityRow, date: string, t: LimitThresholds = DEFAULT_LIMIT_THRESHOLDS
 ): number {
-  if (wasSt(sec, date)) return t.ST;
+  const st = wasSt(sec, date);
+  if (sec.board === "创业板" && date < CHINEXT_REFORM_DATE) return st ? t.ST : t.主板;
+  if (sec.board === "主板" && st && date < MAIN_ST_UNIFY_DATE) return t.ST;
   return t[sec.board];
 }
 
@@ -73,6 +83,8 @@ export interface LimitJudgement {
   threshold: number;
   closeAtHigh: boolean;
   closeAtLow: boolean;
+  /** 盘中最高触及涨停（阈值或精确涨停价）。touchedUp && !limitUp 即日线口径的炸板 */
+  touchedUp: boolean;
   reason: string;
 }
 
@@ -82,7 +94,7 @@ function judge(
   const threshold = limitUpThreshold(sec, bar.date, t);
   const closeAtHigh = Math.abs(bar.c - bar.h) <= EPS;
   const closeAtLow = Math.abs(bar.c - bar.l) <= EPS;
-  const base = { limitUp: false, limitDown: false, pct: null, threshold, closeAtHigh, closeAtLow };
+  const base = { limitUp: false, limitDown: false, pct: null, threshold, closeAtHigh, closeAtLow, touchedUp: false };
 
   if (isFirstListingDay(sec, bar.date)) {
     return { ...base, reason: "上市首日无涨跌幅限制，不计入涨跌停家数" };
@@ -92,9 +104,22 @@ function judge(
   }
 
   const pct = round6(pctChange(adjClose(prev), adjClose(bar)));
+  /**
+   * 除了涨幅阈值，还要比**精确的涨停价**：前收（换算到当日除权口径）× (1 ± 限幅)，四舍五入到分。
+   *
+   * 低价股靠阈值判不出来：前收 1.64 的票涨停价是 1.80，涨幅只有 9.76%，落在 9.8 的余量之外。
+   * 实测 2026-08 这类票每周漏一两只，而且全是 2 元左右的低价股 —— 恰好是情绪最热时
+   * 被资金点火的那批。精确价兜底之后阈值判据照留：两者任一命中即算。
+   */
+  const lim = Math.round(threshold) / 100;
+  const ref = adjClose(prev) / bar.adjFactor;
+  const upPx = Math.round(ref * (1 + lim) * 100) / 100;
+  const dnPx = Math.round(ref * (1 - lim) * 100) / 100;
+  const HALF_CENT = 0.005;
   return {
-    limitUp: pct >= threshold - EPS && closeAtHigh,
-    limitDown: pct <= -threshold + EPS && closeAtLow,
+    limitUp: closeAtHigh && (pct >= threshold - EPS || bar.c >= upPx - HALF_CENT),
+    limitDown: closeAtLow && (pct <= -threshold + EPS || bar.c <= dnPx + HALF_CENT),
+    touchedUp: pctChange(adjClose(prev), bar.h * bar.adjFactor) >= threshold - EPS || bar.h >= upPx - HALF_CENT,
     pct, threshold, closeAtHigh, closeAtLow,
     reason: `pct=${pct} 阈值=±${threshold} 收盘==最高:${closeAtHigh} 收盘==最低:${closeAtLow}`,
   };

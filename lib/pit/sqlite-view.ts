@@ -13,7 +13,7 @@
  */
 import type {
   Board, DailyBar, DtRow, LhbRow, LhbSeatRow, MacroRow, MinuteBar,
-  PointInTimeView, Quote, SectorRankRow, SecurityRow, ZtRow,
+  PointInTimeView, Quote, SectorRankRow, SecurityRow, SentimentRow, ZtRow,
 } from "@/lib/contracts";
 import type { Db } from "@/lib/db";
 
@@ -153,6 +153,29 @@ function marginRow(r: Record<string, unknown>) {
     rzye: numOrNullRow(r["rzye"]), rzmre: numOrNullRow(r["rzmre"]),
     rzjme: numOrNullRow(r["rzjme"]), rzyezb: numOrNullRow(r["rzyezb"]),
   };
+}
+
+/** 派生表列名 ↔ SentimentRow 字段。建表脚本与读取共用这一份，免得两边各拼一遍 */
+export const SENTIMENT_COLUMNS: Array<[string, keyof SentimentRow]> = [
+  ["date", "date"], ["up", "up"], ["down", "down"], ["flat", "flat"], ["unknown", "unknown"],
+  ["median_pct", "medianPct"], ["avg_pct", "avgPct"],
+  ["zt", "zt"], ["dt", "dt"], ["zb", "zb"], ["zb_rate", "zbRate"],
+  ["max_lbc", "maxLbc"], ["lb_count", "lbCount"],
+  ["first_prev", "firstPrev"], ["first_promo", "firstPromo"],
+  ["multi_prev", "multiPrev"], ["multi_promo", "multiPromo"],
+  ["zt_prem", "ztPrem"], ["zt_open_prem", "ztOpenPrem"],
+  ["first_prem", "firstPrem"], ["multi_prem", "multiPrem"], ["zb_prem", "zbPrem"],
+  ["high_lbc_prev", "highLbcPrev"], ["high_prem", "highPrem"],
+];
+
+function sentimentRow(r: Record<string, unknown>): SentimentRow {
+  const out: Record<string, unknown> = {};
+  for (const [col, key] of SENTIMENT_COLUMNS) {
+    const v = r[col];
+    out[key] = key === "date" ? String(v) : (typeof v === "number" && Number.isFinite(v) ? v : null);
+  }
+  // 家数类列 NOT NULL，这里不会是 null；比率与溢价的 null 原样保留
+  return out as unknown as SentimentRow;
 }
 
 export function createSqliteView(db: Db, asOf: string): PointInTimeView {
@@ -397,6 +420,14 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         changeFreeRatio: numOrNullRow(r["change_free_ratio"]),
         changeShares: numOrNullRow(r["change_shares"]),
       }));
+    },
+
+    sentimentHistory(n: number) {
+      const k = Math.max(0, Math.floor(n));
+      return rows(
+        `SELECT * FROM sentiment_daily WHERE date <= ? ORDER BY date DESC LIMIT ?`,
+        asOfDate, k
+      ).reverse().map(sentimentRow);
     },
 
     minuteBars(code: string, period: number, n: number): MinuteBar[] {

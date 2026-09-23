@@ -15,10 +15,12 @@ import { FILTER_FACTORS } from "@/lib/factors/filters";
 import { SECTOR_FACTORS } from "@/lib/factors/sectors";
 import { RISK_FACTORS } from "@/lib/factors/risk";
 import { CAPITAL_FACTORS } from "@/lib/factors/capital";
+import { CYCLE_FACTORS } from "@/lib/factors/cycle";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
   ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS, ...CAPITAL_FACTORS,
+  ...CYCLE_FACTORS,
 ];
 
 export function createDefaultRegistry() {
@@ -67,3 +69,6 @@ export type { MainlineHit, MainlineResult, MainlineOpts } from "@/lib/factors/se
 export { RISK_FACTORS, rsi, bias, kdj, tdxSma } from "@/lib/factors/risk";
 
 export { CAPITAL_FACTORS } from "@/lib/factors/capital";
+export { CYCLE_FACTORS } from "@/lib/factors/cycle";
+export { sentimentSnapshot, percentileRank, SENTIMENT_ALGO_VERSION, LBC_CAP } from "@/lib/factors/sentiment";
+export type { SentimentSnapshot } from "@/lib/factors/sentiment";

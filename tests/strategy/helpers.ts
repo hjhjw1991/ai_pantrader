@@ -74,6 +74,7 @@ export function makeView(f: ViewFixture): PointInTimeView {
     mutualDeal: () => [],
     mutualTop10: () => [],
     holderChanges: () => [],
+    sentimentHistory: () => [],
     minuteBars: (): MinuteBar[] => [],
     quote: code => (f.quotes ?? {})[code] ?? null,
     ztPool: date => (f.zt ?? {})[dateOf(date)] ?? [],
