@@ -16,6 +16,9 @@ import { buildIndustrySpans } from "@/lib/data/collectors/industry-span";
 import { collectValuation } from "@/lib/data/collectors/valuation";
 import { collectLiftSchedule } from "@/lib/data/collectors/lift";
 import { collectReductionPlans } from "@/lib/data/collectors/reduction-plan";
+import { collectMargin } from "@/lib/data/collectors/margin";
+import { collectMutual } from "@/lib/data/collectors/mutual";
+import { collectHolderChanges } from "@/lib/data/collectors/holder-change";
 import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
 import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
@@ -559,6 +562,41 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         const msg = (e as Error).message;
         console.error(`[night] 减持计划失败：${msg}`);
         recordGap(db, date, clients.ths.source, "reduction_plan", `减持计划抛错：${msg}`, true);
+      }
+
+      /**
+       * 两融：只补近两周里本地还缺的交易日，截止到**昨天**。
+       * 今天的两融明早开盘前才发布，现在去拉只会记一条"尚未发布"的缺口。
+       * 两周是给"连着几晚没跑成"留的余量；再早的缺口交给回补脚本。
+       */
+      try {
+        const r = await collectMargin(db, clients.eastmoney, {
+          from: addDays(date, -14), to: addDays(date, -1),
+        });
+        stats.marginDays = r.stockDays;
+        stats.marginMissing = r.missing.length;
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 两融失败：${msg}`);
+        recordGap(db, date, clients.eastmoney.source, "margin", `两融抛错：${msg}`, true);
+      }
+
+      /** 互联互通与已实施增减持：都是按区间 upsert，看一周，漏跑几晚也能自愈 */
+      try {
+        const r = await collectMutual(db, clients.eastmoney, { from: addDays(date, -7), to: date, date });
+        stats.mutualRows = r.dealRows;
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 互联互通失败：${msg}`);
+        recordGap(db, date, clients.eastmoney.source, "mutual", `互联互通抛错：${msg}`, true);
+      }
+      try {
+        const r = await collectHolderChanges(db, clients.eastmoney, { from: addDays(date, -7), to: date, date });
+        stats.holderChanges = r.written;
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[night] 增减持失败：${msg}`);
+        recordGap(db, date, clients.eastmoney.source, "holder_change", `增减持抛错：${msg}`, true);
       }
 
 

@@ -112,6 +112,12 @@ class FixtureView implements PointInTimeView {
     return [];
   }
 
+  marginMarket(_n: number): [] { return []; }
+  marginStock(_code: string, _n: number): [] { return []; }
+  mutualDeal(_n: number): [] { return []; }
+  mutualTop10(_code: string, _days: number): [] { return []; }
+  holderChanges(_code: string, _days: number): [] { return []; }
+
   minuteBars(_code: string, _period: number, _n: number): MinuteBar[] {
     return [];
   }

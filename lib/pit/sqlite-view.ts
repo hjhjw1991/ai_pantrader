@@ -143,6 +143,18 @@ function mapSecurity(r: Record<string, unknown>, asOfDate: string): SecurityRow 
 
 /* --------------------------------- 视图 --------------------------------- */
 
+function numOrNullRow(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function marginRow(r: Record<string, unknown>) {
+  return {
+    date: String(r["date"]),
+    rzye: numOrNullRow(r["rzye"]), rzmre: numOrNullRow(r["rzmre"]),
+    rzjme: numOrNullRow(r["rzjme"]), rzyezb: numOrNullRow(r["rzyezb"]),
+  };
+}
+
 export function createSqliteView(db: Db, asOf: string): PointInTimeView {
   const asOfLocal = toLocalWall(asOf, true);
   if (asOfLocal === null) {
@@ -324,6 +336,66 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         maxRatio: n(r["max_ratio"]),
         maxShares: n(r["max_shares"]),
         firstSeen: String(r["first_seen"]),
+      }));
+    },
+
+    marginMarket(n: number) {
+      const k = Math.max(0, Math.floor(n));
+      return rows(
+        `SELECT date, rzye, rzmre, rzjme, rzyezb FROM margin_market
+          WHERE date < ? ORDER BY date DESC LIMIT ?`,
+        asOfDate, k
+      ).reverse().map(marginRow);
+    },
+
+    marginStock(code: string, n: number) {
+      const k = Math.max(0, Math.floor(n));
+      return rows(
+        `SELECT date, rzye, rzmre, rzjme, rzyezb FROM margin_stock
+          WHERE code = ? AND date < ? ORDER BY date DESC LIMIT ?`,
+        code, asOfDate, k
+      ).reverse().map(marginRow);
+    },
+
+    mutualDeal(n: number) {
+      const k = Math.max(0, Math.floor(n));
+      return rows(
+        `SELECT date, mutual_type, deal_amt, net_amt FROM mutual_deal
+          WHERE date IN (SELECT DISTINCT date FROM mutual_deal WHERE date < ? ORDER BY date DESC LIMIT ?)
+          ORDER BY date, mutual_type`,
+        asOfDate, k
+      ).map(r => ({
+        date: String(r["date"]), mutualType: String(r["mutual_type"]),
+        dealAmt: numOrNullRow(r["deal_amt"]), netAmt: numOrNullRow(r["net_amt"]),
+      }));
+    },
+
+    mutualTop10(code: string, days: number) {
+      return rows(
+        `SELECT date, mutual_type, rank, deal_amt, mutual_ratio FROM mutual_top10
+          WHERE code = ? AND date < ? AND date > date(?, ?)
+          ORDER BY date, mutual_type`,
+        code, asOfDate, asOfDate, `-${Math.max(0, Math.floor(days))} days`
+      ).map(r => ({
+        date: String(r["date"]), mutualType: String(r["mutual_type"]),
+        rank: numOrNullRow(r["rank"]), dealAmt: numOrNullRow(r["deal_amt"]),
+        mutualRatio: numOrNullRow(r["mutual_ratio"]),
+      }));
+    },
+
+    holderChanges(code: string, days: number) {
+      return rows(
+        `SELECT holder, direction, notice_date, end_date, change_free_ratio, change_shares
+           FROM holder_change
+          WHERE code = ? AND notice_date <= ? AND notice_date > date(?, ?)
+          ORDER BY notice_date, holder`,
+        code, asOfDate, asOfDate, `-${Math.max(0, Math.floor(days))} days`
+      ).map(r => ({
+        holder: String(r["holder"]),
+        direction: (String(r["direction"]) === "增持" ? "增持" : "减持") as "增持" | "减持",
+        noticeDate: String(r["notice_date"]), endDate: String(r["end_date"]),
+        changeFreeRatio: numOrNullRow(r["change_free_ratio"]),
+        changeShares: numOrNullRow(r["change_shares"]),
       }));
     },
 

@@ -14,10 +14,11 @@ import { FUND_FACTORS } from "@/lib/factors/fund";
 import { FILTER_FACTORS } from "@/lib/factors/filters";
 import { SECTOR_FACTORS } from "@/lib/factors/sectors";
 import { RISK_FACTORS } from "@/lib/factors/risk";
+import { CAPITAL_FACTORS } from "@/lib/factors/capital";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
-  ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS,
+  ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS, ...CAPITAL_FACTORS,
 ];
 
 export function createDefaultRegistry() {
@@ -64,3 +65,5 @@ export {
 export type { MainlineHit, MainlineResult, MainlineOpts } from "@/lib/factors/sectors";
 
 export { RISK_FACTORS, rsi, bias, kdj, tdxSma } from "@/lib/factors/risk";
+
+export { CAPITAL_FACTORS } from "@/lib/factors/capital";

@@ -647,7 +647,9 @@ export async function fetchLiftSchedule(
       `?reportName=RPT_LIFT_STAGE&columns=SECURITY_CODE,FREE_DATE,CURRENT_FREE_SHARES,` +
       `LIFT_MARKET_CAP,FREE_RATIO,TOTAL_RATIO,FREE_SHARES_TYPE` +
       `&source=WEB&client=WEB&pageNumber=${page}&pageSize=${LIFT_PAGE_SIZE}` +
-      `&sortColumns=FREE_DATE,SECURITY_CODE&sortTypes=1,1&filter=${filter}`;
+      // 排序键覆盖主键 (代码, 解禁日, 类型)：同一只票同一天常有多批类型，
+      // 只按前两列排时翻页边界不稳，会重一批、漏一批（增减持实测过同样的问题）
+      `&sortColumns=FREE_DATE,SECURITY_CODE,FREE_SHARES_TYPE&sortTypes=1,1,1&filter=${filter}`;
     const r = await client.get(url, { referer: "https://data.eastmoney.com/" });
     if (!r.ok) throw new Error(`em lift request failed page ${page}: ${r.error}`);
     const { rows, pages } = parseLiftPage(r.text);
@@ -725,4 +727,253 @@ export async function fetchHoldingChangeNotices(
     if (rows.length < pz || out.length >= total) break;
   }
   return out;
+}
+
+/* ------------------------- datacenter 报表通用分页 ------------------------- */
+
+const DC_BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get";
+/** 实测 datacenter 单页上限就是 500，传更大也只回 500 */
+const DC_PAGE_SIZE = 500;
+
+/**
+ * datacenter 报表的外壳解析。
+ *
+ * 9201（返回数据为空）是合法的空；其它失败码一律抛 —— 9501 是报表名写错、
+ * 9701 是报表下线，把它们当成"没有数据"就是静默丢数据。
+ */
+export function parseDcEnvelope(text: string, label: string): { data: any[]; pages: number } {
+  let j: any;
+  try { j = JSON.parse(text); }
+  catch { throw new Error(`em ${label} unexpected payload: ${text.slice(0, 80)}`); }
+  if (j?.success === false) {
+    if (Number(j?.code) === 9201) return { data: [], pages: 0 };
+    throw new Error(`em ${label} failed: code=${j?.code} msg=${j?.message}`);
+  }
+  const data = j?.result?.data;
+  if (!Array.isArray(data)) {
+    throw new Error(`em ${label} result.data 不是数组：${JSON.stringify(j?.result)?.slice(0, 60)}`);
+  }
+  return { data, pages: Number(j?.result?.pages ?? 1) };
+}
+
+async function fetchDcReport(
+  client: SourceClient, label: string,
+  q: { reportName: string; columns: string; filter: string; sort: string; order: string }
+): Promise<any[]> {
+  const out: any[] = [];
+  for (let page = 1; ; page++) {
+    const url = `${DC_BASE}?reportName=${q.reportName}&columns=${q.columns}` +
+      `&source=WEB&client=WEB&pageNumber=${page}&pageSize=${DC_PAGE_SIZE}` +
+      `&sortColumns=${q.sort}&sortTypes=${q.order}&filter=${encodeURIComponent(q.filter)}`;
+    const r = await client.get(url, { referer: "https://data.eastmoney.com/" });
+    if (!r.ok) throw new Error(`em ${label} request failed page ${page}: ${r.error}`);
+    const { data, pages } = parseDcEnvelope(r.text, label);
+    out.push(...data);
+    if (data.length === 0 || page >= pages) break;
+  }
+  return out;
+}
+
+const day10 = (v: unknown): string => String(v ?? "").slice(0, 10);
+/** 百分数 → 小数。null 保持 null：缺数据不能被换算成 0 */
+const pct = (v: unknown): number | null => {
+  const n = numOrNull(v);
+  return n === null ? null : n / 100;
+};
+const times = (v: unknown, k: number): number | null => {
+  const n = numOrNull(v);
+  return n === null ? null : n * k;
+};
+
+/* -------------------------------- 两融 -------------------------------- */
+
+export interface MarginMarketRow {
+  date: string;
+  rzye: number | null; rqye: number | null; rzrqye: number | null;
+  rzmre: number | null; rzche: number | null; rzjme: number | null;
+  /** 融资余额占流通市值，小数（东财给的是百分数） */
+  rzyezb: number | null;
+  ltsz: number | null;
+}
+
+export function parseMarginMarket(data: any[]): MarginMarketRow[] {
+  return data.map(x => ({
+    date: day10(x.DIM_DATE),
+    rzye: numOrNull(x.RZYE), rqye: numOrNull(x.RQYE), rzrqye: numOrNull(x.RZRQYE),
+    rzmre: numOrNull(x.RZMRE), rzche: numOrNull(x.RZCHE), rzjme: numOrNull(x.RZJME),
+    rzyezb: pct(x.RZYEZB), ltsz: numOrNull(x.LTSZ),
+  })).filter(r => r.date.length === 10);
+}
+
+/** 全市场两融汇总，按日期区间。2010 年至今约 4000 行，8 页 */
+export async function fetchMarginMarket(
+  client: SourceClient, from: string, to: string
+): Promise<MarginMarketRow[]> {
+  const data = await fetchDcReport(client, "margin market", {
+    reportName: "RPTA_RZRQ_LSHJ",
+    columns: "DIM_DATE,RZYE,RQYE,RZRQYE,RZMRE,RZCHE,RZJME,RZYEZB,LTSZ",
+    filter: `(DIM_DATE>='${from}')(DIM_DATE<='${to}')`,
+    sort: "DIM_DATE", order: "1",
+  });
+  return parseMarginMarket(data);
+}
+
+export interface MarginStockRow {
+  date: string; code: string;
+  rzye: number | null; rzmre: number | null; rzche: number | null; rzjme: number | null;
+  rqye: number | null; rqyl: number | null; rzrqye: number | null;
+  /** 小数 */
+  rzyezb: number | null;
+}
+
+export function parseMarginStock(data: any[]): MarginStockRow[] {
+  return data.map(x => ({
+    date: day10(x.DATE), code: String(x.SCODE ?? ""),
+    rzye: numOrNull(x.RZYE), rzmre: numOrNull(x.RZMRE), rzche: numOrNull(x.RZCHE),
+    rzjme: numOrNull(x.RZJME), rqye: numOrNull(x.RQYE), rqyl: numOrNull(x.RQYL),
+    rzrqye: numOrNull(x.RZRQYE), rzyezb: pct(x.RZYEZB),
+  })).filter(r => r.date.length === 10 && /^\d{6}$/.test(r.code));
+}
+
+/**
+ * 某一交易日全部两融标的的明细（约 4400 只，9 页）。
+ *
+ * 按日期取而不是按个股取：夜里增量只需要最新一天，一只只取要 4400 次请求。
+ */
+export async function fetchMarginStockByDate(
+  client: SourceClient, date: string
+): Promise<MarginStockRow[]> {
+  const data = await fetchDcReport(client, "margin stock", {
+    reportName: "RPTA_WEB_RZRQ_GGMX",
+    columns: "DATE,SCODE,RZYE,RZMRE,RZCHE,RZJME,RQYE,RQYL,RZRQYE,RZYEZB",
+    filter: `(DATE='${date}')`,
+    sort: "SCODE", order: "1",
+  });
+  return parseMarginStock(data);
+}
+
+/* ------------------------------ 互联互通 ------------------------------ */
+
+export interface MutualDealRow {
+  date: string; mutualType: string;
+  /** 元（东财给的是百万元） */
+  dealAmt: number | null;
+  /** 元。北向 2024-08-16 之后恒为 null —— 停止披露，不是 0 */
+  netAmt: number | null;
+}
+
+const MILLION = 1e6;
+
+export function parseMutualDeal(data: any[]): MutualDealRow[] {
+  return data.map(x => ({
+    date: day10(x.TRADE_DATE), mutualType: String(x.MUTUAL_TYPE ?? ""),
+    dealAmt: times(x.DEAL_AMT, MILLION), netAmt: times(x.NET_DEAL_AMT, MILLION),
+  })).filter(r => r.date.length === 10 && r.mutualType !== "");
+}
+
+export async function fetchMutualDeal(
+  client: SourceClient, from: string, to: string
+): Promise<MutualDealRow[]> {
+  const data = await fetchDcReport(client, "mutual deal", {
+    reportName: "RPT_MUTUAL_DEAL_HISTORY",
+    columns: "MUTUAL_TYPE,TRADE_DATE,DEAL_AMT,NET_DEAL_AMT",
+    filter: `(TRADE_DATE>='${from}')(TRADE_DATE<='${to}')`,
+    sort: "TRADE_DATE,MUTUAL_TYPE", order: "1,1",
+  });
+  return parseMutualDeal(data);
+}
+
+export interface MutualTop10Row {
+  date: string; mutualType: string; code: string;
+  rank: number | null;
+  /** 元 */
+  dealAmt: number | null;
+  /** 北向成交占该股当日总成交，小数 */
+  mutualRatio: number | null;
+}
+
+export function parseMutualTop10(data: any[]): MutualTop10Row[] {
+  return data.map(x => ({
+    date: day10(x.TRADE_DATE), mutualType: String(x.MUTUAL_TYPE ?? ""),
+    code: String(x.SECURITY_CODE ?? ""),
+    rank: numOrNull(x.RANK), dealAmt: numOrNull(x.DEAL_AMT), mutualRatio: pct(x.MUTUAL_RATIO),
+  })).filter(r => r.date.length === 10 && /^\d{6}$/.test(r.code));
+}
+
+/** 只取北向（沪股通 001、深股通 003）。南向十大是港股，不在 A 股选股范围里 */
+export async function fetchMutualTop10(
+  client: SourceClient, from: string, to: string
+): Promise<MutualTop10Row[]> {
+  const data = await fetchDcReport(client, "mutual top10", {
+    reportName: "RPT_MUTUAL_TOP10DEAL",
+    columns: "MUTUAL_TYPE,TRADE_DATE,SECURITY_CODE,RANK,DEAL_AMT,MUTUAL_RATIO",
+    filter: `(TRADE_DATE>='${from}')(TRADE_DATE<='${to}')(MUTUAL_TYPE in ("001","003"))`,
+    sort: "TRADE_DATE,MUTUAL_TYPE,RANK", order: "1,1,1",
+  });
+  return parseMutualTop10(data);
+}
+
+/* ---------------------------- 已实施增减持 ---------------------------- */
+
+export interface HolderChangeRow {
+  code: string; holder: string;
+  direction: "增持" | "减持";
+  startDate: string; endDate: string; noticeDate: string;
+  /** 股，带符号（减持为负）。东财给的是万股 */
+  changeShares: number | null;
+  /** 占流通股比例，小数，带符号。东财给的是不带符号的百分数 */
+  changeFreeRatio: number | null;
+  /** 变动后持股占总股本，小数 */
+  afterHoldRatio: number | null;
+  market: string;
+}
+
+/**
+ * 符号只从 DIRECTION 来，不信 CHANGE_NUM_SYMBOL 以外的数值字段自带的正负：
+ * 实测 CHANGE_FREE_RATIO 恒为正；CHANGE_RATE 的口径没能核实（分母不明），所以不入库 ——
+ * 存一个不知道分母的比例，下游迟早会把它和另一个比例相加。
+ *
+ * 方向既不是增持也不是减持的行丢弃并不静默：它说明源的口径变了，
+ * 由调用方比对条数发现，而不是在这里猜一个方向。
+ */
+export function parseHolderChanges(data: any[]): HolderChangeRow[] {
+  const out: HolderChangeRow[] = [];
+  for (const x of data) {
+    const dir = String(x.DIRECTION ?? "");
+    if (dir !== "增持" && dir !== "减持") continue;
+    const sign = dir === "增持" ? 1 : -1;
+    const code = String(x.SECURITY_CODE ?? "");
+    const noticeDate = day10(x.NOTICE_DATE);
+    if (!/^\d{6}$/.test(code) || noticeDate.length !== 10) continue;
+    const shares = times(x.CHANGE_NUM, WAN);
+    const free = pct(x.CHANGE_FREE_RATIO);
+    out.push({
+      code, holder: String(x.HOLDER_NAME ?? ""), direction: dir,
+      startDate: day10(x.START_DATE) || noticeDate,
+      endDate: day10(x.END_DATE) || noticeDate,
+      noticeDate,
+      changeShares: shares === null ? null : sign * Math.abs(shares),
+      changeFreeRatio: free === null ? null : sign * Math.abs(free),
+      afterHoldRatio: pct(x.HOLD_RATIO),
+      market: String(x.MARKET ?? ""),
+    });
+  }
+  return out;
+}
+
+export async function fetchHolderChanges(
+  client: SourceClient, from: string, to: string
+): Promise<{ rows: HolderChangeRow[]; raw: number }> {
+  const data = await fetchDcReport(client, "holder change", {
+    reportName: "RPT_SHARE_HOLDER_INCREASE",
+    columns: "SECURITY_CODE,HOLDER_NAME,DIRECTION,START_DATE,END_DATE,NOTICE_DATE," +
+      "CHANGE_NUM,CHANGE_FREE_RATIO,HOLD_RATIO,MARKET",
+    filter: `(NOTICE_DATE>='${from}')(NOTICE_DATE<='${to}')`,
+    // 排序键必须覆盖整个主键。只按 (公告日, 代码) 排时，同一只票同一天的多笔增减持
+    // 在翻页边界上顺序不稳：实测 2021 年 13974 行里重复 22 行、同时**漏掉** 22 行，
+    // 而漏的那些没有任何报错 —— 条数对得上，内容是错的
+    sort: "NOTICE_DATE,SECURITY_CODE,HOLDER_NAME,START_DATE,END_DATE,DIRECTION,MARKET",
+    order: "1,1,1,1,1,1,1",
+  });
+  return { rows: parseHolderChanges(data), raw: data.length };
 }

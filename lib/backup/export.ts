@@ -54,6 +54,9 @@ export const BAK_TABLES = [
   "lift_schedule",
   // 减持计划。同花顺每只票只留最近约 2 条，旧的会被挤掉 —— 丢了就永远拿不回来
   "reduction_plan",
+  // 两融、互联互通、已实施增减持。三者都能从东财重拉，但回补两年两融要 4000+ 次请求、
+  // 约 45 分钟，换机后这段时间里杠杆资金类判据全部失明；体积不大，带上
+  "margin_market", "margin_stock", "mutual_deal", "mutual_top10", "holder_change",
 ];
 
 /**

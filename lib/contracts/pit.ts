@@ -171,6 +171,47 @@ export interface PointInTimeView {
     maxRatio: number | null; maxShares: number | null; firstSeen: string;
   }>;
 
+  /**
+   * 全市场两融汇总，**严格早于评估日**的最近 n 个交易日，按日期升序。
+   *
+   * 交易所 T+1 开盘前才公布 T 日两融，所以评估日当天的那条哪怕已经在库里，
+   * 也不属于"那天能知道的"。比例为小数，金额为元。
+   */
+  marginMarket(n: number): Array<{
+    date: string; rzye: number | null; rzmre: number | null; rzjme: number | null;
+    rzyezb: number | null;
+  }>;
+  /**
+   * 个股两融明细，同样严格早于评估日、最近 n 条、升序。
+   *
+   * 空数组有两种含义：不是两融标的，或那段数据没采到。调用方要拿 marginMarket
+   * 的最新日期来区分 —— 汇总有而个股没有，才是"不是标的"。
+   */
+  marginStock(code: string, n: number): Array<{
+    date: string; rzye: number | null; rzmre: number | null; rzjme: number | null;
+    rzyezb: number | null;
+  }>;
+  /**
+   * 互联互通每日成交，严格早于评估日的最近 n 个有数据的日子，按日期升序、同日按类型。
+   * 北向 net 自 2024-08-16 起恒为 null（停止披露）。
+   */
+  mutualDeal(n: number): Array<{
+    date: string; mutualType: string; dealAmt: number | null; netAmt: number | null;
+  }>;
+  /** (评估日 - days, 评估日) 内这只票上北向十大成交榜的记录，**不含评估日** */
+  mutualTop10(code: string, days: number): Array<{
+    date: string; mutualType: string; rank: number | null;
+    dealAmt: number | null; mutualRatio: number | null;
+  }>;
+  /**
+   * 公告日落在 (评估日 - days, 评估日] 的已实施增减持。
+   * changeFreeRatio 带符号（减持为负），直接求和即净额。
+   */
+  holderChanges(code: string, days: number): Array<{
+    holder: string; direction: "增持" | "减持"; noticeDate: string; endDate: string;
+    changeFreeRatio: number | null; changeShares: number | null;
+  }>;
+
   /** 该日是否有已知数据缺口。回测遇到必须跳过并计入覆盖率（spec §10.5） */
   hasGap(date: string, kind?: string): boolean;
 }

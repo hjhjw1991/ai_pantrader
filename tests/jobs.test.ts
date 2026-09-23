@@ -155,7 +155,10 @@ describe("夜间 job 的故障隔离", () => {
    */
   const NIGHT_AT = new Date("2026-07-31T14:00:00Z");
 
-  for (const table of ["valuation_daily", "sw_industry_span", "kline_period"]) {
+  for (const table of [
+    "valuation_daily", "sw_industry_span", "kline_period",
+    "margin_market", "margin_stock", "mutual_deal", "mutual_top10", "holder_change",
+  ]) {
     it(`${table} 不可用时，夜间 job 仍然跑完而不是整轮崩掉`, async () => {
       db.prepare(`DROP TABLE ${table}`).run();
       const r = await runJob("night", { db, clients: clients(), now: NIGHT_AT });
