@@ -4,6 +4,8 @@ import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { pushNotification } from "@/lib/ui/notify";
 import { recordPlan, type RecordPlanResult } from "@/lib/plan/record";
+import { seedVariants, runShadowDay, type ShadowDayResult } from "@/lib/shadow/book";
+import { sectorMap } from "@/lib/ui/queries";
 
 /**
  * 盘前作战计划：09:15 跑一次策略引擎，把当天的候选推到通知里。
@@ -39,6 +41,8 @@ export interface PreopenPlan {
   notified: boolean;
   /** 落台账的结果。null = 没跑到这一步（配置不可用等） */
   ledger: RecordPlanResult | null;
+  /** 影子盘的结果。null = 没跑到这一步 */
+  shadow?: ShadowDayResult | null;
 }
 
 export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
@@ -87,6 +91,36 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
   }
 
   /**
+   * 影子盘：同一时点、同一份配置与行业映射，各变体只换槽位组合，各出一批候选。
+   *
+   * 基准日 = 上一个交易日：09:15 的判断读的是昨收的日线（见本文件抬头），
+   * 所以成交看的是今天 —— 与回放样本"基准日收盘后判断、次日成交"同一口径。
+   *
+   * 吞异常：影子盘是考核用的，它出问题不能让正式计划推不出去。但要留声。
+   */
+  let shadow: ShadowDayResult | null = null;
+  try {
+    const today = shanghaiTs().slice(0, 10);
+    const base = (db.prepare(
+      "SELECT date FROM trading_calendar WHERE is_open = 1 AND date < ? ORDER BY date DESC LIMIT 1"
+    ).get(today) as { date: string } | undefined)?.date;
+    if (base !== undefined) {
+      seedVariants(db);
+      const sm = sectorMap(db);
+      shadow = runShadowDay(db, {
+        decidedOn: today, baseDate: base, asOf: card.ts, phase: out.phase, config: cfg.config, source: "live",
+        sectorOf: (code: string) => sm.byCode.get(code) ?? null,
+        ...(sm.at === null ? {} : { sectorMapAt: sm.at }),
+      });
+      for (const f of shadow.failed) console.error(`[影子盘] 变体 ${f.variant} 失败：${f.error}`);
+    } else {
+      console.error("[影子盘] 交易日历里找不到上一个交易日，本次未跑");
+    }
+  } catch (e) {
+    console.error(`[影子盘] 失败（不影响正式计划）：${(e as Error).message}`);
+  }
+
+  /**
    * severity 按"有没有要人做的动作"分，不按"消息重不重要"分：
    * 有候选 → warn（会弹桌面通知，人要在开盘前看一眼触发价）；
    * 没有候选 → info（不弹）。防守档 0 仓、或全被过滤器否决，都是正常且正确的结果，
@@ -110,5 +144,5 @@ export async function runPreopenPlan(db: Db): Promise<PreopenPlan> {
     dedupeKey: `preopen_plan:${shanghaiTs().slice(0, 10)}`,
   });
 
-  return { ok: true, gear, candidates, warnings, notified, ledger };
+  return { ok: true, gear, candidates, warnings, notified, ledger, shadow };
 }

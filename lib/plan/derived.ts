@@ -3,6 +3,7 @@ import { createSqliteView, SENTIMENT_COLUMNS } from "@/lib/pit/sqlite-view";
 import { sentimentSnapshot, SENTIMENT_ALGO_VERSION } from "@/lib/factors/sentiment";
 import { tradingDaysBetween } from "@/lib/data/calendar";
 import { addDays, shanghaiTs } from "@/lib/data/clock";
+import { settleShadowPending } from "@/lib/shadow/book";
 
 export interface BuildSentimentOpts {
   from: string;
@@ -74,5 +75,15 @@ export function buildSentiment(db: Db, o: BuildSentimentOpts): BuildSentimentRes
  */
 export function runNightlyDerived(db: Db, date: string): Record<string, number> {
   const r = buildSentiment(db, { from: addDays(date, -20), to: date });
-  return { sentimentBuilt: r.built, sentimentKept: r.kept, sentimentThin: r.thin };
+  /**
+   * 影子盘结算也挂在这里：它要今晚刚落库的日线，而且和派生表一样是纯本地计算。
+   * 放在情绪表之后 —— 结算失败不该连累派生表，所以各自兜底。
+   */
+  let s = { settled: 0, untriggered: 0, pending: 0 }, shadowFailed = 0;
+  try { s = settleShadowPending(db, date); }
+  catch (e) { shadowFailed = 1; console.error(`[night] 影子盘结算失败：${(e as Error).message}`); }
+  return {
+    sentimentBuilt: r.built, sentimentKept: r.kept, sentimentThin: r.thin,
+    shadowSettled: s.settled, shadowUntriggered: s.untriggered, shadowPending: s.pending, shadowFailed,
+  };
 }

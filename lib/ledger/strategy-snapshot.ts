@@ -65,12 +65,18 @@ export function predictionCount(db: Db, id: string): number {
  * 快照错了比没有更糟，它会把另一套参数说成是这条预测的依据。
  */
 export function snapshotForPrediction(db: Db, strategyId: string): boolean {
-  if (hasSnapshot(db, strategyId)) return false;
   const p = activeStrategyPath();
   if (p === null) return false;
   const raw = readFileSync(p, "utf8");
   const r = validateStrategyYaml(raw, p);
   if (!r.ok || r.config.id !== strategyId) return false;
+  /**
+   * 按 (id, version) 判断，不是只按 id。
+   *
+   * 以前只查 id：同一个策略升了版本（1.2.0 → 1.3.0），新版本就永远不会被快照，
+   * 于是 1.3.0 的预测在台账里挂着一个找不到原文的版本号 —— 恰好是最需要解释的那批。
+   */
+  if (hasSnapshot(db, strategyId, r.config.version)) return false;
   return snapshotStrategy(db, { id: strategyId, version: r.config.version, yaml: raw });
 }
 
@@ -95,9 +101,11 @@ export interface DeleteStrategyResult {
 export function deleteStrategy(db: Db, id: string): DeleteStrategyResult {
   const preds = predictionCount(db, id);
   let snapshotted = 0;
-  if (preds > 0 && !hasSnapshot(db, id)) {
+  if (preds > 0) {
+    // 按当前文件的版本判断，理由同 snapshotForPrediction：只查 id 会漏掉升级后的新版本
     const cur = readStrategyRaw(id);
-    if (cur !== null && snapshotStrategy(db, { id, version: cur.version, yaml: cur.raw })) {
+    if (cur !== null && !hasSnapshot(db, id, cur.version)
+        && snapshotStrategy(db, { id, version: cur.version, yaml: cur.raw })) {
       snapshotted = 1;
     }
   }

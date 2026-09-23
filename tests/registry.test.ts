@@ -209,6 +209,20 @@ describe("删除策略", () => {
     expect(listStrategies().map(s => s.id)).toEqual(["a"]);
   });
 
+  it("旧版本已有快照、文件已升级到新版本 → 删除前照样快照新版本", async () => {
+    write("a"); write("keeper", BASE.replace(/^version:.*$/m, "version: 9.9.9"));
+    const { setActiveStrategy } = await reg();
+    const { deleteStrategy, snapshotStrategy, hasSnapshot } = await snap();
+    setActiveStrategy("a");
+    snapshotStrategy(db, { id: "keeper", version: BASE_VERSION, yaml: "旧版原文" });
+    db.prepare(
+      `INSERT INTO prediction (id,ts,phase,code,strategy_id,action,eval_horizon,valid_until,advisor_influenced)
+       VALUES ('p9','2026-08-05 09:40:00.000','preopen','600519','keeper','买入',5,'2026-08-12',0)`
+    ).run();
+    expect(deleteStrategy(db, "keeper").snapshotted).toBe(1);
+    expect(hasSnapshot(db, "keeper", "9.9.9")).toBe(true);
+  });
+
   it("有预测引用 → 先把原文快照进 strategy 表再删文件，归因不丢", async () => {
     write("a"); write("keeper");
     const { setActiveStrategy } = await reg();
@@ -241,6 +255,20 @@ describe("快照", () => {
     expect(db.prepare("SELECT yaml FROM strategy WHERE id='s'").get().yaml).toBe("第一版");
     expect(hasSnapshot(db, "s", "1.0.0")).toBe(true);
     expect(hasSnapshot(db, "s", "2.0.0")).toBe(false);
+  });
+});
+
+describe("预测落库时的快照", () => {
+  it("同一策略升了版本 → 新版本也要快照（以前只查 id，新版本永远不会被存）", async () => {
+    const { snapshotForPrediction, hasSnapshot } = await snap();
+    const { setActiveStrategy } = await reg();
+    write("s");
+    setActiveStrategy("s");
+    expect(snapshotForPrediction(db, "s")).toBe(true);
+    write("s", BASE.replace(/^version:.*$/m, "version: 9.9.9"));
+    expect(snapshotForPrediction(db, "s")).toBe(true);
+    expect(hasSnapshot(db, "s", "9.9.9")).toBe(true);
+    expect(snapshotForPrediction(db, "s")).toBe(false);
   });
 });
 
