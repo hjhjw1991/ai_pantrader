@@ -37,6 +37,8 @@ export interface ViewFixture {
   marginStock?: Record<string, Array<{ date: string; rzye: number | null; rzmre: number | null; rzjme: number | null; rzyezb: number | null }>>;
   mutualDeal?: Array<{ date: string; mutualType: string; dealAmt: number | null; netAmt: number | null }>;
   mutualTop10?: Record<string, Array<{ date: string; mutualType: string; rank: number | null; dealAmt: number | null; mutualRatio: number | null }>>;
+  /** 周/月线（后复权），键是 `${code}|W` / `${code}|M` */
+  periods?: Record<string, DailyBar[]>;
   /** 情绪截面派生表的行，升序 */
   sentiment?: import("@/lib/contracts").SentimentRow[];
   holderChanges?: Record<string, Array<{ holder: string; direction: "增持" | "减持"; noticeDate: string; endDate: string; changeFreeRatio: number | null; changeShares: number | null }>>;
@@ -68,7 +70,10 @@ export function makeView(f: ViewFixture): PointInTimeView {
         l: b.l * b.adjFactor, c: b.c * b.adjFactor,
       }));
     },
-    periodBars(): any[] { return []; },
+    periodBars(code: string, period: "W" | "M", n: number): any[] {
+      const all = (f.periods ?? {})[`${code}|${period}`] ?? [];
+      return n <= 0 ? [] : all.slice(-n);
+    },
   industryAt(): null { return null; },
   valuation(): null { return null; },
   liftsAhead(code: string): any[] { return (f.lifts ?? {})[code] ?? []; },

@@ -16,11 +16,12 @@ import { SECTOR_FACTORS } from "@/lib/factors/sectors";
 import { RISK_FACTORS } from "@/lib/factors/risk";
 import { CAPITAL_FACTORS } from "@/lib/factors/capital";
 import { CYCLE_FACTORS } from "@/lib/factors/cycle";
+import { STRUCTURE_FACTORS } from "@/lib/factors/structure";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
   ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS, ...CAPITAL_FACTORS,
-  ...CYCLE_FACTORS,
+  ...CYCLE_FACTORS, ...STRUCTURE_FACTORS,
 ];
 
 export function createDefaultRegistry() {
@@ -72,3 +73,7 @@ export { CAPITAL_FACTORS } from "@/lib/factors/capital";
 export { CYCLE_FACTORS } from "@/lib/factors/cycle";
 export { sentimentSnapshot, percentileRank, SENTIMENT_ALGO_VERSION, LBC_CAP } from "@/lib/factors/sentiment";
 export type { SentimentSnapshot } from "@/lib/factors/sentiment";
+export {
+  STRUCTURE_FACTORS, ema, macd, crosses, atr, pivots, structureLevels, doublePattern,
+} from "@/lib/factors/structure";
+export type { Macd, CrossEvent, Pivot, DoublePattern } from "@/lib/factors/structure";
