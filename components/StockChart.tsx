@@ -73,7 +73,39 @@ export function StockChart({ initialCode, initialLevels }: { initialCode?: strin
       timeScale: { borderColor: C.border, rightOffset: 6 },
       crosshair: { mode: 0 },
       height: 520, autoSize: true,
+      // 滚轮交给下面自己接管：库默认"上下滚 = 缩放"，触控板双指上下滑本想滚页面，结果把 K 线缩没了
+      handleScale: { mouseWheel: false },
+      handleScroll: { mouseWheel: false },
     });
+
+    /**
+     * 滚轮 / 触控板手势：
+     *   双指上下滑（deltaY 为主） → 不拦，页面照常滚动
+     *   双指左右滑（deltaX 为主） → 平移 K 线
+     *   双指捏合（浏览器报成 ctrlKey + wheel） → 以指针所在处为中心缩放
+     */
+    const onWheel = (e: WheelEvent) => {
+      const ts = chart.timeScale();
+      const r = ts.getVisibleLogicalRange();
+      if (r === null) return;
+      if (e.ctrlKey) {
+        e.preventDefault();
+        const span = r.to - r.from;
+        const next = Math.min(Math.max(span * Math.exp(e.deltaY * 0.005), 30), data.bars.length + 20);
+        const rect = el.getBoundingClientRect();
+        const anchor = r.from + span * Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        const k = (anchor - r.from) / span;
+        ts.setVisibleLogicalRange({ from: anchor - next * k, to: anchor + next * (1 - k) });
+        return;
+      }
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        const perPx = (r.to - r.from) / Math.max(1, el.clientWidth);
+        const d = e.deltaX * perPx;
+        ts.setVisibleLogicalRange({ from: r.from + d, to: r.to + d });
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
 
     /* ── 价格窗 ── */
     const candles = chart.addSeries(CandlestickSeries, {
@@ -146,7 +178,7 @@ export function StockChart({ initialCode, initialLevels }: { initialCode?: strin
         time: toTime(x.date), position: x.kind === "金叉" ? "belowBar" : "aboveBar",
         color: x.kind === "金叉" ? C.up : C.down, shape: x.kind === "金叉" ? "arrowUp" : "arrowDown",
         text: x.aboveZero ? x.kind : "",
-      })));
+      })), { autoScale: false });   // MACD 窗只有 140px：放大后标记跟着变大，会把刻度撑到几百
     }
     const panes = chart.panes();
     if (panes.length > 1) panes[1].setHeight(140);
@@ -154,7 +186,7 @@ export function StockChart({ initialCode, initialLevels }: { initialCode?: strin
     const byTime = new Map(data.bars.map(b => [toTime(b.date) as number, b]));
     chart.subscribeCrosshairMove(p => setHover(p.time === undefined ? null : byTime.get(p.time as number) ?? null));
     chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, data.bars.length - 160), to: data.bars.length + 4 });
-    return () => { chart.remove(); };
+    return () => { el.removeEventListener("wheel", onWheel); chart.remove(); };
   }, [data, on, levels]);
 
   const last = data && data.bars.length > 0 ? data.bars[data.bars.length - 1] : null;
