@@ -4,6 +4,7 @@ import { sentimentSnapshot, SENTIMENT_ALGO_VERSION } from "@/lib/factors/sentime
 import { crossSectionProxy, CROSS_PROXY_VERSION } from "@/lib/factors/cross-proxy";
 import { tradingDaysBetween } from "@/lib/data/calendar";
 import { addDays, shanghaiTs } from "@/lib/data/clock";
+import { runSwitchCycle } from "@/lib/shadow/switch";
 import { settleShadowPending } from "@/lib/shadow/book";
 
 export interface BuildSentimentOpts {
@@ -127,7 +128,15 @@ export function runNightlyDerived(db: Db, date: string): Record<string, number> 
   let s = { settled: 0, untriggered: 0, pending: 0 }, shadowFailed = 0;
   try { s = settleShadowPending(db, date); }
   catch (e) { shadowFailed = 1; console.error(`[night] 影子盘结算失败：${(e as Error).message}`); }
+  /**
+   * 结算完再看毕业：今晚刚结的样本要算进去。切换改的是策略文件，明天 09:15 的盘前计划起生效。
+   * 失败只留声 —— 毕业判定出错不能拖垮派生表与结算。
+   */
+  let sw = "none", switchFailed = 0;
+  try { sw = runSwitchCycle(db).action; }
+  catch (e) { switchFailed = 1; console.error(`[night] 影子盘毕业判定失败：${(e as Error).message}`); }
   return {
+    switchProposed: sw === "proposed" ? 1 : 0, switchApplied: sw === "applied" ? 1 : 0, switchFailed,
     sentimentBuilt: r.built, sentimentKept: r.kept, sentimentThin: r.thin,
     crossProxyBuilt: c.built, crossProxyThin: c.thin, crossProxyFailed: crossFailed,
     shadowSettled: s.settled, shadowUntriggered: s.untriggered, shadowPending: s.pending, shadowFailed,

@@ -35,6 +35,40 @@ export function seedVariants(db: Db, defs: VariantDef[] = DEFAULT_VARIANTS): num
   return n;
 }
 
+/**
+ * 新增一个变体（不改代码也能加组合）。槽名必须都已注册 —— 配错的组合每天抛错、一条样本都攒不下，
+ * 却会一直占着一个位置，要在登记时就拦下。
+ * id 一经登记不能改、不能复用：要调参数就新开一个 id，旧的退役。
+ */
+export function addVariant(db: Db, d: VariantDef): void {
+  if (!/^[\w+.\-]+$/.test(d.id)) throw new Error(`变体 id 只能用字母数字与 _ + . -：${d.id}`);
+  const s = d.slots as Record<string, any>;
+  for (const [kind, choice] of Object.entries(s)) {
+    const list = Array.isArray(choice) ? choice : [choice];
+    if (kind === "候选源" && list.length === 0) throw new Error("候选源不可为空数组");
+    for (const c of list) {
+      if (typeof c?.用 !== "string" || defaultSlotRegistry.get(kind as any, c.用) === undefined) {
+        const 可选 = defaultSlotRegistry.list(kind as any).map(x => x.name).join(" / ");
+        throw new Error(`槽位未注册：${kind} "${c?.用}"（已注册：${可选 === "" ? "无（槽名写错了？）" : 可选}）`);
+      }
+    }
+  }
+  const r = db.prepare(
+    `INSERT OR IGNORE INTO shadow_variant (id, name, slot_config, note, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)`
+  ).run(d.id, d.name, JSON.stringify(d.slots), d.note, shanghaiTs());
+  if (r.changes === 0) throw new Error(`变体 ${d.id} 已存在（退役的也算）：id 不能复用，换一个`);
+}
+
+/** 退役：停止每天出信号，已有样本保留。baseline 不能退 —— 它是所有比较的锚 */
+export function retireVariant(db: Db, id: string, incumbent: string | null = null): void {
+  if (id === "baseline") throw new Error("baseline 不能退役：它是对照组");
+  if (id === incumbent) throw new Error(`${id} 是当前正式策略用的组合，不能退役（先切走或回滚）`);
+  const r = db.prepare(
+    "UPDATE shadow_variant SET status = 'retired', retired_at = ? WHERE id = ? AND status = 'active'"
+  ).run(shanghaiTs(), id);
+  if (r.changes === 0) throw new Error(`变体 ${id} 不存在或已退役`);
+}
+
 export function activeVariants(db: Db): ActiveVariant[] {
   return (db.prepare(
     "SELECT id, name, slot_config FROM shadow_variant WHERE status = 'active' ORDER BY id"

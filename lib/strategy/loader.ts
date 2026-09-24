@@ -226,6 +226,52 @@ export function writeStrategyParam(
   return next;
 }
 
+/* ------------------------------ 槽位段写回 ------------------------------ */
+
+/**
+ * 整段替换顶层 `槽位:` 段（影子盘切换专用）。slots 为空对象 = 删掉整段，回到 baseline。
+ *
+ * 这是 writeParamInText "只换纯量、不插段落"那条规矩唯一的例外，能例外是因为它够窄：
+ *   - 只动**顶层**的一个键，段落边界就是"下一个顶格的行"，不用猜缩进归属
+ *   - 值用 JSON 流式写（`择时器: {"用":"五段状态机"}`），每个槽一行，不生成嵌套缩进
+ *   - 段内注释是这里自己写的那一行，用户写在段外的注释原样不动
+ * 段不存在时追加到文件末尾。
+ */
+export function writeSlotsInText(src: string, slots: Record<string, unknown>, comment: string): string {
+  const lines = src.split("\n");
+  const start = lines.findIndex(l => /^槽位\s*:/.test(l));
+  let end = start;
+  if (start >= 0) {
+    end = start + 1;
+    // 段落到下一个顶格的非空行为止（顶格注释也算段外：它多半是写给下一段的）
+    while (end < lines.length && (lines[end] === "" || /^\s/.test(lines[end]))) end++;
+    // 段尾的空行留给下一段，不吞
+    while (end > start + 1 && lines[end - 1] === "") end--;
+  }
+  const kinds = Object.keys(slots);
+  const block = kinds.length === 0 ? [] : [
+    "槽位:",
+    `  # ${comment.replace(/\n/g, " ")}`,
+    ...kinds.map(k => `  ${k}: ${JSON.stringify(slots[k])}`),
+  ];
+  if (start >= 0) {
+    const before = lines.slice(0, start), after = lines.slice(end);
+    // 删整段时，段前段后的空行会接在一起：只留一行
+    if (block.length === 0) while (before.length > 0 && before[before.length - 1] === "" && after[0] === "") before.pop();
+    return [...before, ...block, ...after].join("\n");
+  }
+  if (block.length === 0) return src;
+  const body = src.endsWith("\n") ? src : src + "\n";
+  return body + "\n" + block.join("\n") + "\n";
+}
+
+/** 语义化版本升 patch。版本号只往前走：回滚也升，不复用旧号 —— 同一个版本号必须永远对应同一份原文 */
+export function bumpPatch(version: string): string {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (m === null) throw new Error(`版本号不是 x.y.z：${version}，无法自动升级`);
+  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+}
+
 /* ------------------------------ 账户规则读取 ------------------------------ */
 
 /**

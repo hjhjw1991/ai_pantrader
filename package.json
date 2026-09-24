@@ -41,6 +41,7 @@
     "test:live": "PANTRADER_LIVE=1 vitest run --config vitest.live.config.ts",
     "job": "tsx scripts/job.ts",
     "shadow:replay": "tsx scripts/shadow-replay.ts",
+    "shadow:switch": "tsx scripts/shadow-switch.ts",
     "parity": "tsx scripts/parity.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
     "seed-strategies": "tsx scripts/seed-strategies.ts",

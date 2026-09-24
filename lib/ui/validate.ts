@@ -169,3 +169,10 @@ export interface BadRequest {
 export function badRequest(msg: string, issues?: unknown): BadRequest {
   return { error: msg, issues };
 }
+
+/** 影子盘切换操作。approve / reject 必须带提案 id；rollback 不带 */
+export const ShadowSwitchActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("approve"), id: z.number().int().positive() }),
+  z.object({ action: z.literal("reject"), id: z.number().int().positive(), note: z.string().max(500).optional() }),
+  z.object({ action: z.literal("rollback"), note: z.string().max(500).optional() }),
+]);

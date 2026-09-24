@@ -3,7 +3,7 @@ import type { Phase, SignalCard, StrategyConfig } from "@/lib/contracts/strategy
 import type { BacktestReport, Constraints, SweepReport } from "@/lib/contracts/backtest";
 import { unavailable, type Avail } from "@/lib/ui/derive";
 import { createSqliteView, universeQuality, type UniverseQuality } from "@/lib/pit/sqlite-view";
-import { createStrategyEngine } from "@/lib/strategy/engine";
+import { createV2Engine, defaultSlotRegistry } from "@/lib/strategy/v2";
 import { defaultRegistry } from "@/lib/factors";
 import { runBacktest as replay } from "@/lib/backtest";
 import { runBacktestAsync as replayAsync, ReplayAborted, type ReplayProgress } from "@/lib/backtest/replay";
@@ -22,7 +22,11 @@ import { positions as loadPositions, sectorMap } from "@/lib/ui/queries";
 
 type Db = Database.Database;
 
-const engine = createStrategyEngine({ registry: defaultRegistry });
+/**
+ * 正式引擎是 v2：YAML 的 `槽位:` 段在这里生效，影子盘切换才有落点。
+ * 没写 `槽位:` 时 v2 跑 baseline 组合，与 v1 逐字段一致（pnpm parity 守着这条）。
+ */
+const engine = createV2Engine({ registry: defaultRegistry, slots: defaultSlotRegistry });
 
 /** 时段按 Asia/Shanghai 的钟点判，不用 UTC —— 收盘后会被算成前一天的盘中 */
 export function phaseAt(now: Date): Phase {
