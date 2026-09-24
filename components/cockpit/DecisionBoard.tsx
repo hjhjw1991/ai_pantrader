@@ -1,17 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import type { CockpitItem, ItemGroup } from "@/lib/ui/adapters/cockpit";
 import { StockChart } from "@/components/StockChart";
 import { openChart } from "@/components/ChartLink";
 
 /**
- * 作战台的中栏 + 右栏：右边是自选列表（候选 / 持仓 / 观察），点哪只，中间就换成那只的决策卡与 K 线。
+ * 作战台的主体：左边自选列表（候选 / 持仓 / 观察三组，各自成块），右边是选中那只的决策卡或几只的对比表，下面是 K 线。
  *
- * 决策卡只摆引擎已经给出的结论：动作、价位、理由、技术面提示。
- * 大字是结论，价位卡是执行要用的数，技术面提示单独一块、标明参考 —— 一眼分得清哪个必须照做。
- * ↑ / ↓ 在列表里换票（焦点在输入框里时不拦）。
+ * 列表放在决策卡旁边而不是下面：换一只看一眼，眼睛不用上下跑。
+ * 决策卡只摆引擎已经给出的结论：大字是结论，价位卡是执行要用的数，技术面提示单独一块、标明参考。
+ * 对比表把勾选的几只（最多 4）按同一组行并排，方便在几只候选之间挑一只。
+ * 键盘：↑ / ↓ 换票，c 勾选 / 取消对比，v 在决策卡与对比之间切换（焦点在输入框里、或抽屉开着时不拦）。
  */
 
 const TONE_TEXT: Record<CockpitItem["tone"], string> = {
@@ -138,11 +139,16 @@ function Hero({ it }: { it: CockpitItem }) {
   );
 }
 
-function WatchRow({ it, active, onPick }: { it: CockpitItem; active: boolean; onPick: () => void }) {
+function WatchRow({ it, active, onPick, cmp, onCmp, cmpFull }: {
+  it: CockpitItem; active: boolean; onPick: () => void; cmp: boolean; onCmp: () => void; cmpFull: boolean;
+}) {
   const up = it.pct === null ? null : it.pct >= 0;
   return (
-    <button type="button" onClick={onPick}
-      className={`w-full text-left flex items-center gap-2 px-3 py-2 border-b border-line/60 ${active ? "bg-panel-2 border-l-2 border-l-info" : "hover:bg-panel-2/60 border-l-2 border-l-transparent"}`}>
+    <div className={`flex items-center border-b border-line/60 last:border-b-0 ${active ? "bg-panel-2 border-l-2 border-l-info" : "hover:bg-panel-2/60 border-l-2 border-l-transparent"}`}>
+    <label className="pl-2 pr-1 self-stretch flex items-center cursor-pointer" title={cmp ? "移出对比" : cmpFull ? "最多对比 4 只" : "加入对比"}>
+      <input type="checkbox" checked={cmp} disabled={!cmp && cmpFull} onChange={onCmp} className="accent-info" />
+    </label>
+    <button type="button" onClick={onPick} className="flex-1 min-w-0 text-left flex items-center gap-2 pr-3 py-2">
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="text-ink truncate">{it.name ?? it.code}</span>
@@ -158,12 +164,78 @@ function WatchRow({ it, active, onPick }: { it: CockpitItem; active: boolean; on
         </span>
       </span>
     </button>
+    </div>
   );
 }
 
+/* ------------------------------ 对比视图 ------------------------------ */
+
+type Row = { label: string; cell: (it: CockpitItem) => ReactNode; hint?: string };
+const ROWS: Row[] = [
+  { label: "动作", cell: it => <span className={`font-medium ${TONE_TEXT[it.tone]}`}>{it.action}</span> },
+  { label: "分组", cell: it => <span className="text-ink-2">{it.group}{it.account ? ` · ${it.account}` : ""}</span> },
+  { label: "现价", cell: it => <span className="num">{px(it.price)} <span className={it.pct === null ? "text-ink-3" : it.pct >= 0 ? "text-up" : "text-down"}>{it.pct === null ? "" : `${it.pct >= 0 ? "+" : ""}${it.pct.toFixed(2)}%`}</span></span> },
+  { label: "触发价", cell: it => <span className="num">{px(it.triggerPx)} <span className="text-ink-3">{pctTxt(rel(it.triggerPx, it.price))}</span></span>, hint: "括号 = 距现价" },
+  { label: "止损", cell: it => <span className="num text-down">{px(it.stopPx)} <span className="text-ink-3">{pctTxt(rel(it.stopPx, it.triggerPx ?? it.price))}</span></span>, hint: "括号 = 计划亏损" },
+  { label: "目标", cell: it => <span className="num text-up">{px(it.targetPx)} <span className="text-ink-3">{pctTxt(rel(it.targetPx, it.triggerPx ?? it.price))}{it.targetRef && it.targetPx !== null ? " 参考" : ""}</span></span>, hint: "括号 = 空间" },
+  { label: "盈亏比", cell: it => <span className={`num ${it.rrRatio === null ? "text-ink-3" : it.rrRatio >= 2 ? "text-up" : it.rrRatio >= 1.5 ? "text-info" : "text-warn"}`}>{it.rrRatio === null ? "—" : it.rrRatio.toFixed(2)}</span> },
+  { label: "日 / 周 MACD", cell: it => <span className="text-ink-2">{it.daily ?? "—"} / {it.weekly ?? "—"}</span> },
+  { label: "阻力 / 支撑", cell: it => <span className="num text-ink-2">{px(it.resistance)} / {px(it.support)}</span> },
+  { label: "建议仓位", cell: it => <span className="num text-ink-2">{it.size === null ? "—" : `${(it.size * 100).toFixed(1)}%`}</span> },
+  { label: "技术面（参考）", cell: it => it.hints.length === 0 ? <span className="text-ink-3">—</span>
+    : <span className="flex flex-col gap-0.5">{it.hints.map((h, i) => <span key={i} className={`text-[12px] ${HINT_TONE[h.tone].split(" ")[0]}`}>{h.text}</span>)}</span> },
+  { label: "理由", cell: it => <span className="text-[12px] text-ink-2 leading-5">{(it.group === "观察" ? it.reasons.join("；") : it.thesis) || "—"}</span> },
+];
+
+function Compare({ list, onOpen, onDrop }: { list: CockpitItem[]; onOpen: (k: string) => void; onDrop: (k: string) => void }) {
+  if (list.length === 0) {
+    return <section className="bg-panel border border-line rounded-sm p-6 text-ink-3">在左边列表里勾选要对比的票（最多 4 只）。</section>;
+  }
+  return (
+    <section className="bg-panel border border-line rounded-sm overflow-x-auto">
+      <table className="w-full text-[13px] border-collapse">
+        <thead>
+          <tr className="border-b border-line bg-panel-2">
+            <th className="w-28 px-3 py-2 text-left text-[11px] font-normal text-ink-3">点列头看决策卡</th>
+            {list.map(it => (
+              <th key={it.key} className="px-3 py-2 text-left font-normal border-l border-line min-w-[11rem]">
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => onOpen(it.key)} className="text-ink hover:text-info text-left">
+                    {it.name ?? it.code} <span className="num text-ink-3 text-[11px]">{it.code}</span>
+                  </button>
+                  <button type="button" onClick={() => onDrop(it.key)} className="ml-auto text-ink-3 hover:text-ink" aria-label="移出对比">×</button>
+                </div>
+                <div className="mt-1"><Spark xs={it.spark} up={it.pct === null ? null : it.pct >= 0} /></div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {ROWS.map(r => (
+            <tr key={r.label} className="border-b border-line/60 last:border-0 align-top">
+              <td className="px-3 py-2 text-[11px] text-ink-3" title={r.hint}>{r.label}</td>
+              {list.map(it => <td key={it.key} className="px-3 py-2 border-l border-line">{r.cell(it)}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+const GROUP_STYLE: Record<ItemGroup, { title: string; bar: string; empty: string }> = {
+  候选: { title: "今日候选", bar: "bg-up", empty: "今日无买入候选" },
+  持仓: { title: "持仓", bar: "bg-info", empty: "没有持仓" },
+  观察: { title: "观察池", bar: "bg-warn", empty: "观察池是空的" },
+};
+
 export function DecisionBoard({ items, emptyNote }: { items: CockpitItem[]; emptyNote: string }) {
   const [sel, setSel] = useState<string | null>(items[0]?.key ?? null);
+  const [view, setView] = useState<"card" | "compare">("card");
+  const [cmp, setCmp] = useState<string[]>([]);
   const cur = useMemo(() => items.find(i => i.key === sel) ?? items[0] ?? null, [items, sel]);
+  const cmpList = useMemo(() => cmp.map(k => items.find(i => i.key === k)).filter((x): x is CockpitItem => x !== undefined), [cmp, items]);
+  const toggleCmp = (k: string) => setCmp(c => (c.includes(k) ? c.filter(x => x !== k) : c.length >= 4 ? c : [...c, k]));
 
   // 选中哪只，K 线就换成哪只并带上计划价位
   useEffect(() => {
@@ -172,49 +244,74 @@ export function DecisionBoard({ items, emptyNote }: { items: CockpitItem[]; empt
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      if (document.querySelector("[role=dialog]")) return;   // 抽屉开着时不抢它的方向键
+      if (document.querySelector("[role=dialog]")) return;   // 抽屉开着时不抢它的按键
+      if (e.key === "c" && cur) { toggleCmp(cur.key); return; }
+      if (e.key === "v") { setView(v => (v === "card" ? "compare" : "card")); return; }
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
       const i = items.findIndex(x => x.key === cur?.key);
       const j = e.key === "ArrowDown" ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1);
-      if (items[j]) { e.preventDefault(); setSel(items[j].key); }
+      if (items[j]) { e.preventDefault(); setSel(items[j].key); setView("card"); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, cur?.key]);
+  }, [items, cur?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const tab = (v: "card" | "compare", label: string) => (
+    <button type="button" onClick={() => setView(v)}
+      className={`px-3 py-1.5 text-[13px] -mb-px border-b-2 ${view === v ? "border-info text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}>{label}</button>
+  );
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-3 items-start">
+    <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-3 items-start">
+      {/* 左：自选列表。放在决策卡旁边而不是下面 —— 换一只看一眼，眼睛不用上下跑 */}
+      <aside className="flex flex-col gap-2 lg:sticky lg:top-0">
+        <div className="flex items-baseline gap-2 px-1">
+          <span className="text-warn">★</span>
+          <span className="text-ink font-medium">自选</span>
+          <span className="text-[11px] text-ink-3">{items.length} 只 · ↑↓ 切换 · c 勾对比</span>
+          <Link href="/positions" scroll={false} className="ml-auto text-[11px] text-info">管理 →</Link>
+        </div>
+        {GROUPS.map(g => {
+          const list = items.filter(i => i.group === g);
+          const st = GROUP_STYLE[g];
+          return (
+            <section key={g} className="bg-panel border border-line rounded-sm overflow-hidden">
+              <header className="flex items-center gap-2 px-3 py-1.5 bg-panel-2 border-b border-line">
+                <span className={`w-1 h-3.5 rounded-sm ${st.bar}`} />
+                <span className="text-[12px] text-ink">{st.title}</span>
+                <span className="ml-auto num text-[11px] text-ink-2 bg-panel rounded-sm px-1.5">{list.length}</span>
+              </header>
+              {list.length === 0 ? <div className="px-3 py-2 text-[11px] text-ink-3">{st.empty}</div>
+                : list.map(it => (
+                  <WatchRow key={it.key} it={it} active={view === "card" && cur?.key === it.key}
+                    onPick={() => { setSel(it.key); setView("card"); }}
+                    cmp={cmp.includes(it.key)} cmpFull={cmp.length >= 4} onCmp={() => toggleCmp(it.key)} />
+                ))}
+            </section>
+          );
+        })}
+      </aside>
+
+      {/* 右：决策卡 / 对比 + K 线 */}
       <div className="flex flex-col gap-3 min-w-0">
-        {cur ? <Hero it={cur} /> : (
-          <section className="bg-panel border border-line rounded-sm p-6 text-ink-3">{emptyNote}</section>
-        )}
+        <div className="flex items-end gap-1 border-b border-line">
+          {tab("card", cur ? `决策卡 · ${cur.name ?? cur.code}` : "决策卡")}
+          {tab("compare", `对比${cmpList.length > 0 ? ` (${cmpList.length})` : ""}`)}
+          {cmpList.length > 0 ? (
+            <button type="button" onClick={() => setCmp([])} className="ml-auto mb-1 text-[11px] text-ink-3 hover:text-ink">清空对比</button>
+          ) : null}
+          <span className={`${cmpList.length > 0 ? "" : "ml-auto"} mb-1.5 text-[11px] text-ink-3`}>v 切换</span>
+        </div>
+        {view === "compare" ? <Compare list={cmpList} onOpen={k => { setSel(k); setView("card"); }} onDrop={k => toggleCmp(k)} />
+          : cur ? <Hero it={cur} /> : (
+            <section className="bg-panel border border-line rounded-sm p-6 text-ink-3">{emptyNote}</section>
+          )}
         <section id="chart" className="bg-panel border border-line rounded-sm p-3 min-w-0">
           <StockChart initialCode={cur?.code} initialLevels={cur ? { trigger: cur.triggerPx, stop: cur.stopPx, target: cur.targetPx } : undefined} />
         </section>
       </div>
-
-      <aside className="bg-panel border border-line rounded-sm xl:sticky xl:top-2 overflow-hidden">
-        <header className="flex items-baseline gap-2 px-3 py-2 border-b border-line bg-panel-2">
-          <span className="text-warn">★</span>
-          <span className="text-ink font-medium">自选</span>
-          <span className="text-[11px] text-ink-3">{items.length} 只 · ↑↓ 切换</span>
-          <Link href="/positions" scroll={false} className="ml-auto text-[11px] text-info">管理 →</Link>
-        </header>
-        {GROUPS.map(g => {
-          const list = items.filter(i => i.group === g);
-          return (
-            <div key={g}>
-              <div className="px-3 pt-2 pb-1 text-[11px] text-ink-3 flex justify-between">
-                <span>{g === "候选" ? "今日候选" : g === "持仓" ? "持仓" : "观察池"}</span><span className="num">{list.length}</span>
-              </div>
-              {list.length === 0 ? <div className="px-3 pb-2 text-[11px] text-ink-3">{g === "候选" ? "今日无买入候选" : g === "持仓" ? "没有持仓" : "观察池是空的"}</div>
-                : list.map(it => <WatchRow key={it.key} it={it} active={cur?.key === it.key} onPick={() => setSel(it.key)} />)}
-            </div>
-          );
-        })}
-      </aside>
     </div>
   );
 }
