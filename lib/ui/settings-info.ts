@@ -1,39 +1,50 @@
 import fs from "node:fs";
 import path from "node:path";
+import type Database from "better-sqlite3";
 import { getConfig } from "@/lib/config";
+import { isAlive } from "@/lib/platform/singleton";
 
 /**
- * 设置页需要的"系统外部事实"：调度是否装了、日志多久没动、快照目录有多大。
+ * 设置页需要的"系统外部事实"：采集守护进程在不在跑、各任务最近一次跑得怎样、数据目录有多大。
  *
- * 调度状态**从磁盘读实况**（plist 文件 + 日志 mtime），不读某处配置常量：
- * 配置里写着装了、实际没装，是最容易发生也最难发现的一种失效，
- * 而它的后果是分钟线永久缺失（spec §18.2）。
+ * 调度状态**读实况**（PID 锁 + 进程存活 + job_run），不读某处配置常量：
+ * 以为在跑、实际没跑，是最容易发生也最难发现的一种失效，而它的后果是分钟线永久缺失（spec §18.2）。
+ *
+ * 以前这里读的是 ~/Library/LaunchAgents 里的 plist。系统现在只靠进程内调度（换电脑能跟着走），
+ * launchd 已经拆掉，再读那个目录只会永远报"未安装"。
  */
 
-const AGENTS_DIR = path.join(process.env.HOME ?? "/tmp", "Library/LaunchAgents");
-
-export interface ScheduleEntry {
-  label: string;
-  plistPath: string;
-  /** 标准输出日志的最后写入时间。null = 日志文件不存在（可能一次都没跑过） */
-  lastOutAt: string | null;
-  lastErrAt: string | null;
-  errBytes: number | null;
+export interface JobLast {
+  job: string;
+  date: string;
+  slot: string;
+  status: string;
+  runner: string | null;
+  finishedAt: string | null;
+  error: string | null;
 }
 
 export interface ScheduleStatus {
-  installed: boolean;
-  agentsDir: string;
-  logDir: string;
-  entries: ScheduleEntry[];
+  /** 守护进程是否活着（PID 锁里的进程还在） */
+  running: boolean;
+  pid: number | null;
+  lockPath: string;
+  /** 每个任务最近一次的记录 */
+  jobs: JobLast[];
 }
 
-function statTime(p: string): string | null {
-  try {
-    return fs.statSync(p).mtime.toISOString();
-  } catch {
-    return null;
-  }
+export function scheduleStatus(db: Database.Database | null): ScheduleStatus {
+  const lockPath = path.join(getConfig().dataDir, "scheduler.pid");
+  let pid: number | null = null;
+  try { pid = Number.parseInt(fs.readFileSync(lockPath, "utf8").trim(), 10) || null; } catch { pid = null; }
+  const jobs = db === null ? [] : (db.prepare(
+    `SELECT job, date, slot, status, runner, finished_at, error FROM job_run j
+      WHERE (date || ' ' || slot) = (SELECT MAX(date || ' ' || slot) FROM job_run k WHERE k.job = j.job)
+      ORDER BY job`
+  ).all() as any[]).map(r => ({
+    job: r.job, date: r.date, slot: r.slot, status: r.status, runner: r.runner, finishedAt: r.finished_at, error: r.error,
+  }));
+  return { running: pid !== null && isAlive(pid), pid, lockPath, jobs };
 }
 
 function statSize(p: string): number | null {
@@ -42,29 +53,6 @@ function statSize(p: string): number | null {
   } catch {
     return null;
   }
-}
-
-export function scheduleStatus(): ScheduleStatus {
-  const logDir = path.join(getConfig().dataDir, "logs");
-  let names: string[] = [];
-  try {
-    names = fs
-      .readdirSync(AGENTS_DIR)
-      .filter((f) => f.startsWith("com.pantrader.") && f.endsWith(".plist"));
-  } catch {
-    names = [];
-  }
-  const entries = names.map((f) => {
-    const label = f.replace(/\.plist$/, "");
-    return {
-      label,
-      plistPath: path.join(AGENTS_DIR, f),
-      lastOutAt: statTime(path.join(logDir, `${label}.out.log`)),
-      lastErrAt: statTime(path.join(logDir, `${label}.err.log`)),
-      errBytes: statSize(path.join(logDir, `${label}.err.log`)),
-    };
-  });
-  return { installed: entries.length > 0, agentsDir: AGENTS_DIR, logDir, entries };
 }
 
 export interface StorageInfo {

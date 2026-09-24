@@ -15,7 +15,7 @@ export function GET() {
     const counted = tableCountsCached(db);
     return ok({
       storage: storageInfo(),
-      schedule: scheduleStatus(),
+      schedule: scheduleStatus(db),
       migrations: appliedMigrations(db),
       systemStartDate: getMetaValue(db, "system_start_date"),
       calendar: calendarRange(db),

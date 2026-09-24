@@ -70,9 +70,7 @@ say("检查运行环境");
  *
  * 仍然保留下界：项目用到的语法与内置 API 按 Node 22 写。
  *
- * 上界拿掉之后，唯一还与 Node 版本相关的坑是 install-launchd / install-schtasks
- * 把**安装当时那个 Node 的绝对路径**写进了计划任务 —— 换版本本身无害，
- * 但把旧版本删掉会让任务指向一个不存在的解释器。`node scripts/doctor.mjs` 专门查这一项。
+ * 上界拿掉之后，唯一还与 Node 版本相关的是 better-sqlite3 的原生模块：换了 Node 大版本要重装依赖。
  *
  * 解析要按 semver 区间取字段，别用 replace(/[^\d]/g,"") ——
  * ">=22 <23" 会被那种写法拼成 2223。

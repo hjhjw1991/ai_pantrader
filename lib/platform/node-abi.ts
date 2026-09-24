@@ -52,10 +52,9 @@ export function parseAbiMismatch(message: string): AbiMismatch | null {
 }
 
 /**
- * 处置建议。**刻意劝阻 rebuild**：
- * install-launchd / install-schtasks 把安装当时那个 Node 的绝对路径写进了计划任务，
- * 就地重编成新 ABI，网页是好了，采集反过来全挂 —— 而采集挂了是静默的，
- * 要等到某天发现数据缺了一段才发现。所以正解永远是"把 Node 换回去"。
+ * 处置建议：优先把 Node 换回装依赖时的版本。
+ * 就地重编成新 ABI 也行，但网页进程与采集守护进程必须用同一个 Node 启动 ——
+ * 两边 ABI 不一致时，一边好了另一边照样开不了库，而采集挂了是静默的。
  */
 export function abiHint(message: string): string | null {
   const m = parseAbiMismatch(message);

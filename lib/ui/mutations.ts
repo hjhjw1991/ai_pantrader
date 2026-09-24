@@ -8,7 +8,7 @@ import { shanghaiTs } from "@/lib/ui/time";
  *
  * 三张表：watchpool（我盯哪些票）、trade（我在券商 App 里实际成交了什么）、
  * position（由成交推出来的持仓）、account（我有哪几个账户）。
- * 行情/截面/龙虎榜一律由 launchd job 写，前端连 INSERT 都不写。
+ * 行情/截面/龙虎榜一律由采集守护进程写，前端连 INSERT 都不写。
  *
  * trade/position 的写入在 lib/execution/manual.ts（ManualBroker），这里的 recordManualFill 只是委派。
  *

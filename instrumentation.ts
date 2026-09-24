@@ -29,6 +29,8 @@ export async function register(): Promise<void> {
     cwd: process.cwd(),
     detached: true,
     stdio: "ignore",
+    // Windows 上 detached 子进程默认会弹一个黑色控制台窗口
+    windowsHide: true,
     env: { ...process.env, PANTRADER_RUNNER: "instrumentation" },
   });
   child.on("error", e => console.error(`[候潮] 采集守护进程启动失败：${e.message}`));

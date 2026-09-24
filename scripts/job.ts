@@ -1,5 +1,5 @@
 /**
- * 单次执行一个采集 job。OS 级定时任务（launchd / schtasks）走的就是这条路径。
+ * 手动执行一个采集 job（补数据、排查用）。日常采集由守护进程的进程内调度完成。
  *
  * **必须先认领 job_run 再执行**：进程内调度器靠 (date, job, slot) 主键去重，
  * 这里若直接调 runJob，两套机制就互相看不见 —— 实测 2026-08-21，launchd 在 18:40
@@ -32,12 +32,8 @@ if (!name || name.startsWith("--")) {
 }
 
 /**
- * 谁在跑。安装脚本把 `--runner=launchd` / `--runner=schtasks` 写进任务命令行 ——
- * 用命令行而不是环境变量，是因为 schtasks 的 /TR 只接受一条命令，
- * 塞环境变量得再套一层 cmd /c，两个平台的做法就分叉了。
- *
- * 不按平台猜：macOS 上手敲一次 `pnpm job night` 并不是 launchd 跑的，
- * 记成 launchd 会让日后查"这条是自动跑的还是人补的"永远查不清。
+ * 谁在跑：默认 manual，可用 --runner=… 指定。旧版的 launchd / schtasks 任务就是这样标明身份的，
+ * 旧机器上若还有残留任务在跑，job_run 里能认出来（pnpm env:doctor 会提示删掉它们）。
  */
 const RUNNERS: Runner[] = ["scheduler", "launchd", "schtasks", "manual"];
 const isRunner = (v: string | undefined): v is Runner =>

@@ -19,7 +19,7 @@ import { shanghaiTs } from "@/lib/data/clock";
  * 而且 CI 里绝不能真去打网络。
  */
 
-let singleton: { scheduler: Scheduler; awake: KeepAwakeHandle | null } | null = null;
+let singleton: { scheduler: Scheduler; awake: { stop(): void } } | null = null;
 
 export interface AutostartResult {
   started: boolean;
@@ -50,8 +50,47 @@ function log(e: SchedulerEvent): void {
 
 /** 当前是否落在需要保持唤醒的时段内 */
 export function inAwakeWindow(hm: string): boolean {
+  return awakeRemainingSec(hm) > 0;
+}
+
+/** 当前所在唤醒时段还剩多少秒；不在任何时段内为 0 */
+export function awakeRemainingSec(hm: string): number {
   const t = hmToMinutes(hm);
-  return awakeWindows().some(w => t >= hmToMinutes(w.from) && t <= hmToMinutes(w.to));
+  const w = awakeWindows().find(x => t >= hmToMinutes(x.from) && t <= hmToMinutes(x.to));
+  return w === undefined ? 0 : (hmToMinutes(w.to) - t) * 60;
+}
+
+/**
+ * 防休眠守卫：每分钟看一次，进入采集时段就申请防休眠，时长给到时段结束，时段外不吊着。
+ *
+ * 以前只在启动那一刻判断一次 —— 晚上启动的系统，第二天交易时段不会阻止休眠，
+ * 而这台机器空闲 1 分钟就睡、盘中快照不可回补。那一段过去靠 launchd 的三个 caffeinate 任务兜着，
+ * launchd 拆掉（换电脑后不会跟着走）之后，这件事必须由系统自己做。
+ */
+export function startAwakeGuard(
+  now: () => string = () => shanghaiTs().slice(11, 16),
+  acquire: (seconds: number) => KeepAwakeHandle = seconds => keepAwake({ seconds }),
+  everyMs = 60_000,
+): { tick(): void; stop(): void } {
+  let handle: KeepAwakeHandle | null = null;
+  let until = 0;
+  let warned = false;
+  const tick = () => {
+    const left = awakeRemainingSec(now());
+    if (left <= 0) {
+      if (handle !== null) { handle.release(); handle = null; }
+      return;
+    }
+    if (handle !== null && Date.now() < until) return;
+    handle?.release();
+    handle = acquire(left);
+    until = Date.now() + left * 1000;
+    if (!handle.active && !warned) { warned = true; console.warn(`[采集] 防休眠不可用：${handle.reason}`); }
+  };
+  tick();
+  const timer = setInterval(tick, everyMs);
+  timer.unref?.();
+  return { tick, stop: () => { clearInterval(timer); handle?.release(); handle = null; } };
 }
 
 export interface AutostartOpts {
@@ -102,12 +141,8 @@ export function startAutostart(
   });
   scheduler.start();
 
-  // 只在采集时段内申请防休眠，不整天吊着不让机器睡
-  const hm = shanghaiTs().slice(11, 16);
-  const awake = inAwakeWindow(hm)
-    ? keepAwake({ seconds: 3600 })
-    : null;
-  if (awake !== null && !awake.active) console.warn(`[采集] 防休眠不可用：${awake.reason}`);
+  // 只在采集时段内申请防休眠，不整天吊着不让机器睡；每个时段到了都重新申请
+  const awake = startAwakeGuard();
 
   singleton = { scheduler, awake };
   return { started: true, reason: "采集器已启动（进程内调度，跨平台）", scheduler };
@@ -115,6 +150,6 @@ export function startAutostart(
 
 export function stopAutostart(): void {
   singleton?.scheduler.stop();
-  singleton?.awake?.release();
+  singleton?.awake.stop();
   singleton = null;
 }

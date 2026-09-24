@@ -244,48 +244,32 @@ if (!existsSync(dataDir)) {
   else fail("策略文件", "config/strategies 下既无实文件也无模板", "检查仓库是否完整 clone");
 }
 
-// ──────────────────── 定时任务：重点查它指向的 Node 还在不在 ────────────────────
+// ──────────────────── 旧版定时任务残留 ────────────────────
 
 /**
- * 这一项是这个项目特有的坑，别的 doctor 不会查。
+ * 调度只靠进程内调度（启动网页服务或 pnpm daemon 时自动拉起），不再往操作系统里装定时任务 ——
+ * 那种任务换一台电脑不会跟着走，还会把安装当时那个 Node 的绝对路径写死。
  *
- * install-launchd / install-schtasks 把**安装当时那个 Node 的绝对路径**写进了计划任务。
- * 用 nvm 换过版本、或把旧版本删掉之后，任务还指着一个不存在的解释器 ——
- * 于是采集静默地一次都不跑，而网页一切正常，人完全看不出来。
+ * 装过旧版本的机器上可能还留着 launchd / schtasks 任务：它们会在系统没开时自己跑、
+ * 指向的解释器也可能早就不在了。发现了就提示删掉。
  */
-function checkScheduled() {
+function checkLegacyScheduled() {
   if (OS === "darwin") {
     const dir = path.join(homedir(), "Library", "LaunchAgents");
     const plists = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith("com.pantrader.")) : [];
-    if (plists.length === 0) {
-      warn("定时任务", "未安装（可选）", "只在网页/daemon 开着时采集。装成开机任务：pnpm run install-launchd");
-      return;
-    }
-    const bad = [];
-    for (const f of plists) {
-      const text = readFileSync(path.join(dir, f), "utf8");
-      // plist 里第一个 <string> 就是解释器路径
-      const exe = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/.exec(text)?.[1];
-      if (exe && !existsSync(exe)) bad.push(`${f} → ${exe}`);
-    }
-    if (bad.length > 0) {
-      fail("定时任务", `${bad.length}/${plists.length} 个任务指向已不存在的 Node：\n      ${bad.join("\n      ")}`,
-        "重装一次让它写入当前 Node 路径：pnpm run install-launchd");
-    } else {
-      ok("定时任务", `${plists.length} 个 launchd 任务，解释器路径都还在`);
-    }
+    if (plists.length === 0) ok("旧版定时任务", "无残留（调度只靠进程内守护进程）");
+    else warn("旧版定时任务", `发现 ${plists.length} 个旧 launchd 任务（${dir}）`,
+      "系统已不再使用它们：for f in ~/Library/LaunchAgents/com.pantrader.*.plist; do launchctl bootout gui/$(id -u)/$(basename $f .plist); rm $f; done");
     return;
   }
   if (IS_WIN) {
     const r = sh("schtasks", ["/query", "/fo", "list", "/v"]);
     const n = r.ok ? (r.out.match(/PanTrader/g) ?? []).length : 0;
-    if (n > 0) ok("定时任务", `schtasks 里有 ${n} 条 PanTrader 相关记录`);
-    else warn("定时任务", "未安装（可选）", "pnpm run install-schtasks");
-    return;
+    if (n === 0) ok("旧版定时任务", "无残留（调度只靠进程内守护进程）");
+    else warn("旧版定时任务", `schtasks 里有 ${n} 条旧 PanTrader 记录`, `系统已不再使用它们：schtasks /Delete /F /TN "PanTrader_*"`);
   }
-  warn("定时任务", "本平台没有安装脚本（只有 macOS/Windows 有）", "用 pnpm run daemon 常驻，或自行接 systemd/cron");
 }
-checkScheduled();
+checkLegacyScheduled();
 
 // ───────────────────────────── 输出 ─────────────────────────────
 

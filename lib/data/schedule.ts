@@ -4,12 +4,11 @@ import { shanghaiTs } from "@/lib/data/clock";
 /**
  * 采集时刻表。**平台无关的唯一真相源**，随源码走。
  *
- * 以前时刻表只存在于 scripts/install-launchd.ts 里，也就是只存在于 macOS 的
- * plist 生成逻辑里：换台 Linux/Windows 就得重写一份，两份还会互相漂移。
- * 现在它是纯数据，被三个消费者共用：
- *   lib/data/scheduler.ts        进程内调度（跨平台，跑起系统就自动采集）
- *   scripts/install-launchd.ts   macOS launchd（可选的开机级注册）
- *   scripts/install-schtasks.ts  Windows 计划任务（同上）
+ * 纯数据，随源码走，macOS 与 Windows 同一份。消费者：
+ *   lib/data/scheduler.ts   进程内调度（跑起系统就自动采集）
+ *   lib/data/autostart.ts   采集时段防休眠（awakeWindows）
+ *   scripts/job.ts          手动补跑一个 job 时认领时点
+ * 不往操作系统里装定时任务（launchd / schtasks）：那种任务换电脑不会跟着走。
  *
  * 时点一律是 Asia/Shanghai 挂钟时间，与宿主时区无关 ——
  * A 股的开盘收盘是上海时间定义的，用本机时区会让出国/改时区直接错位。
@@ -137,9 +136,9 @@ export const SCHEDULE: JobSlot[] = [
 ];
 
 /**
- * OS 级任务允许迟到多久，仍算作它那个时点。
+ * 触发允许迟到多久，仍算作它那个时点。
  *
- * 需要余量是因为 launchd / schtasks **只保证不早于**日历时间触发：机器休眠期间
+ * 需要余量是因为定时触发**只保证不早于**日历时间：机器休眠期间
  * 时点不会到点执行，唤醒后才补一次。半小时之内补上，做的还是那个时点该做的事。
  * 超过就不认了 —— 14:55 的盘口在 16:30 拿到的是收盘价，把它记成 14:55 跑过，
  * 等于用一份假数据把覆盖率填满，比留个 missed 缺口还糟。

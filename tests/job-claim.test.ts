@@ -104,22 +104,3 @@ describe("claimSlot：两个 runner 抢同一个时点，只有一个能跑", ()
     expect(r.error).toBe("源掉线");
   });
 });
-
-describe("装计划任务时把 runner 写进命令行", () => {
-  it("launchd 的 plist argv 带 --runner=launchd", async () => {
-    const { buildPlist } = await import("@/scripts/install-launchd");
-    const plist = buildPlist({
-      label: "com.pantrader.close", nodeBin: "/n", script: "scripts/job.ts",
-      jobArgs: ["close", "--runner=launchd"], workdir: "/w", logDir: "/l",
-      calendar: { Hour: 15, Minute: 5 },
-    });
-    expect(plist).toContain("<string>--runner=launchd</string>");
-  });
-
-  it("Windows 计划任务同理 —— 两个平台都要能在 job_run 里认出自己", async () => {
-    const { buildTasks } = await import("@/scripts/install-schtasks");
-    const tasks = buildTasks("C:\\node.exe", "C:\\pantrader");
-    expect(tasks.length).toBeGreaterThan(0);
-    for (const t of tasks) expect(t.argv).toContain("--runner=schtasks");
-  });
-});

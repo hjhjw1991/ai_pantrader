@@ -123,10 +123,10 @@ Pages refresh themselves every 60 seconds, plus an SSE push — gear changes, ne
 
 The "backfillable across days" column is a real constraint, not a labelling convention: **an intraday snapshot is a moment that has passed, and the sources offer no historical endpoint — miss a day and it is missing forever.** So a missed slot is honestly recorded as `missed`, never as a success; recording it as success would be forging the coverage number.
 
-Both schedulers can be installed at once without double-collecting: the in-process scheduler and the OS-level task (launchd / schtasks) share the `job_run` table, keyed `(date, job, slot)`. Whoever claims a slot first runs it; the other stands down. So "browser open" plus "startup task installed" will not pull the whole-market snapshot twice.
-
-> Learned the hard way: `scripts/job.ts` used to execute directly without writing `job_run`, which made the OS task completely invisible to the scheduler.
-> Observed on 2026-08-21: launchd finished `post`/`night`, then the web UI started, the scheduler saw no rows in the table, and ran both again.
+There is only the in-process scheduler: starting the web server spawns the collection daemon (`scripts/daemon.ts`), which keeps running after the web UI closes and holds a PID lock so it cannot start twice.
+Nothing is installed into the operating system (no launchd / schtasks / cron) — such tasks do not move with the code to another computer, and they hard-code the Node path from install time.
+During collection windows (pre-open through close, plus the two evening slots) the daemon itself prevents idle sleep and lets go outside them; with the lid closed (unless on power with an external display) or the machine off, nothing can collect.
+The Settings page's scheduler panel shows whether the daemon is running and each job's latest result, and turns red when the daemon is not running.
 
 To collect without opening the web UI:
 
@@ -134,12 +134,7 @@ To collect without opening the web UI:
 pnpm run daemon          # standalone daemon with a PID lock, so it can't start twice
 ```
 
-To install as a startup-level task (optional):
-
-```bash
-pnpm run install-launchd    # macOS
-pnpm run install-schtasks   # Windows
-```
+If an older install left launchd / schtasks tasks on a machine, `pnpm env:doctor` says how to remove them.
 
 ### Wake compensation
 

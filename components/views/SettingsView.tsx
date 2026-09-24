@@ -44,7 +44,7 @@ export default function SettingsPage() {
 
   const s = systemStatus();
   const st = storageInfo();
-  const sched = scheduleStatus();
+  const sched = scheduleStatus(db);
   const migs = appliedMigrations(db);
   // 22 张表一轮 COUNT(*) 实测 4.1–5.4 秒（kline_daily 5.75M + quote_snapshot 7.13M），
   // 且同步阻塞整个事件循环，不能长在请求路径上。夜间 job 数好存进 app_meta，
@@ -138,54 +138,48 @@ export default function SettingsPage() {
       {/* ── 调度 ── */}
       <Panel
         title="调度状态"
-        hint="launchd 实况：从 ~/Library/LaunchAgents 与日志 mtime 读，不读配置常量"
-        tone={sched.installed ? "normal" : "danger"}
+        hint="进程内调度：启动网页服务（或 pnpm daemon）时自动拉起采集守护进程，采集时段自动防休眠"
+        right={sched.running ? `守护进程 pid ${sched.pid}` : "守护进程未运行"}
+        tone={sched.running ? "normal" : "danger"}
       >
-        {!sched.installed ? (
-          <>
-            <EmptyState
-              u={unavailable(
-                `未发现 com.pantrader.*.plist（查找目录 ${sched.agentsDir}）`,
-                "跑 pnpm install-launchd 安装定时任务。调度不跑 = 分钟线与截面数据每天永久缺失，spec §18.2 要求这类失败必须告警"
-              )}
-            />
-          </>
-        ) : (
-          <div className="overflow-x-auto">
+        {!sched.running ? (
+          <EmptyState
+            u={unavailable(
+              `采集守护进程没有在跑（锁文件 ${sched.lockPath}${sched.pid ? `，记录的 pid ${sched.pid} 已不在` : " 不存在"}）`,
+              "启动网页服务会自动拉起它；不开网页时用 pnpm daemon。调度不跑 = 分钟线与截面数据每天永久缺失，spec §18.2 要求这类失败必须告警"
+            )}
+          />
+        ) : null}
+        {sched.jobs.length > 0 ? (
+          <div className="overflow-x-auto mt-2">
             <table className="dense">
               <thead>
                 <tr>
                   <th>任务</th>
-                  <th className="text-right">最后输出</th>
-                  <th className="text-right">距今</th>
-                  <th className="text-right">错误日志</th>
+                  <th>最近时点</th>
+                  <th>结果</th>
+                  <th>执行者</th>
+                  <th className="text-right">完成于</th>
+                  <th>错误</th>
                 </tr>
               </thead>
               <tbody>
-                {sched.entries.map((e) => (
-                  <tr key={e.label}>
-                    <td className="num text-ink">{e.label}</td>
-                    <td className="num">{fmtTs(e.lastOutAt, true)}</td>
-                    <td className="num text-ink-2">{fmtAge(ageMinutes(e.lastOutAt))}</td>
-                    <td className="num">
-                      {e.errBytes === null ? (
-                        "—"
-                      ) : e.errBytes > 0 ? (
-                        <span className="text-warn">{fmtAmount(e.errBytes)}B</span>
-                      ) : (
-                        "0"
-                      )}
-                    </td>
+                {sched.jobs.map((j) => (
+                  <tr key={j.job}>
+                    <td className="num text-ink">{j.job}</td>
+                    <td className="num">{j.date} {j.slot}</td>
+                    <td className={j.status === "done" ? "text-down" : j.status === "missed" ? "text-danger" : "text-warn"}>{j.status}</td>
+                    <td className="text-ink-2">{j.runner ?? "—"}</td>
+                    <td className="num">{fmtTs(j.finishedAt, true)}</td>
+                    <td className="text-ink-3 max-w-[24rem] truncate" title={j.error ?? ""}>{j.error ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
+        ) : null}
         <p className="mt-2 text-ink-3 text-[11px]">
-          日志目录 <code className="text-ink-2">{sched.logDir}</code>。
-          "最后输出"是 .out.log 的 mtime，只能证明进程写过东西，不能证明当次采集成功 ——
-          采集是否成功看上面的源健康与下面的缺口。
+          合盖（未接电源和外接显示器时）与关机期间任何程序都采不了；醒来后会自动补齐可回补的数据，盘中快照这类不可回补的如实记为 missed。
         </p>
       </Panel>
 

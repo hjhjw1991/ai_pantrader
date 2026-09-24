@@ -74,8 +74,8 @@ export function NoDatabase({ why }: { why: DbUnavailable }) {
           </pre>
           <p className="mt-2 text-ink-3 text-[12px]">
             路径是对的，别去查路径。报错里出现 <code className="text-ink-2">NODE_MODULE_VERSION</code>{" "}
-            就是 Node 版本与 better-sqlite3 预编译包不匹配：本项目按 Node 22 部署（launchd/计划任务里写死的也是它），
-            执行 <code className="text-ink-2">nvm use 22</code> 后重启即可。
+            就是 Node 版本与 better-sqlite3 预编译包不匹配：换回装依赖时用的那个 Node 版本（如 <code className="text-ink-2">nvm use 22</code>）后重启，
+            或在当前 Node 下重新 <code className="text-ink-2">pnpm install</code>。
           </p>
         </>
       )}

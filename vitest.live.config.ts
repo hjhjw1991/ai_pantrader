@@ -8,6 +8,8 @@ export default defineConfig({
     environment: "node",
     include: ["tests/live/**/*.test.ts"],
     testTimeout: 60_000,
+    // 开关写在这里而不是命令行前缀：`PANTRADER_LIVE=1 vitest` 在 Windows 的 cmd / PowerShell 里不认
+    env: { PANTRADER_LIVE: "1" },
   },
   resolve: { alias: { "@": path.resolve(__dirname, ".") } },
 });

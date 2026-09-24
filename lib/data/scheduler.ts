@@ -20,8 +20,8 @@ import {
  *    哪些跑过、哪些没跑，并按各 job 的补跑策略处理（见 schedule.ts 的 catchUp）。
  *    没跑过的不可回补时点记成 missed 而不是 done：把没采到的记成成功等于伪造覆盖率。
  *
- * 2. 与 OS 级任务共存去重。macOS 上可能已经装了 launchd agent，
- *    用户又开着系统；或者开两个终端各跑一个。共享 job_run 表做去重，
+ * 2. 去重。守护进程有 PID 锁只起一个，但手动 `pnpm job` 补跑、或旧机器上残留的
+ *    定时任务仍可能撞上同一时点。共享 job_run 表做去重，
  *    主键 (date, job, slot) 保证同一时点只执行一次 —— 否则 5888 只的全市场快照
  *    会被重复拉几遍，白烧限频额度还可能把免费源打挂。
  *
@@ -29,6 +29,7 @@ import {
  *    实测东财十几次请求就整体掉线。宁可晚几十秒，不要一起冲。
  */
 
+/** launchd / schtasks 只出现在历史记录里（系统已不再往操作系统装定时任务），保留是为了读得懂旧行 */
 export type Runner = "scheduler" | "launchd" | "schtasks" | "manual";
 
 export interface SchedulerOpts {

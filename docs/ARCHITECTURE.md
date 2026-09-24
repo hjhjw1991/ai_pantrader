@@ -341,7 +341,7 @@ spec 的目录树把 pit-view 画在 `lib/strategy/` 下，但那样 §17 断言
 这些约束在代码里有实现，但没有 `spec §` 引用，所以不在上面的索引里：
 
 - **数据源熔断**：每个主机独立熔断器，连续失败开闸、冷却后半开。见 `lib/data/client.ts`
-- **调度去重**：launchd/schtasks 与进程内调度器可能同时触发同一个 job，
+- **调度去重**：手动 `pnpm job` 补跑可能与进程内调度器撞上同一个时点，
   靠 `job_run` 表的 `(date, job, slot)` 声明去重。见 `lib/data/scheduler.ts`
 - **PID 锁**：`~/PanTraderData/scheduler.pid` 保证只有一个采集进程。见 `scripts/daemon.ts`
 - **引擎不接账户资金**：引擎只出比例，换算成金额由人做。这是设计边界，不是待办

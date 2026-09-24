@@ -7,7 +7,7 @@ import { openDb, type Db } from "@/lib/db";
  * 前端的 DB 连接。
  *
  * 读走独立的 readonly 连接，不复用 lib/db 的 openDb —— 后者没有 readonly 选项，
- * 而 launchd 定时 job 每几分钟就在往这个库里写。前端只读，就不该去争写锁：
+ * 而采集守护进程每几分钟就在往这个库里写。前端只读，就不该去争写锁：
  * readonly 连接拿不到写锁，也就不可能因为一个页面刷新把采集写入挤掉。
  * （openDb 属于别的层，不能改，所以这里直接构造。写路径仍然走 openDb。）
  *
@@ -104,7 +104,7 @@ export function dbUnavailable(p: string = dbPath()): DbUnavailable {
 
 /**
  * 写连接。只有三处会用到：观察池增删、手工成交回填、策略元数据。
- * 行情/截面数据一律由 launchd job 写，前端永不写。
+ * 行情/截面数据一律由采集守护进程写，前端永不写。
  */
 export function writeDb(p?: string): Db {
   return openDb(p);
