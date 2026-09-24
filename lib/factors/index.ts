@@ -18,11 +18,12 @@ import { CAPITAL_FACTORS } from "@/lib/factors/capital";
 import { CYCLE_FACTORS } from "@/lib/factors/cycle";
 import { STRUCTURE_FACTORS } from "@/lib/factors/structure";
 import { VALUATION_FACTORS } from "@/lib/factors/valuation";
+import { SW_MAINLINE_FACTORS } from "@/lib/factors/sw-mainline";
 
 export const ALL_FACTORS: FactorSpec<any>[] = [
   ...ENV_FACTORS, ...MACRO_FACTORS, ...TECH_FACTORS,
   ...FUND_FACTORS, ...FILTER_FACTORS, ...SECTOR_FACTORS, ...RISK_FACTORS, ...CAPITAL_FACTORS,
-  ...CYCLE_FACTORS, ...STRUCTURE_FACTORS, ...VALUATION_FACTORS,
+  ...CYCLE_FACTORS, ...STRUCTURE_FACTORS, ...VALUATION_FACTORS, ...SW_MAINLINE_FACTORS,
 ];
 
 export function createDefaultRegistry() {

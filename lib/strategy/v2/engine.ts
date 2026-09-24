@@ -219,7 +219,9 @@ function buildAdvice(
     const reasons: string[] = [];
     if (gear === "防守") reasons.push("今日防守档（0 仓），不开新仓");
     if (m === null) reasons.push(sector === null ? "查不到行业，判断不了在不在主线上" : `不在今日主线（${sector}）`);
-    reasons.push(...sink.filter(x => x.includes(w.code) || x.startsWith("过滤器未判定")).map(x => x.replace(`${w.code} `, "")));
+    // 按完整代码匹配（前后不能再接数字），免得一条讲别的票的告警恰好含这串数字
+    const own = new RegExp(`(^|\\D)${w.code}(\\D|$)`);
+    reasons.push(...sink.filter(x => own.test(x) || x.startsWith("过滤器未判定")).map(x => x.replace(`${w.code} `, "")));
     const ok = c !== null && m !== null && gear !== "防守";
     out.push({
       ...base,

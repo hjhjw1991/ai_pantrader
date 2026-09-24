@@ -11,12 +11,14 @@ export { BASELINE_SLOTS, BASELINE_CHOICE } from "@/lib/strategy/v2/slots/baselin
 export { 评估器_可配权重打分, 默认权重 } from "@/lib/strategy/v2/slots/weighted-score";
 export { 评估器_结构位定价 } from "@/lib/strategy/v2/slots/structure-pricing";
 export { 择时器_五段状态机, 默认阶段档位 } from "@/lib/strategy/v2/slots/cycle-timer";
+export { 主线识别器_申万聚集 } from "@/lib/strategy/v2/slots/sw-mainline";
 
 import { createSlotRegistry } from "@/lib/strategy/v2/registry";
 import { BASELINE_SLOTS } from "@/lib/strategy/v2/slots/baseline";
 import { 评估器_可配权重打分 } from "@/lib/strategy/v2/slots/weighted-score";
 import { 评估器_结构位定价 } from "@/lib/strategy/v2/slots/structure-pricing";
 import { 择时器_五段状态机 } from "@/lib/strategy/v2/slots/cycle-timer";
+import { 主线识别器_申万聚集 } from "@/lib/strategy/v2/slots/sw-mainline";
 
 /**
  * 默认槽位注册表：模块加载时构建一次。
@@ -24,5 +26,5 @@ import { 择时器_五段状态机 } from "@/lib/strategy/v2/slots/cycle-timer";
  * 否则回测与实盘会看到不同的槽集合，而这正是"结果无法归因"的经典起点。
  */
 export const defaultSlotRegistry = createSlotRegistry([
-  ...BASELINE_SLOTS, 评估器_可配权重打分, 评估器_结构位定价, 择时器_五段状态机,
+  ...BASELINE_SLOTS, 评估器_可配权重打分, 评估器_结构位定价, 择时器_五段状态机, 主线识别器_申万聚集,
 ]);
