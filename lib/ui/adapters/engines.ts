@@ -10,7 +10,7 @@ import { runBacktestAsync as replayAsync, ReplayAborted, type ReplayProgress } f
 import { gridPoints, heatmap, optimize, type ParamGrid } from "@/lib/backtest/optimizer";
 import { canonicalJson } from "@/lib/backtest/hash";
 import { overrideConfigParams } from "@/lib/ui/adapters/strategy";
-import { positions as loadPositions, sectorMap } from "@/lib/ui/queries";
+import { positions as loadPositions, sectorMap, watchpool } from "@/lib/ui/queries";
 
 /**
  * 信号引擎 / 回测器适配器。
@@ -61,7 +61,8 @@ export interface SignalCardResult {
 export function todaySignalCard(
   db: Db,
   asOf: string,
-  config: StrategyConfig
+  config: StrategyConfig,
+  opts: { advice?: boolean } = {}
 ): Avail<SignalCardResult> {
   try {
     const view = createSqliteView(db, asOf);
@@ -79,6 +80,8 @@ export function todaySignalCard(
       view, config, phase, positions: pos,
       sectorOf: (code: string) => sm.byCode.get(code) ?? null,
       ...(sm.at === null ? {} : { sectorMapAt: sm.at }),
+      // 作战台要持仓与观察池的逐只建议；盘前计划等其它调用方不开（见 V2Input.advice）
+      ...(opts.advice ? { advice: { watchlist: watchpool(db).map(w => ({ code: w.code, name: w.name ?? null })) } } : {}),
     });
     return { available: true, card, phase, asOf, universe: universeQuality(db, asOf) };
   } catch (e) {

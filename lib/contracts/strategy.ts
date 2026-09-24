@@ -63,6 +63,44 @@ export interface Candidate {
   rrRatio?: number | null;
 }
 
+/** 技术面提示：只作参考，不改变纪律动作或正式评估的结论 */
+export type TechTone = "正面" | "负面" | "中性";
+export interface TechHint { tone: TechTone; text: string }
+export interface TechContext {
+  daily: string | null;
+  weekly: string | null;
+  pattern: string | null;
+  resistance: number | null;
+  support: number | null;
+  atr: number | null;
+  price: number | null;
+  hints: TechHint[];
+}
+
+/**
+ * 持仓与观察池的每日建议（v2 引擎在 advice 开关打开时给）。
+ *
+ * action 是结论：持仓 = 离场器的纪律动作；观察 = 正式评估器今天的判定。
+ * tech / lean 是参考：技术面读数翻译成人话，不覆盖 action。
+ */
+export interface StockAdvice {
+  code: string;
+  name: string | null;
+  kind: "持仓" | "观察";
+  action: string;
+  reasons: string[];
+  triggerPx: number | null;
+  stopPx: number | null;
+  targetPx: number | null;
+  rrRatio: number | null;
+  /** true = 目标价与盈亏比是按结构位定价公式补的参考值（正式评估器没给） */
+  targetRef: boolean;
+  mainline: string | null;
+  tech: TechContext;
+  /** 技术面倾向（参考）。持仓：持有 / 留意 / 考虑减仓；观察：无 */
+  lean: string | null;
+}
+
 export interface SignalCard {
   ts: string;
   phase: Phase;
@@ -82,6 +120,8 @@ export interface SignalCard {
    * 它是影子盘按阶段分组统计的键 —— 猜一个出来会污染分组，所以宁缺毋滥。
    */
   stage?: CycleStage;
+  /** 持仓与观察池建议。只有调用方要（V2Input.advice）才给，盘前计划与影子盘不带 —— 卡片形状不变 */
+  advice?: StockAdvice[];
 }
 
 /**

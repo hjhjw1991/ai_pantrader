@@ -15,8 +15,10 @@
 import type {
   Action, Candidate, EvaluatedCandidate, EvaluatorSlot, ExitSlot, FactorRegistry, MainlineSlot,
   PoolRow, SignalCard, SlotChoice, SlotConfig, SlotCtx, SlotRegistry, SourceSlot,
-  StrategyEngineInput, TimerSlot,
+  StockAdvice, StrategyEngineInput, TimerSlot,
 } from "@/lib/contracts";
+import { techContext, holdingLean } from "@/lib/strategy/v2/advice";
+import { structureTarget } from "@/lib/strategy/v2/slots/structure-pricing";
 import {
   KNOWN_GAP_KINDS, applyPortfolioCaps, makeRunner, makeWarnings, matchesMainline, resolveDate,
 } from "@/lib/strategy/engine";
@@ -33,6 +35,11 @@ export interface V2Input extends StrategyEngineInput {
    * 它们理应继续按原样工作，而不是因为引擎升级就跑不起来。
    */
   slotConfig?: SlotConfig;
+  /**
+   * 出持仓与观察池建议（card.advice）。只有界面要：盘前计划、影子盘、回测都不开，
+   * 卡片形状与 v1 逐字段一致（parity）。建议那一轮的因子告警不进 card.warnings，理由同上。
+   */
+  advice?: { watchlist: Array<{ code: string; name?: string | null }> };
 }
 
 /** 取一个槽，取不到直接抛：槽位配错了要当场失败，不能悄悄退回默认实现 */
@@ -141,6 +148,8 @@ export function createV2Engine(deps: V2Deps) {
       (a.account < b.account ? -1 : a.account > b.account ? 1 : 0) || (a.code < b.code ? -1 : 1));
     const holdings = sorted.map(p => ex.slot.decide(ctx, ex.params, p, env));
 
+    const advice = input.advice === undefined ? undefined : buildAdvice(deps, input, ctx, date, env.gear, mainline.names, sc, candidates, holdings);
+
     return {
       // 时间只来自视图。这里读一次系统时钟，回测与实盘就走了两条不同的路径
       ts: view.asOf,
@@ -154,8 +163,73 @@ export function createV2Engine(deps: V2Deps) {
       advisorInfluenced: false,
       // 只在判出阶段时才带这个键：baseline 择时器不判阶段，带上 undefined 也会改卡片形状
       ...(stage !== undefined ? { stage } : {}),
+      ...(advice !== undefined ? { advice } : {}),
     };
   };
+}
+
+/**
+ * 持仓与观察池建议。用一个**静音**的因子执行器：这一轮的低置信告警、否决理由只归到各自那只票的
+ * reasons 里，不进卡片的 warnings —— 否则开不开建议，同一张卡的告警就不一样了。
+ */
+function buildAdvice(
+  deps: V2Deps, input: V2Input, ctx: SlotCtx, date: string, gear: string, mainlines: string[],
+  sc: SlotConfig, candidates: Candidate[], holdings: Candidate[],
+): StockAdvice[] {
+  let sink: string[] = [];
+  const quiet = makeRunner(deps.registry, input.config, input.view, date, m => { sink.push(m); });
+  const qctx: SlotCtx = { ...ctx, runFactor: (name, extra) => quiet.run(name, extra), warn: m => { sink.push(m); } };
+  const tech = (code: string, held: boolean) => techContext({
+    daily: quiet.run("日线MACD", { code }), weekly: quiet.run("周线MACD", { code }),
+    structure: quiet.run("结构位", { code }), pattern: quiet.run("M顶W底", { code }), atr: quiet.run("ATR", { code }),
+  }, held);
+  const nameOf = (code: string) => input.view.security(code)?.name ?? null;
+  const out: StockAdvice[] = [];
+
+  for (const h of holdings) {
+    const t = tech(h.code, true);
+    out.push({
+      code: h.code, name: h.name ?? nameOf(h.code), kind: "持仓", action: h.action, reasons: [h.thesis].filter(x => x.length > 0),
+      triggerPx: h.triggerPx, stopPx: h.stopPx, targetPx: null, rrRatio: null, targetRef: false, mainline: null, tech: t, lean: holdingLean(t),
+    });
+  }
+
+  const held = new Set(holdings.map(h => h.code));
+  const ev = pick<EvaluatorSlot>(deps.slots, "评估器", sc.评估器 ?? BASELINE_CHOICE.评估器);
+  for (const w of input.advice!.watchlist) {
+    if (held.has(w.code)) continue;
+    sink = [];
+    const t = tech(w.code, false);
+    const base = { code: w.code, name: w.name ?? nameOf(w.code), kind: "观察" as const, tech: t, lean: null };
+    const hit = candidates.find(c => c.code === w.code);
+    // 正式评估器不带定价时，按结构位定价槽的同一套公式补参考目标价
+    const priced = (trig: number | null, stop: number | null, tp: unknown, rr: number | null | undefined) => {
+      if (typeof tp === "number") return { targetPx: tp, rrRatio: rr ?? null, targetRef: false };
+      const r = trig === null ? null : structureTarget(trig, stop, t.resistance, t.atr);
+      return r === null ? { targetPx: null, rrRatio: null, targetRef: false } : { targetPx: r.target, rrRatio: r.rr, targetRef: true };
+    };
+    if (hit !== undefined) {
+      out.push({ ...base, action: "今日候选", reasons: [hit.thesis], triggerPx: hit.triggerPx, stopPx: hit.stopPx,
+        ...priced(hit.triggerPx, hit.stopPx, hit.targetPx, hit.rrRatio), mainline: null });
+      continue;
+    }
+    const sector = input.sectorOf?.(w.code) ?? null;
+    const m = matchesMainline(sector, mainlines);
+    const c = ev.slot.evaluate(qctx, ev.params, { code: w.code, sector, lbc: 0, sealAmt: 0, source: "观察池" }, m ?? sector ?? "未知");
+    const reasons: string[] = [];
+    if (gear === "防守") reasons.push("今日防守档（0 仓），不开新仓");
+    if (m === null) reasons.push(sector === null ? "查不到行业，判断不了在不在主线上" : `不在今日主线（${sector}）`);
+    reasons.push(...sink.filter(x => x.includes(w.code) || x.startsWith("过滤器未判定")).map(x => x.replace(`${w.code} `, "")));
+    const ok = c !== null && m !== null && gear !== "防守";
+    out.push({
+      ...base,
+      action: ok ? "可买（到触发价）" : c === null ? "不买" : "暂不买",
+      reasons: ok ? [c!.thesis] : reasons.length > 0 ? reasons : ["评估器未给出候选（多半是讲不出买入逻辑或缺数据）"],
+      triggerPx: c?.triggerPx ?? null, stopPx: c?.stopPx ?? null,
+      ...priced(c?.triggerPx ?? null, c?.stopPx ?? null, c?.targetPx, c?.rrRatio), mainline: m,
+    });
+  }
+  return out;
 }
 
 /** 兜底：Action 类型在本文件未直接使用，但导出的卡片依赖它，保留引用避免误删 */

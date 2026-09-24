@@ -3,6 +3,7 @@ import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
 import { StockChart } from "@/components/StockChart";
+import { AdviceTable } from "@/components/AdviceTable";
 import { CandidateScanButton } from "@/components/CollectScan";
 import { readDb, dbUnavailable } from "@/lib/ui/db";
 import { fmtAmount, fmtPct, fmtTs, dirClass } from "@/lib/ui/format";
@@ -59,7 +60,7 @@ export default function TodayPage({ searchParams = {} }: { searchParams?: SP }) 
   const cfg = readStrategyConfig();
   // asOf 显式传入：因子层禁用 Date.now，同一次渲染里所有因子必须看到同一个"现在"
   const card = cfg.available
-    ? todaySignalCard(db, shanghaiTs(now), cfg.config)
+    ? todaySignalCard(db, shanghaiTs(now), cfg.config, { advice: true })
     : unavailable(`策略配置不可用：${cfg.reason}`, cfg.needs);
 
   const asOf = shanghaiTs(now);
@@ -190,6 +191,22 @@ export default function TodayPage({ searchParams = {} }: { searchParams?: SP }) 
         )}
       </Panel>
 
+      {/* ── 观察池建议 ── */}
+      <Panel
+        title="观察池建议"
+        hint="正式评估器逐只判今天能不能买：同一套筛、同一个触发价与止损；技术面提示只作参考"
+        right={<Link href="/watchpool" className="text-info">管理观察池 →</Link>}
+      >
+        {!card.available ? <EmptyState u={card} compact /> : (
+          <AdviceTable
+            rows={card.card.advice ?? []}
+            kind="观察"
+            emptyWhat="观察池是空的"
+            emptyHint="在观察池页加入想盯的票，这里每天给出能不能买"
+          />
+        )}
+      </Panel>
+
       {/* ── 影子盘 ── */}
       <Panel
         title="影子盘"
@@ -202,16 +219,17 @@ export default function TodayPage({ searchParams = {} }: { searchParams?: SP }) 
       {/* ── 持仓动作 ── */}
       <Panel
         title="持仓动作"
-        hint="持仓与新开仓分开，早上照着做不用再想"
+        hint="纪律动作照做（破止损、到止盈档）；技术面倾向与提示只作参考"
         right={<Link href="/positions" className="text-info">持仓管理 →</Link>}
       >
         {!card.available ? (
           <EmptyState u={card} compact />
         ) : (
-          <CandidateTable
-            rows={card.card.holdings}
-            emptyWhat="引擎对现有持仓无动作建议"
-            emptyHint="没有持仓、或全部持仓都判为「持有」时是正常结果"
+          <AdviceTable
+            rows={card.card.advice ?? []}
+            kind="持仓"
+            emptyWhat="没有持仓"
+            emptyHint="手工成交回填后才会出现在这里（持仓管理页 → 回填成交）"
           />
         )}
 
