@@ -2,7 +2,7 @@
  * 情绪截面派生表：建表、增量、口径版本、覆盖不足、以及 PIT 读回的时点。
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { buildSentiment } from "@/lib/plan/derived";
+import { buildSentiment, buildCrossProxy } from "@/lib/plan/derived";
 import { SENTIMENT_ALGO_VERSION } from "@/lib/factors/sentiment";
 import { createSqliteView } from "@/lib/pit/sqlite-view";
 import { makeTempDb, insDaily, insSecurity, insCalendar, type TempDb } from "../pit/helpers";
@@ -61,5 +61,30 @@ describe("buildSentiment", () => {
     const h = createSqliteView(t.db, "2026-09-21 15:05:00").sentimentHistory(10);
     expect(h.map(x => x.date)).toEqual(["2026-09-17", "2026-09-18", "2026-09-21"]);
     expect(h[2]).toMatchObject({ zt: 1, firstPrev: 0, firstPromo: null, maxLbc: 1 });
+  });
+});
+
+describe("buildCrossProxy", () => {
+  const ind = (code: string, name: string) => t.db.prepare(
+    `INSERT INTO sw_industry_span (code, level, index_code, index_name, from_date, to_date) VALUES (?, 3, 'x', ?, '2021-12-13', NULL)`
+  ).run(code, name);
+
+  it("按天写涨停名单与行业榜；依赖情绪表判断覆盖，没有情绪行的日子跳过", () => {
+    for (const c of ["600001", "600002", "600003"]) ind(c, "测试行业");
+    buildSentiment(t.db, { from: DAYS[3], to: DAYS[4] });
+    const r = buildCrossProxy(t.db, { from: DAYS[2], to: DAYS[4] });
+    expect(r).toMatchObject({ built: 2, thin: 1 });
+    const z = t.db.prepare("SELECT code, lbc, sector FROM zt_proxy WHERE date = ?").all(DAYS[4]);
+    expect(z).toEqual([{ code: "600001", lbc: 2, sector: "测试行业" }]);
+    // 只有 3 只成分股，不足 5 只不上榜
+    expect(t.db.prepare("SELECT COUNT(*) n FROM sector_rank_proxy").get()).toEqual({ n: 0 });
+  });
+
+  it("重建整天替换：旧名单里掉出去的不能留着", () => {
+    ind("600001", "测试行业");
+    buildSentiment(t.db, { from: DAYS[4], to: DAYS[4] });
+    t.db.prepare("INSERT INTO zt_proxy (date, code, lbc, sector) VALUES (?, '999999', 1, NULL)").run(DAYS[4]);
+    buildCrossProxy(t.db, { from: DAYS[4], to: DAYS[4], force: true });
+    expect((t.db.prepare("SELECT code FROM zt_proxy WHERE date = ?").all(DAYS[4]) as any[]).map(r => r.code)).toEqual(["600001"]);
   });
 });

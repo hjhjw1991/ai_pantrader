@@ -45,6 +45,18 @@ export interface ZtRow {
 
 export interface DtRow { date: string; code: string; sealAmt: number }
 
+/**
+ * 日线重建的涨停名单（真涨停池 2026-08 才开始攒，更早的日子只有它）。
+ * 没有封单额、开板次数、封板时间 —— 日线里没有这些信息，不编。
+ * sector 是申万三级行业名（按那天的归属），与 SectorProxyRow.sector 同一套名字。
+ */
+export interface ZtProxyRow { date: string; code: string; lbc: number; sector: string | null }
+
+/** 日线重建的行业涨幅榜：申万三级行业成分股的等权平均涨幅（百分点）与领涨股 */
+export interface SectorProxyRow {
+  date: string; sector: string; pct: number; leaderCode: string | null; members: number;
+}
+
 export interface SectorRankRow {
   date: string; ts: string; sector: string; pct: number; leaderCode: string | null;
 }
@@ -131,6 +143,12 @@ export interface PointInTimeView {
   quote(code: string): Quote | null;
 
   ztPool(date: string): ZtRow[];
+  /**
+   * 代理截面。**只在那天没有真快照时才该用**，用了要在结果上标 proxy —— 见 lib/factors/cross-proxy.ts。
+   * 由夜间派生表重建，行只用那天及以前的日线，按 date 截断即无前视。
+   */
+  ztProxy(date: string): ZtProxyRow[];
+  sectorRankProxy(date: string): SectorProxyRow[];
   dtPool(date: string): DtRow[];
   sectorRank(date: string): SectorRankRow[];
   lhb(date: string): LhbRow[];

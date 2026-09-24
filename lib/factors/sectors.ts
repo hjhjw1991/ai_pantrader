@@ -11,6 +11,7 @@
  */
 import type { FactorSpec, PointInTimeView, ZtRow } from "@/lib/contracts";
 import { barsUpTo, pctChange, pnum, parr, pstr, round6, adjClose, evalDate } from "@/lib/factors/util";
+import { crossRowsFor, ztRowsFor } from "@/lib/pit/snapshot-or-proxy";
 
 /** 写死。改这里要同时改 spec §8.2 与相关测试 */
 export const 必查链 = ["半导体全链", "军工", "电网", "资源"] as const;
@@ -66,12 +67,17 @@ export interface MainlineResult {
   扫描的链: string[];
   hasSectorRank: boolean;
   hasZtPool: boolean;
+  /** 板块榜 / 涨停池用的是日线重建的代理（那天没有真快照）。名字是申万三级行业名 */
+  sectorProxy: boolean;
+  ztProxy: boolean;
 }
 
 /** 同一天板块榜有多个时点快照，只取最后一个时点（盘中滚动写入，早盘那条是过程量） */
-function latestRankBySector(view: PointInTimeView, date: string): Map<string, { pct: number; leaderCode: string | null }> {
+function latestRankBySector(
+  rowsIn: ReturnType<PointInTimeView["sectorRank"]>
+): Map<string, { pct: number; leaderCode: string | null }> {
   const out = new Map<string, { pct: number; ts: string; leaderCode: string | null }>();
-  for (const r of view.sectorRank(date)) {
+  for (const r of rowsIn) {
     const prev = out.get(r.sector);
     if (prev === undefined || r.ts >= prev.ts) {
       out.set(r.sector, { pct: r.pct, ts: r.ts, leaderCode: r.leaderCode });
@@ -96,8 +102,10 @@ export function identifyMainlines(
   // 叠加而非替换：配置想加链可以，想去掉写死的四条不行
   const chains = [...必查链, ...(opts.必查链 ?? []).filter(c => !(必查链 as readonly string[]).includes(c))];
 
-  const ranks = latestRankBySector(view, date);
-  const zt = view.ztPool(date);
+  // 真快照优先，那天没有才退回日线重建的代理（见 cross-proxy.ts）
+  const cr = crossRowsFor(view, date);
+  const ranks = latestRankBySector(cr.sectors);
+  const zt = cr.zt;
 
   const byRank: MainlineHit[] = [...ranks.entries()]
     .sort((a, b) => (b[1].pct - a[1].pct) || (a[0] < b[0] ? -1 : 1))
@@ -135,6 +143,8 @@ export function identifyMainlines(
     扫描的链: chains,
     hasSectorRank: ranks.size > 0,
     hasZtPool: zt.length > 0,
+    sectorProxy: cr.sectorProxy,
+    ztProxy: cr.ztProxy,
   };
 }
 
@@ -142,10 +152,13 @@ function maxLbcOf(rows: ZtRow[]): number {
   return rows.reduce((m, r) => Math.max(m, r.lbc ?? 0), 0);
 }
 
+/** 代理行封单额是 NaN（不知道）：排序时当 0，别让 NaN 靠"假值"碰巧落到下一个比较键 */
+const fin = (x: number | null | undefined): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+
 /** 龙头 = 连板最高，同板取封单最大。封单是"谁更硬"的直接证据 */
 function leaderOf(rows: ZtRow[]): string | null {
   const sorted = [...rows].sort((a, b) =>
-    (b.lbc ?? 0) - (a.lbc ?? 0) || (b.sealAmt ?? 0) - (a.sealAmt ?? 0) || (a.code < b.code ? -1 : 1));
+    (b.lbc ?? 0) - (a.lbc ?? 0) || fin(b.sealAmt) - fin(a.sealAmt) || (a.code < b.code ? -1 : 1));
   return sorted.length > 0 ? sorted[0].code : null;
 }
 
@@ -161,16 +174,19 @@ const 主线识别: FactorSpec<string[]> = {
       链内涨停下限: pnum(ctx.params, "链内涨停下限", 1),
       必查链: parr(ctx.params, "必查链"),
     });
-    // 板块榜与涨停池都不可回补，缺快照时这个因子只能算"猜"，置信度必须掉下来
-    const confidence = round6((r.hasSectorRank ? 0.8 : 0.4) * (r.hasZtPool ? 1 : 0.7));
+    // 板块榜与涨停池都不可回补，缺快照时这个因子只能算"猜"，置信度必须掉下来。
+    // 用了代理截面再打一折：名字是申万行业而非东财概念，封单额也没有，龙头判定只看连板
+    const proxy = r.sectorProxy || r.ztProxy;
+    const confidence = round6((r.hasSectorRank ? 0.8 : 0.4) * (r.hasZtPool ? 1 : 0.7) * (proxy ? 0.75 : 1));
     return {
       name: "主线识别", version: "1.0.0",
       value: r.mainlines.map(m => m.name),
-      label: r.mainlines.map(m => `${m.name}${m.source === "必查链龙头" ? "(必查链)" : ""}`).join("/"),
-      provenance: "real", confidence,
+      label: r.mainlines.map(m => `${m.name}${m.source === "必查链龙头" ? "(必查链)" : ""}`).join("/") + (proxy ? "（代理截面）" : ""),
+      provenance: proxy ? "proxy" : "real", confidence,
       inputs: {
         日期: date, 明细: r.mainlines, 扫描的链: r.扫描的链,
         有板块榜: r.hasSectorRank, 有涨停池: r.hasZtPool,
+        板块榜为代理: r.sectorProxy, 涨停池为代理: r.ztProxy,
       },
     };
   },
@@ -193,7 +209,18 @@ const 龙头温度计: FactorSpec<number> = {
     const match = (z: ZtRow) =>
       sector === "" ? true : (z.sector === sector || (chain !== null && chainOf(z.sector) === chain));
 
-    const today = ctx.view.ztPool(date).filter(match);
+    const tz = ztRowsFor(ctx.view, date);
+    const today = tz.rows.filter(match);
+    if (today.length > 0 && tz.proxy) {
+      // 代理名单只知道"收盘封住了"，不知道盘中开没开过板 —— 分歧判不出来，只能报封板并降置信
+      const leader = leaderOf(today)!;
+      const row = today.find(z => z.code === leader)!;
+      return {
+        name: "龙头温度计", version: "1.0.0", value: 2, label: "封板（代理，未知是否开过板）",
+        provenance: "proxy", confidence: 0.5,
+        inputs: { 日期: date, 板块: sector, 龙头: leader, 连板: row.lbc },
+      };
+    }
     if (today.length > 0) {
       const leader = leaderOf(today)!;
       const row = today.find(z => z.code === leader)!;
@@ -208,7 +235,8 @@ const 龙头温度计: FactorSpec<number> = {
 
     // 今日板块内无涨停：看昨日龙头今天怎么走，判滞涨还是退潮
     const prevDay = ctx.view.prevTradingDay(date);
-    const yest = prevDay === null ? [] : ctx.view.ztPool(prevDay).filter(match);
+    const yz = prevDay === null ? null : ztRowsFor(ctx.view, prevDay);
+    const yest = yz === null ? [] : yz.rows.filter(match);
     if (yest.length > 0) {
       const leader = leaderOf(yest)!;
       const bars = barsUpTo(ctx.view, leader, date, 2);
@@ -218,7 +246,7 @@ const 龙头温度计: FactorSpec<number> = {
       return {
         name: "龙头温度计", version: "1.0.0",
         value: 退潮 ? -1 : 0, label: 退潮 ? "退潮" : "滞涨",
-        provenance: "real", confidence: pct === null ? 0.3 : 0.6,
+        provenance: yz?.proxy ? "proxy" : "real", confidence: (pct === null ? 0.3 : 0.6) * (yz?.proxy ? 0.8 : 1),
         inputs: { 日期: date, 板块: sector, 龙头: leader, 龙头今日涨幅: pct },
       };
     }

@@ -18,6 +18,7 @@ import type {
 import { accountRule, takeProfitRules, unparsedTakeProfit } from "@/lib/strategy/loader";
 // 视图层的工具，不是因子实现 —— 引擎只依赖 PointInTimeView 这个契约
 import { completeDate } from "@/lib/pit/complete-date";
+import { crossRowsFor, swSectorOf } from "@/lib/pit/snapshot-or-proxy";
 import { normalizeAccountKey } from "@/lib/strategy/schema";
 
 /** 低置信线。spec §10.3：代理因子 ρ<0.8 要在回测报告首页标红，信号卡同一把尺子 */
@@ -524,16 +525,24 @@ export function candidatePool(
     out.push(r);
   };
 
+  // 那天没有真涨停池 / 板块榜时退回日线重建的代理截面（申万行业口径），并在卡片上说出来
+  const cr = crossRowsFor(view, date);
+  if (cr.ztProxy || cr.sectorProxy) {
+    warn(`候选池：${date} 没有真${cr.ztProxy ? "涨停池与" : ""}板块榜，` +
+      `用日线重建的代理截面（申万三级行业口径${cr.ztProxy ? "，无封单额" : "，涨停池仍是真快照"}）`);
+  }
+
   if (on("涨停池")) {
-    for (const r of view.ztPool(date)) {
-      push({ code: r.code, sector: r.sector, lbc: r.lbc ?? 0, sealAmt: r.sealAmt ?? 0, source: "涨停池" });
+    for (const r of cr.zt) {
+      // 代理行的封单额是 NaN（不知道），进池子按 0 排 —— 排序与打分都不能吃 NaN
+      push({ code: r.code, sector: r.sector, lbc: r.lbc ?? 0, sealAmt: Number.isFinite(r.sealAmt) ? r.sealAmt : 0, source: "涨停池" });
     }
   }
 
   if (on("主线领涨")) {
     // 同一天板块榜有多个时点，取每个板块最后一个时点的领涨股
     const latest = new Map<string, { ts: string; leaderCode: string | null }>();
-    for (const r of view.sectorRank(date)) {
+    for (const r of cr.sectors) {
       const prev = latest.get(r.sector);
       if (prev === undefined || r.ts >= prev.ts) latest.set(r.sector, { ts: r.ts, leaderCode: r.leaderCode });
     }
@@ -545,12 +554,17 @@ export function candidatePool(
   }
 
   if (on("量价")) {
-    if (input.sectorOf === undefined) {
+    /**
+     * 代理日的主线名是申万三级行业名，行业映射也必须换成同一套名字，否则一只都匹配不上。
+     * 申万归属有历史区间，按视图那天取，没有前视 —— 所以回放里这一路也能开起来。
+     */
+    const sectorOf = cr.swNames ? swSectorOf(view) : input.sectorOf;
+    if (sectorOf === undefined) {
       warn("候选来源.量价 未启用：没有 代码→行业 映射，无法判断标的是否在主线上 —— 查不到行业不等于不在主线上");
     } else {
       const p = { ...量价默认, ...(config.选股.量价条件 ?? {}) };
-      // 映射是"当前"的行业归属，没有历史版本：回放早于采集时间的日期时带一点前视
-      if (input.sectorMapAt !== undefined && input.sectorMapAt.slice(0, 10) > date) {
+      // 映射是"当前"的行业归属，没有历史版本：回放早于采集时间的日期时带一点前视（代理日用申万历史归属，没有这个问题）
+      if (!cr.swNames && input.sectorMapAt !== undefined && input.sectorMapAt.slice(0, 10) > date) {
         warn(
           `候选来源.量价：代码→行业 映射采于 ${input.sectorMapAt.slice(0, 10)}，晚于评估日 ${date}` +
           ` —— 行业归属没有历史版本，这一路在回放上存在轻微前视`
@@ -558,7 +572,7 @@ export function candidatePool(
       }
       let scanned = 0;
       for (const sec of view.universe()) {
-        const sector = input.sectorOf(sec.code);
+        const sector = sectorOf(sec.code);
         if (sector === null) continue;                       // 查不到行业：不猜
         if (matchesMainline(sector, mainlines) === null) continue;
         scanned++;

@@ -37,6 +37,8 @@ export interface ViewFixture {
   }>;
   tradingDays?: string[];
   gaps?: Record<string, string[]>;
+  ztProxy?: Record<string, Array<{ date: string; code: string; lbc: number; sector: string | null }>>;
+  sectorProxy?: Record<string, Array<{ date: string; sector: string; pct: number; leaderCode: string | null; members: number }>>;
 }
 
 export function makeView(f: ViewFixture): PointInTimeView {
@@ -75,6 +77,8 @@ export function makeView(f: ViewFixture): PointInTimeView {
     mutualTop10: () => [],
     holderChanges: () => [],
     sentimentHistory: () => [],
+    ztProxy: (date: string) => (f.ztProxy ?? {})[date] ?? [],
+    sectorRankProxy: (date: string) => (f.sectorProxy ?? {})[date] ?? [],
     valuationCrossSection: () => {
       const vs = Object.entries(f.valuations ?? {});
       if (vs.length === 0) return null;

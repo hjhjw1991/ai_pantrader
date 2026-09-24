@@ -13,7 +13,7 @@
  */
 import type {
   Board, DailyBar, DtRow, LhbRow, LhbSeatRow, MacroRow, MinuteBar,
-  PointInTimeView, Quote, SectorRankRow, SecurityRow, SentimentRow, ZtRow,
+  PointInTimeView, Quote, SectorProxyRow, SectorRankRow, SecurityRow, SentimentRow, ZtProxyRow, ZtRow,
 } from "@/lib/contracts";
 import type { Db } from "@/lib/db";
 
@@ -445,6 +445,20 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         changeFreeRatio: numOrNullRow(r["change_free_ratio"]),
         changeShares: numOrNullRow(r["change_shares"]),
       }));
+    },
+
+    ztProxy(date: string): ZtProxyRow[] {
+      const d = assertNotFuture(date, "ztProxy");
+      return rows(`SELECT date, code, lbc, sector FROM zt_proxy WHERE date = ? ORDER BY code`, d)
+        .map(r => ({ date: String(r["date"]), code: String(r["code"]), lbc: Number(r["lbc"]),
+          sector: r["sector"] === null ? null : String(r["sector"]) }));
+    },
+
+    sectorRankProxy(date: string): SectorProxyRow[] {
+      const d = assertNotFuture(date, "sectorRankProxy");
+      return rows(`SELECT date, sector, pct, leader_code, members FROM sector_rank_proxy WHERE date = ? ORDER BY sector`, d)
+        .map(r => ({ date: String(r["date"]), sector: String(r["sector"]), pct: Number(r["pct"]),
+          leaderCode: r["leader_code"] === null ? null : String(r["leader_code"]), members: Number(r["members"]) }));
     },
 
     sentimentHistory(n: number) {

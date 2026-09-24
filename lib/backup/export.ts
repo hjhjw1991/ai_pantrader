@@ -63,6 +63,8 @@ export const BAK_TABLES = [
   // 影子盘。live 样本不可再生（那天 09:15 的判断只发生一次），回放样本可重算但要几十分钟；
   // 毕业判定完全建在这几张表上，丢了等于把所有变体的考核清零重来
   "shadow_variant", "shadow_pred", "shadow_outcome",
+  // 代理截面。可由日线重算，但 1000+ 天要十来分钟，而没有它 2026-08 以前的主线与候选全是空的
+  "zt_proxy", "sector_rank_proxy", "cross_proxy_built",
 ];
 
 /**

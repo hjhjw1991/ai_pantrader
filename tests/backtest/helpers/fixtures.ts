@@ -119,6 +119,8 @@ class FixtureView implements PointInTimeView {
   holderChanges(_code: string, _days: number): [] { return []; }
   sentimentHistory(_n: number): [] { return []; }
   valuationCrossSection(): null { return null; }
+  ztProxy(_date: string): [] { return []; }
+  sectorRankProxy(_date: string): [] { return []; }
   industryCrossSection(_level: 1 | 3): [] { return []; }
 
   minuteBars(_code: string, _period: number, _n: number): MinuteBar[] {
