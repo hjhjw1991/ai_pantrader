@@ -143,7 +143,11 @@ export function CandidateTable({
             const lowConf = c.factors.filter((f) => f.confidence < 0.8).map((f) => f.name);
             return (
               <tr key={`${c.account}-${c.code}`}>
-                <td className="num text-ink">{c.code}</td>
+                <td className="num text-ink">
+                  {c.code}
+                  <a className="ml-1 text-info text-[10px]" title="在下方 K 线图里看结构位与计划价位"
+                    href={chartHref(c.code, { trigger: c.triggerPx, stop: c.stopPx, target: pricing?.get(c.code)?.targetPx ?? null })}>看图</a>
+                </td>
                 <td>{c.name}</td>
                 <td>
                   <ActionTag action={c.action} />
@@ -181,6 +185,15 @@ export function CandidateTable({
       </table>
     </div>
   );
+}
+
+/** 页面内跳到 K 线图并带上计划价位（服务端从 searchParams 读） */
+export function chartHref(code: string, lv: { trigger?: number | null; stop?: number | null; target?: number | null; cost?: number | null }): string {
+  const q = new URLSearchParams({ chart: code });
+  for (const [k, v] of [["trig", lv.trigger], ["stop", lv.stop], ["tgt", lv.target], ["cost", lv.cost]] as const) {
+    if (typeof v === "number" && Number.isFinite(v)) q.set(k, String(v));
+  }
+  return `?${q.toString()}#chart`;
 }
 
 /** 目标价与盈亏比两格。参考值（正式组合没用它选股）标一个"参考"，盈亏比不到 1.5 标黄 */

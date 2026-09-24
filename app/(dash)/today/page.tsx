@@ -2,7 +2,7 @@ import Link from "next/link";
 import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { KV, Panel, Tag } from "@/components/Panel";
-import { DailyChart } from "@/components/DailyChart";
+import { StockChart } from "@/components/StockChart";
 import { CandidateScanButton } from "@/components/CollectScan";
 import { readDb, dbUnavailable } from "@/lib/ui/db";
 import { fmtAmount, fmtPct, fmtTs, dirClass } from "@/lib/ui/format";
@@ -17,6 +17,7 @@ import {
   CardMeta,
   CardWarnings,
   GearLight,
+  chartHref,
 } from "@/components/SignalCardView";
 import {
   lastTradingDay,
@@ -40,7 +41,13 @@ export const dynamic = "force-dynamic";
  * 第四块标着"涨停池原始聚合"而不是温度计因子：它只是把 zt_pool 里的真值分组数了一遍，
  * 没有代理重建也没有 confidence，措辞不能混。
  */
-export default function TodayPage() {
+type SP = Record<string, string | string[] | undefined>;
+const spNum = (sp: SP, k: string): number | null => {
+  const v = sp[k]; const n = typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+export default function TodayPage({ searchParams = {} }: { searchParams?: SP }) {
   const db = readDb();
   if (!db) return <NoDatabase why={dbUnavailable()} />;
 
@@ -235,7 +242,10 @@ export default function TodayPage() {
                   {pv.rows.map((r) => (
                     <tr key={`${r.position.accountId}-${r.position.code}`}>
                       <td className="text-ink-2">{r.position.account}</td>
-                      <td className="num text-ink">{r.position.code}</td>
+                      <td className="num text-ink">
+                        {r.position.code}
+                        <a className="ml-1 text-info text-[10px]" href={chartHref(r.position.code, { cost: r.position.cost, stop: r.position.stopPx })}>看图</a>
+                      </td>
                       <td>{r.name ?? "—"}</td>
                       <td className="num"><Num v={r.position.cost} /></td>
                       <td className="num"><Num v={r.quote?.price ?? null} /></td>
@@ -442,13 +452,19 @@ export default function TodayPage() {
       </Panel>
 
       {/* ── 个股日线 ── */}
-      <Panel
-        title="个股日线"
-        hint="kline_daily 真实数据。看回踩位与均线，不做任何信号推断"
-        right="输入 6 位代码"
-      >
-        <DailyChart />
-      </Panel>
+      <section id="chart">
+        <Panel
+          title="个股 K 线"
+          hint="前复权日线 + MACD；结构位、M 顶 W 底、日/周线交叉都来自因子层，图上不另算信号"
+          right="候选 / 持仓里点「看图」带上计划价位"
+        >
+          {(() => {
+            const code = typeof searchParams.chart === "string" && /^\d{6}$/.test(searchParams.chart) ? searchParams.chart : undefined;
+            const levels = { trigger: spNum(searchParams, "trig"), stop: spNum(searchParams, "stop"), target: spNum(searchParams, "tgt"), cost: spNum(searchParams, "cost") };
+            return <StockChart key={code ?? "none"} initialCode={code} levels={levels} />;
+          })()}
+        </Panel>
+      </section>
 
       <p className="text-ink-3 text-[11px]">
         快照时点见顶栏。本页不构成投资建议；所有价格来自免费非官方接口，非交易级。
