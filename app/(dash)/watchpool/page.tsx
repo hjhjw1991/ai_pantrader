@@ -1,8 +1,6 @@
-import CockpitView from "@/components/views/CockpitView";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-/** 直接打开 /watchpool（刷新、收藏）：底下照样是作战台，抽屉由 @drawer/watchpool 叠上去 */
-export default function Page() {
-  return <CockpitView />;
+/** 观察池并进了「我的股票」抽屉 */
+export default function Watchpool() {
+  redirect("/positions?tab=1");
 }

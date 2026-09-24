@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "@/app/globals.css";
-import { Nav } from "@/components/Nav";
-import { LiveBar } from "@/components/LiveBar";
-import { StatusRail } from "@/components/StatusRail";
+import { Sidebar } from "@/components/shell/Sidebar";
+import { TopBar } from "@/components/shell/TopBar";
 import { systemStatus } from "@/lib/ui/status";
 
 export const metadata: Metadata = {
@@ -22,16 +21,19 @@ export const revalidate = 0;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   const s = systemStatus();
+  const health = s.worstHealth === null ? { label: "无记录", tone: "text-ink-3" }
+    : s.worstHealth === "ok" ? { label: "正常", tone: "text-down" }
+    : s.worstHealth === "failing" ? { label: "高失败率", tone: "text-warn" }
+    : { label: s.worstHealth === "stale" ? "陈旧" : "掉线", tone: "text-danger" };
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen bg-bg text-ink">
-        <Nav />
-        <StatusRail s={s} />
-        {/* 实时条：1 分钟自刷 + SSE 推送 + 桌面通知 + 立即采集 */}
-        <div className="px-3 pt-1">
-          <LiveBar />
+      <body className="h-screen overflow-hidden flex bg-bg text-ink">
+        <Sidebar mode={s.executionMode === "paper" ? "paper 模拟" : "manual 手工"} health={health} />
+        <div className="flex-1 min-w-0 flex flex-col">
+          <TopBar s={s} />
+          {/* 滚动发生在主区里：侧边栏与顶栏始终在视野里 */}
+          <main className="flex-1 overflow-y-auto p-3">{children}</main>
         </div>
-        <main className="p-3">{children}</main>
       </body>
     </html>
   );

@@ -1,41 +1,58 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { EmptyState, NoDatabase } from "@/components/EmptyState";
-import { Panel } from "@/components/Panel";
-import { StockChart } from "@/components/StockChart";
-import { AdviceTable } from "@/components/AdviceTable";
-import { CandidateScanButton } from "@/components/CollectScan";
 import { CycleStageLight } from "@/components/CycleStage";
 import { ShadowSummary } from "@/components/ShadowPanel";
-import { CandidateTable, CardWarnings, GearLight } from "@/components/SignalCardView";
+import { FactorTable } from "@/components/SignalCardView";
+import { DecisionBoard } from "@/components/cockpit/DecisionBoard";
 import { readDb, dbUnavailable } from "@/lib/ui/db";
-import { fmtTs } from "@/lib/ui/format";
-import { unavailable } from "@/lib/ui/derive";
+import { fmtTs, gearClass } from "@/lib/ui/format";
+import { unavailable, ztStats } from "@/lib/ui/derive";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { cycleStage, pricingRefs, shadowOverview } from "@/lib/ui/adapters/overview";
-import { lastTradingDay } from "@/lib/ui/queries";
+import { cockpitItems } from "@/lib/ui/adapters/cockpit";
+import { lastTradingDay, latestZtDate, ztPool } from "@/lib/ui/queries";
 import { shanghaiParts } from "@/lib/ui/status";
 import { shanghaiTs } from "@/lib/ui/time";
-import { intradayIntervalMin } from "@/lib/data/schedule";
 
 /**
- * 作战台 —— 系统唯一的主页。早上打开就是它，其余功能都是右侧抽屉（lib/ui/drawers.ts）。
- *
- * 布局按"早上要做的事"的顺序：
- *   1. 顶部一排：今天能不能买（档位）、周期在哪一段（阶段）、影子盘有没有要我批的
- *   2. 左栏：候选池 → 持仓怎么办 → 观察池能不能买；右栏：K 线固定在视野里，点哪只看哪只
- * 盘面原料（涨停池、连板、板块、龙虎榜）挪进「盘面原料」抽屉：它们是原料，不是结论。
+ * 作战台 —— 系统唯一的主页，三栏：
+ *   左：盘面环境 —— 今天能不能买（档位）、周期在哪一段（阶段）、盘面温度、影子盘
+ *   中：选中那只票的决策卡（动作、价位、理由）+ K 线
+ *   右：自选列表 —— 今日候选 / 持仓 / 观察池，点哪只看哪只
+ * 其余功能都是右侧抽屉（lib/ui/drawers.ts），从左侧导航打开。
  *
  * 本页不做任何决策计算：档位、候选、建议全部来自策略引擎。
  */
+
+function Card({ title, right, children }: { title: string; right?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="bg-panel border border-line rounded-sm">
+      <header className="flex items-baseline gap-2 px-3 py-2 border-b border-line">
+        <h2 className="text-ink font-medium">{title}</h2>
+        <div className="ml-auto text-[11px] text-ink-3">{right}</div>
+      </header>
+      <div className="p-3">{children}</div>
+    </section>
+  );
+}
+
+function Tile({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
+  return (
+    <div className="bg-panel-2 rounded-sm px-2 py-1.5 text-center">
+      <div className="text-[10px] text-ink-3">{label}</div>
+      <div className={`num text-base ${tone ?? "text-ink"}`}>{value}</div>
+    </div>
+  );
+}
+
 export default function CockpitView() {
   const db = readDb();
   if (!db) return <NoDatabase why={dbUnavailable()} />;
 
   const now = new Date();
   const tradeDay = lastTradingDay(db, shanghaiParts(now).date);
-  // 候选池的变化节奏 = 采集轮次，从时刻表推出来
-  const scanMin = intradayIntervalMin();
   const cfg = readStrategyConfig();
   // asOf 显式传入：因子层禁用 Date.now，同一次渲染里所有因子必须看到同一个"现在"
   const asOf = shanghaiTs(now);
@@ -46,117 +63,86 @@ export default function CockpitView() {
   const timerInUse = cfg.available && cfg.config.槽位?.择时器?.用 === "五段状态机";
   const pricing = cfg.available && card.available ? pricingRefs(db, asOf, cfg.config, card.card.candidates) : undefined;
   const shadow = shadowOverview(db);
-
-  // K 线默认先看第一只候选，没有候选看第一笔持仓 —— 打开页面图就不是空的
-  const first = card.available ? card.card.candidates[0] ?? null : null;
-  const firstHold = card.available ? (card.card.advice ?? []).find(a => a.kind === "持仓") ?? null : null;
-  const chartCode = first?.code ?? firstHold?.code;
-  const chartLevels = first
-    ? { trigger: first.triggerPx, stop: first.stopPx, target: pricing?.get(first.code)?.targetPx ?? null }
-    : firstHold ? { stop: firstHold.stopPx } : undefined;
+  const items = card.available ? cockpitItems(db, card.card, pricing) : [];
+  const ztDate = latestZtDate(db);
+  const zt = ztStats(ztDate ? ztPool(db, ztDate) : []);
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* ── 顶部：档位 / 阶段 / 影子盘 ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-        <Panel
-          title="环境档位"
-          hint="进攻 / 中性 / 防守（防守 = 0 仓，不是轻仓）"
-          right={
-            <span>
-              {tradeDay ? `交易日 ${tradeDay}` : "无日历"}
-              {cfg.available ? (
-                <Link href="/settings" scroll={false} className="ml-2 text-info">
-                  {cfg.config.名称 ?? cfg.config.id}@{cfg.config.version}
-                </Link>
-              ) : null}
-            </span>
-          }
-        >
-          {!card.available ? <EmptyState u={card} /> : <GearLight env={card.card.env} />}
-        </Panel>
-
-        <Panel title="情绪阶段" hint="冰点 → 启动 → 发酵 → 高潮 → 退潮；名字人定，阈值由数据学">
-          {stage === null ? <EmptyState u={cfg as any} compact /> : !stage.available ? <EmptyState u={stage} compact /> : <CycleStageLight s={stage} timerInUse={timerInUse} />}
-        </Panel>
-
-        <Panel title="影子盘" hint="赢过正式组合才换上去" right={<Link href="/shadow" scroll={false} className="text-info">详情 →</Link>}>
-          {!shadow.available ? <EmptyState u={shadow} compact /> : <ShadowSummary v={shadow} />}
-        </Panel>
-      </div>
-
-      {/* ── 信号卡警告：有缺口必须上卡，默认折叠只露条数 ── */}
-      {card.available ? <CardWarnings card={card.card} collapsible /> : null}
-
-      {/* ── 主区：左栏结论，右栏 K 线 ── */}
-      <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-3 items-start">
-        <div className="flex flex-col gap-3 min-w-0">
-          {/*
-            hint 里的节奏取自时刻表（intradayIntervalMin），不是手打的"5 分钟"：
-            候选池是渲染时现算的，真正让它变化的是采集轮次。
-          */}
-          <Panel
-            title="候选池"
-            hint={`到触发价才动手，不是市价追。采集 ${scanMin} 分钟一轮，两轮之间重算结果相同`}
-            right={
-              <span className="flex items-start gap-2">
-                <span className="pt-0.5">{card.available ? `${card.phase} · asOf ${fmtTs(card.asOf)}` : "不可用"}</span>
-                <CandidateScanButton intervalMin={scanMin} />
-              </span>
-            }
-          >
-            {!card.available ? <EmptyState u={card} /> : (
-              <>
-                <div>
-                  <CandidateTable
-                    rows={card.card.candidates}
-                    pricing={pricing}
-                    emptyWhat="引擎已跑，今日无买入候选"
-                    emptyHint="档位为防守（0 仓）或全部标的被过滤器否决时，这是正常且正确的结果"
-                  />
+    <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-3 items-start">
+      {/* ── 左栏：盘面环境 ── */}
+      <div className="flex flex-col gap-3 min-w-0">
+        <Card title="环境档位" right={
+          cfg.available ? <Link href="/settings" scroll={false} className="text-info">{cfg.config.名称 ?? cfg.config.id}@{cfg.config.version}</Link> : null
+        }>
+          {!card.available ? <EmptyState u={card} compact /> : (() => {
+            const env = card.card.env;
+            return (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-baseline gap-3">
+                  <span className={`text-3xl font-semibold ${gearClass(env.gear)}`}>{env.gear}</span>
+                  <span className="text-ink-2">目标仓位 <span className="num text-ink">{(env.targetPosition * 100).toFixed(0)}%</span></span>
                 </div>
-                <p className="mt-2 text-[11px] text-ink-3">
-                  在市标的 {card.universe.total} 只
-                  {card.universe.unknownRatio > 0 ? (
-                    <span className="text-warn">，其中 {(card.universe.unknownRatio * 100).toFixed(1)}% 上市日未知、逃过了幸存者过滤（spec §10.2），覆盖面带这个折扣</span>
-                  ) : null}
-                  {card.card.advisorInfluenced ? <span className="text-warn">；本卡参数被 Advisor 改过</span> : null}
-                </p>
-              </>
-            )}
-          </Panel>
+                {env.gear === "防守" ? <span className="text-down text-[12px]">防守 = 0 仓，不是轻仓</span> : null}
+                <ul className="text-[12px] text-ink-2 leading-5 list-disc pl-4">
+                  {env.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                </ul>
+                {env.lowConfidenceFactors.length > 0 ? (
+                  <p className="text-[11px] text-warn" title="情绪类因子由日线代理重建，不是真值">
+                    低置信因子参与了判断：{env.lowConfidenceFactors.join(" ")}
+                  </p>
+                ) : null}
+                <details>
+                  <summary className="cursor-pointer text-[11px] text-ink-3">因子读数（{env.factors.length}）· 交易日 {tradeDay ?? "—"}</summary>
+                  <FactorTable factors={env.factors} />
+                </details>
+              </div>
+            );
+          })()}
+        </Card>
 
-          <Panel
-            title="持仓动作"
-            hint="纪律动作照做（破止损、到止盈档）；技术面倾向与提示只作参考"
-            right={<Link href="/positions" scroll={false} className="text-info">持仓管理 →</Link>}
-          >
-            {!card.available ? <EmptyState u={card} compact /> : (
-              <AdviceTable rows={card.card.advice ?? []} kind="持仓" emptyWhat="没有持仓" emptyHint="手工成交回填后才会出现在这里（持仓管理 → 回填成交）" />
-            )}
-          </Panel>
+        <Card title="情绪阶段" right="阈值由数据学">
+          {stage === null ? <EmptyState u={cfg as any} compact /> : !stage.available ? <EmptyState u={stage} compact /> : <CycleStageLight s={stage} timerInUse={timerInUse} />}
+        </Card>
 
-          <Panel
-            title="观察池建议"
-            hint="正式评估器逐只判今天能不能买；技术面提示只作参考"
-            right={<Link href="/watchpool" scroll={false} className="text-info">管理观察池 →</Link>}
-          >
-            {!card.available ? <EmptyState u={card} compact /> : (
-              <AdviceTable rows={card.card.advice ?? []} kind="观察" emptyWhat="观察池是空的" emptyHint="在观察池抽屉里加入想盯的票，这里每天给出能不能买" />
-            )}
-          </Panel>
-        </div>
+        <Card title="盘面温度" right={<Link href="/market" scroll={false} className="text-info">{ztDate ?? "无数据"} →</Link>}>
+          <div className="grid grid-cols-2 gap-1.5">
+            <Tile label="涨停家数" value={zt.count} tone="text-up" />
+            <Tile label="最高连板" value={zt.maxLbc} tone="text-up" />
+            <Tile label="连板家数" value={zt.ladder.length} />
+            <Tile label="炸板次数" value={zt.openTimesTotal} tone="text-down" />
+          </div>
+        </Card>
 
-        <section id="chart" className="2xl:sticky 2xl:top-2 min-w-0">
-          <Panel title="K 线" hint="结构位、M 顶 W 底、日/周线交叉都来自因子层" right="点任意「看图」换票">
-            <StockChart initialCode={chartCode} initialLevels={chartLevels} />
-          </Panel>
-        </section>
+        <Card title="影子盘" right={<Link href="/shadow" scroll={false} className="text-info">详情 →</Link>}>
+          {!shadow.available ? <EmptyState u={shadow} compact /> : <ShadowSummary v={shadow} />}
+        </Card>
+
+        {card.available && card.card.warnings.length > 0 ? (
+          <details className="bg-panel border border-warn/50 rounded-sm px-3 py-2">
+            <summary className="cursor-pointer text-warn">
+              信号卡警告 {card.card.warnings.length} 条
+              {card.card.warnings.some(w => w.includes("缺口")) ? <span className="ml-1 text-danger">含数据缺口</span> : null}
+            </summary>
+            <ul className="mt-1 list-disc pl-4 text-[11px] text-ink-2 leading-5">
+              {card.card.warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </details>
+        ) : null}
       </div>
 
-      <p className="text-ink-3 text-[11px]">
-        执行是手工的：本界面只出信号，下单在券商 App 里手敲，回来回填成交。本页不构成投资建议；价格来自免费非官方接口，非交易级。
-      </p>
+      {/* ── 中栏 + 右栏：决策卡 / K 线 / 自选 ── */}
+      <div className="min-w-0 flex flex-col gap-2">
+        {!card.available ? <EmptyState u={card} /> : (
+          <DecisionBoard
+            items={items}
+            emptyNote={`引擎已跑（${card.card.phase} · ${fmtTs(card.asOf)}），今天没有候选、持仓或观察中的票。档位为防守或全部被过滤器否决时这是正常结果。`}
+          />
+        )}
+        <p className="text-ink-3 text-[11px]">
+          执行是手工的：本界面只出信号，下单在券商 App 里手敲，回来回填成交。本页不构成投资建议；价格来自免费非官方接口，非交易级。
+          {card.available ? ` 信号 asOf ${fmtTs(card.asOf)}。` : ""}
+        </p>
+      </div>
     </div>
   );
 }

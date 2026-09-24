@@ -104,66 +104,63 @@ export function LiveBar() {
   // 采集逻辑与候选池那个按钮共用一份：/api/collect 现在是 NDJSON 流，
   // 两处各写一遍解析必然漂移，而漂移的那一份只在少用的入口上炸
   const scan = useCollectScan();
-  const [showAll, setShowAll] = useState(false);
 
+  const [open, setOpen] = useState(false);
+  const [seen, setSeen] = useState(0);
+  const unseen = notices.filter(n => n.id > seen).length;
   const btn = "border border-line-2 rounded-sm px-2 py-0.5 text-[11px] hover:bg-panel-2 disabled:opacity-50";
 
+  /**
+   * 顶栏里的紧凑版：连接状态、立即采集、桌面通知、通知铃。
+   * 通知不再平铺在页面上（一早上的买入提醒能占满半屏），收进铃铛；硬线告警（critical）另外常驻显示。
+   */
+  const critical = notices.filter(n => n.severity === "critical");
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-3">
-        <span className="flex items-center gap-1">
-          <span
-            className={live ? "inline-block w-1.5 h-1.5 rounded-full bg-down"
-                            : "inline-block w-1.5 h-1.5 rounded-full bg-ink-3"}
-          />
-          {live ? "实时推送已连接" : "推送未连接（页面仍每分钟刷新）"}
-        </span>
-        <span>页面 1 分钟自刷 · 采集 {SCAN_MIN} 分钟一轮</span>
-        {lastEvent ? <span>最新快照 {lastEvent.slice(11, 19)}</span> : null}
-
-        <button className={btn} disabled={scan.busy} onClick={scan.run} type="button">
-          {scan.busy
-            ? (scan.total > 0 ? `采集中 ${scan.done}/${scan.total} 批` : "采集中…")
-            : "立即采集"}
+    <div className="flex items-center gap-2 text-[11px] text-ink-3">
+      <span className="flex items-center gap-1" title={`页面 1 分钟自刷 · 采集 ${SCAN_MIN} 分钟一轮`}>
+        <span className={live ? "inline-block w-1.5 h-1.5 rounded-full bg-down" : "inline-block w-1.5 h-1.5 rounded-full bg-ink-3"} />
+        {live ? "实时" : "未连接"}
+        {lastEvent ? <span className="num ml-1">{lastEvent.slice(11, 19)}</span> : null}
+      </span>
+      {critical.slice(0, 1).map(n => (
+        <span key={n.id} className="text-danger max-w-[22rem] truncate" title={n.body ?? ""}>⚠ {n.title}</span>
+      ))}
+      <button className={btn} disabled={scan.busy} onClick={scan.run} type="button">
+        {scan.busy ? (scan.total > 0 ? `采集中 ${scan.done}/${scan.total}` : "采集中…") : "立即采集"}
+      </button>
+      {scan.busy ? <span className="w-40"><CollectProgress s={scan} /></span> : null}
+      {collectMsg ? <span className="text-ink-2">{collectMsg}</span> : null}
+      <div className="relative">
+        <button type="button" aria-label="通知" onClick={() => { setOpen(v => !v); setSeen(notices[0]?.id ?? seen); }}
+          className="relative w-7 h-7 flex items-center justify-center rounded-sm hover:bg-panel-2 text-ink-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+            <path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+          </svg>
+          {unseen > 0 ? <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-danger text-white text-[10px] leading-4 text-center">{unseen}</span> : null}
         </button>
-        {!notifyOn ? (
-          <button className={btn} onClick={enableNotify} type="button">
-            开启桌面通知
-          </button>
-        ) : (
-          <span className="text-down">桌面通知已开</span>
-        )}
-        {collectMsg ? <span className="text-ink-2">{collectMsg}</span> : null}
-        <span className="w-56"><CollectProgress s={scan} /></span>
+        {open ? (
+          <div className="absolute right-0 top-8 z-50 w-[28rem] max-h-[60vh] overflow-y-auto bg-panel border border-line-2 rounded-sm shadow-2xl">
+            <div className="flex items-center px-3 py-2 border-b border-line text-ink">
+              通知
+              {!notifyOn ? (
+                <button className={`${btn} ml-auto`} onClick={enableNotify} type="button">开启桌面通知</button>
+              ) : <span className="ml-auto text-down">桌面通知已开</span>}
+            </div>
+            {notices.length === 0 ? <div className="px-3 py-3 text-ink-3">这次打开页面之后还没有新通知</div> : (
+              <ul>
+                {notices.map(n => (
+                  <li key={n.id} className="px-3 py-2 border-b border-line/60">
+                    <div className={n.severity === "critical" ? "text-danger" : n.severity === "warn" ? "text-warn" : "text-ink-2"}>
+                      <span className="num text-ink-3 mr-1">{n.ts.slice(11, 19)}</span>{n.title}
+                    </div>
+                    {n.body ? <div className="text-ink-3 mt-0.5 leading-5">{n.body}</div> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : null}
       </div>
-
-      {notices.length > 0 ? (
-        <ul className="flex flex-col gap-0.5">
-          {/* 只露最新两条（硬线告警永远露着），其余折起来：一早上的买入提醒能占满半屏，把作战台挤到下面去 */}
-          {notices.filter((n, i) => showAll || i < 2 || n.severity === "critical").map(n => (
-            <li
-              key={n.id}
-              className={
-                n.severity === "critical"
-                  ? "text-danger text-[11px]"
-                  : n.severity === "warn"
-                    ? "text-warn text-[11px]"
-                    : "text-ink-3 text-[11px]"
-              }
-            >
-              {n.ts.slice(11, 19)} {n.title}
-              {n.body ? <span className="text-ink-3">　{n.body}</span> : null}
-            </li>
-          ))}
-          {notices.length > 2 ? (
-            <li>
-              <button type="button" className="text-info text-[11px]" onClick={() => setShowAll(v => !v)}>
-                {showAll ? "收起" : `还有 ${notices.filter((n, i) => i >= 2 && n.severity !== "critical").length} 条`}
-              </button>
-            </li>
-          ) : null}
-        </ul>
-      ) : null}
     </div>
   );
 }

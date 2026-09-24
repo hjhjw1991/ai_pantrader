@@ -93,17 +93,15 @@ Every data source is a free, unofficial endpoint: they drop out, rate-limit, and
 
 ## Pages
 
-There is one main page: `/`, the cockpit. The top row shows the environment gear, the sentiment-cycle stage and a shadow-book summary; the left column holds buy candidates (with target price and reward/risk), holding actions and watchlist advice; the right column is an interactive candlestick chart (any "看图" link switches the stock without reloading). Everything else is a drawer that slides in from the right, opened with a number key and closed with Esc; drawer URLs survive reloads and bookmarks:
+There is one main page, `/`, the cockpit, in three columns: the left column shows the market environment (gear, sentiment-cycle stage, limit-up temperature, shadow-book summary); the middle shows the decision card for the selected stock (action, current / trigger / stop / target prices, reward-to-risk, rationale, technical hints, next step) plus an interactive candlestick chart; the right column is the watchlist (today's candidates / holdings / watchlist, with sparklines; click to select, ↑↓ to move). The left navigation collapses to an icon rail (`[` key); the top bar shows the snapshot time, gap badges and a notification bell. Everything else is a drawer that slides in from the right, opened with a number key and closed with Esc; drawer URLs survive reloads and bookmarks:
 
 | Key | Path | Drawer |
 |---|---|---|
-| 1 | `/positions` | Holdings, P&L, distance to stop, execution fill-back, **account management** |
-| 2 | `/watchpool` | Watchlist: each entry carries a trigger price, a stop price, and a one-line rationale |
-| 3 | `/shadow` | Shadow book: per-combination results, graduation progress, pending switches, rollback |
-| 4 | `/market` | Market raw data: limit-up aggregates, board ladder, sector moves, dragon-tiger list |
-| 5 | `/ledger` | Prediction ledger and reconciliation: hit rate, error attribution, parameter suggestions |
-| 6 | `/lab` | Backtesting and walk-forward |
-| 7 | `/settings` | Source health, gaps, scheduler status, **strategy management**, parameter panel, import/export |
+| 1 | `/positions` | My stocks: holdings, P&L, distance to stop, execution fill-back, **account management**; watchlist |
+| 2 | `/shadow` | Shadow book: per-combination results, graduation progress, pending switches, rollback |
+| 3 | `/market` | Market: limit-up aggregates, board ladder, sector moves, dragon-tiger list |
+| 4 | `/ledger` | Review and backtest: prediction ledger and reconciliation, hit rate, parameter suggestions; backtesting and walk-forward |
+| 5 | `/settings` | Source health, gaps, scheduler status, **strategy management**, parameter panel, import/export |
 
 Pages refresh themselves every 60 seconds, plus an SSE push — gear changes, new buy candidates, and hard-line breaks raise a desktop notification; routine data refreshes do not.
 

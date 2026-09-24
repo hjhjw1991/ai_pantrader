@@ -86,7 +86,7 @@ export interface TechContext {
 export interface StockAdvice {
   code: string;
   name: string | null;
-  kind: "持仓" | "观察";
+  kind: "持仓" | "观察" | "候选";
   action: string;
   reasons: string[];
   triggerPx: number | null;

@@ -194,6 +194,16 @@ function buildAdvice(
     });
   }
 
+  // 今日候选也给技术面提示：决策卡上要看得到它的 MACD、结构位与形态
+  for (const c of candidates) {
+    const t = tech(c.code, false);
+    out.push({
+      code: c.code, name: c.name ?? nameOf(c.code), kind: "候选", action: c.action, reasons: [c.thesis],
+      triggerPx: c.triggerPx, stopPx: c.stopPx, targetPx: typeof c.targetPx === "number" ? c.targetPx : null,
+      rrRatio: c.rrRatio ?? null, targetRef: false, mainline: null, tech: t, lean: null,
+    });
+  }
+
   const held = new Set(holdings.map(h => h.code));
   const ev = pick<EvaluatorSlot>(deps.slots, "评估器", sc.评估器 ?? BASELINE_CHOICE.评估器);
   for (const w of input.advice!.watchlist) {

@@ -19,17 +19,16 @@ export function CycleStageLight({ s, timerInUse }: { s: StageView; timerInUse: b
   const track = (inputs["轨迹"] ?? []) as Array<{ 日期: string; 阶段: string | null; 热度: number | null }>;
   return (
     <div>
-      <div className="flex items-baseline gap-3">
-        <span className={`text-2xl font-medium ${s.stage ? TONE[s.stage] : "text-ink-3"}`}>{s.stage ?? s.label}</span>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className={`text-2xl font-medium whitespace-nowrap ${s.stage ? TONE[s.stage] : "text-ink-3"}`}>{s.stage ?? s.label}</span>
         {s.stage ? (
-          <span className="text-ink-2">
-            已持续 <span className="num text-ink">{s.days ?? "—"}</span> 天 · 热度分位{" "}
-            <span className="num text-ink">{s.heat === null ? "—" : s.heat.toFixed(2)}</span>
+          <span className="text-ink-2 whitespace-nowrap">
+            已持续 <span className="num text-ink">{s.days ?? "—"}</span> 天 · 热度 <span className="num text-ink">{s.heat === null ? "—" : s.heat.toFixed(2)}</span>
           </span>
         ) : (
           <span className="text-ink-3">情绪派生表未就绪或样本不足，阶段判不出来</span>
         )}
-        <span className="ml-auto text-[11px] text-ink-3">按 {s.date} 收盘</span>
+        <span className="text-[11px] text-ink-3 whitespace-nowrap">按 {s.date} 收盘</span>
       </div>
 
       {/* 五段刻度：当前段高亮 */}
@@ -52,7 +51,7 @@ export function CycleStageLight({ s, timerInUse }: { s: StageView; timerInUse: b
       ) : null}
 
       {Object.keys(parts).length > 0 ? (
-        <div className="mt-2 grid grid-cols-2 gap-x-4 text-[11px]">
+        <div className="mt-2 grid grid-cols-1 gap-y-0.5 text-[11px]">
           {Object.entries(parts).map(([k, v]) => (
             <div key={k} className="flex items-center gap-2">
               <span className="text-ink-2 w-20 shrink-0">{k}</span>
