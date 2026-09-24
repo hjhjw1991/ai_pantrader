@@ -132,7 +132,11 @@ To collect without opening the web UI:
 
 ```bash
 pnpm run daemon          # standalone daemon with a PID lock, so it can't start twice
+pnpm run daemon:stop     # stop it (macOS / Windows)
 ```
+
+**The daemon does not exit when the web server does** (it is spawned detached, so a crashed or restarted web server never interrupts collection); stop it with `pnpm run daemon:stop`.
+It first checks that the process in the lock file really is the collection daemon, and leaves it alone if the PID has been reused by another program; shutdown, restart and log-out end it too.
 
 If an older install left launchd / schtasks tasks on a machine, `pnpm env:doctor` says how to remove them.
 
@@ -196,6 +200,7 @@ pnpm db:import <f.ptbak> merge newer
 |---|---|
 | `pnpm start` / `pnpm dev` | Start the web UI (production / development) |
 | `pnpm run daemon` | Standalone collection daemon |
+| `pnpm run daemon:stop` | Stop the collection daemon (it keeps running after the web server exits) |
 | `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run parity [days]` | v1 vs v2 engine parity: real factors over the last N trading days, field-by-field card diff. Non-zero exit on any mismatch |
 | `pnpm test` | Unit tests (**no network**) |

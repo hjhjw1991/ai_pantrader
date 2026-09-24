@@ -140,7 +140,11 @@ pnpm start              # 启动 → http://localhost:3111
 
 ```bash
 pnpm run daemon          # 独立守护进程，带 PID 锁，不会起两个
+pnpm run daemon:stop     # 停掉它（macOS / Windows 通用）
 ```
+
+**网页服务退出后守护进程不会跟着退**（它是分离拉起的，网页崩了、重启了都不影响采集），要停就用 `pnpm run daemon:stop`。
+它会先核对锁文件里的进程确实是采集守护进程再结束，号码被别的程序复用了就不动；关机、重启、注销时它也会随之结束。
 
 装过旧版本、机器上还留着 launchd / schtasks 任务的，`pnpm env:doctor` 会提示怎么删。
 
@@ -206,6 +210,7 @@ pnpm db:import <f.ptbak> merge newer
 |---|---|
 | `pnpm start` / `pnpm dev` | 启动网页（生产 / 开发） |
 | `pnpm run daemon` | 独立采集守护进程 |
+| `pnpm run daemon:stop` | 停掉采集守护进程（网页退出后它仍在跑） |
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run parity [天数]` | v1↔v2 引擎对照：真实因子跑最近 N 个交易日，逐字段比信号卡。不一致即退出码非 0 |
 | `pnpm test` | 单元测试（**不打网络**） |

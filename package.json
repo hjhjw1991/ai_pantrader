@@ -48,7 +48,8 @@
     "migrate": "tsx scripts/migrate-cli.ts",
     "db:export": "tsx scripts/export.ts",
     "db:import": "tsx scripts/import.ts",
-    "daemon": "tsx scripts/daemon.ts"
+    "daemon": "tsx scripts/daemon.ts",
+    "daemon:stop": "tsx scripts/daemon-stop.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
