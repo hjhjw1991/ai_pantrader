@@ -6,6 +6,7 @@ import {
   type IChartApi, type ISeriesApi, type SeriesMarker, type Time, type UTCTimestamp,
 } from "lightweight-charts";
 import type { ChartData } from "@/lib/ui/adapters/chart";
+import { CHART_EVENT, type ChartRequest } from "@/components/ChartLink";
 
 /**
  * 个股 K 线：前复权日线 + MA20 + 成交量，下方日线 MACD。
@@ -28,9 +29,21 @@ const toTime = (d: string) => (Date.parse(`${d}T00:00:00Z`) / 1000) as UTCTimest
 type Layer = "交叉" | "周线" | "结构位" | "形态" | "计划";
 const LAYERS: Layer[] = ["交叉", "周线", "结构位", "形态", "计划"];
 
-export function StockChart({ initialCode, levels }: { initialCode?: string; levels?: PlanLevels }) {
+export function StockChart({ initialCode, initialLevels }: { initialCode?: string; initialLevels?: PlanLevels }) {
   const [input, setInput] = useState(initialCode ?? "");
   const [code, setCode] = useState(initialCode ?? "");
+  const [levels, setLevels] = useState<PlanLevels | undefined>(initialLevels);
+
+  // 页面里任意"看图"按钮都通过这个事件换票，不跳页、不重算整页
+  useEffect(() => {
+    const on = (e: Event) => {
+      const r = (e as CustomEvent<ChartRequest>).detail;
+      if (!r || !/^\d{6}$/.test(r.code)) return;
+      setInput(r.code); setCode(r.code); setLevels(r.levels);
+    };
+    window.addEventListener(CHART_EVENT, on);
+    return () => window.removeEventListener(CHART_EVENT, on);
+  }, []);
   const [data, setData] = useState<ChartData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -154,7 +167,7 @@ export function StockChart({ initialCode, levels }: { initialCode?: string; leve
       <form className="flex flex-wrap items-center gap-2 mb-2" onSubmit={e => {
         e.preventDefault();
         const v = input.trim();
-        if (/^\d{6}$/.test(v)) { setCode(v); setErr(null); } else setErr("代码必须是 6 位数字");
+        if (/^\d{6}$/.test(v)) { if (v !== code) setLevels(undefined); setCode(v); setErr(null); } else setErr("代码必须是 6 位数字");
       }}>
         <input value={input} onChange={e => setInput(e.target.value)} placeholder="600519" inputMode="numeric"
           className="num w-28 bg-panel-2 border border-line-2 rounded-sm px-2 py-1 text-ink" />

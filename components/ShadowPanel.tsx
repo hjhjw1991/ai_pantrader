@@ -159,3 +159,46 @@ export function ShadowPanelBody({ v }: { v: ShadowView }) {
     </div>
   );
 }
+
+/**
+ * 作战台顶部的影子盘摘要：正式组合、自动切换状态、待批提案（可直接批）、离毕业最近的两个挑战者。
+ * 完整成绩单在「影子盘」抽屉里。
+ */
+export function ShadowSummary({ v }: { v: ShadowView }) {
+  const st = v.status;
+  if (st === null) return <span className="text-warn text-[12px]">切换状态读不出来：{v.statusError}</span>;
+  const top = st.board.slice(0, 3);
+  const liveDays = Math.max(0, ...v.live.map(r => r.days));
+  return (
+    <div className="flex flex-col gap-2 text-[12px]">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-ink-2">
+        <span>正式组合 <span className="text-ink">{st.incumbent ?? "（未登记）"}</span></span>
+        <span>自动切换 {st.autoAllowed ? <Tag tone="warn">已开启</Tag> : <span className="text-ink">再人批 {st.approvalsUntilAuto} 次</span>}</span>
+        <span>实盘样本 <span className="num text-ink">{liveDays}</span> 天</span>
+      </div>
+      {st.pending ? (
+        <div className="border border-warn/60 bg-warn/5 rounded-sm px-2 py-1 flex flex-wrap items-center gap-2">
+          <span className="text-warn">待批 #{st.pending.id}</span>
+          <span className="text-ink">{st.pending.fromVariant} → {st.pending.toVariant}</span>
+          {st.pending.evidence ? <span className="text-ink-2">t = {st.pending.evidence.t?.toFixed(2) ?? "—"}，{st.pending.evidence.settled} 笔</span> : null}
+          <PendingActions id={st.pending.id} from={st.pending.fromVariant ?? "?"} to={st.pending.toVariant ?? "?"} />
+        </div>
+      ) : <span className="text-ink-3">没有待批的切换</span>}
+      <ul className="flex flex-col gap-1">
+        {top.map(g => {
+          const prog = Math.min(1, g.settled / 30) * 0.5 + Math.min(1, g.days / 20) * 0.5;
+          return (
+            <li key={g.variant} className="flex items-center gap-2">
+              <span className="w-36 shrink-0 truncate text-ink" title={g.variant}>{g.name}</span>
+              <span className="flex-1 h-1.5 bg-panel-2 rounded-sm overflow-hidden" title="样本积累进度（笔数与天数各占一半）">
+                <span className={`block h-full ${g.passed ? "bg-up" : "bg-info/70"}`} style={{ width: `${Math.round(prog * 100)}%` }} />
+              </span>
+              <span className="num text-ink-2 shrink-0">{g.days} 天 {g.settled} 笔</span>
+              {g.passed ? <Tag tone="up">过线</Tag> : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}

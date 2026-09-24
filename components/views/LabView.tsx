@@ -1,0 +1,221 @@
+import { EmptyState, NoDatabase, NoRows } from "@/components/EmptyState";
+import { ParamPanel } from "@/components/ParamPanel";
+import { Num } from "@/components/Num";
+import { KV, Panel, Tag } from "@/components/Panel";
+import { LabRunner } from "@/components/LabRunner";
+import { SweepRunner } from "@/components/SweepRunner";
+import { ReportArchive } from "@/components/ReportArchive";
+import { dbUnavailable, readDb } from "@/lib/ui/db";
+import { fmtTs } from "@/lib/ui/format";
+import { unavailable } from "@/lib/ui/derive";
+import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
+import { calendarRange, strategies, tableCountsCached, backtestReports } from "@/lib/ui/queries";
+import { REPORT_KEEP } from "@/lib/ui/mutations";
+import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
+import { SWEEP_MAX_POINTS } from "@/lib/ui/adapters/engines";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * 回测实验室。spec §13：选策略 + 调参 → 跑回测 → 净值/回撤/参数热力图/覆盖率。
+ *
+ * 四块都是活的：调参走 ParamPanel 写回 YAML、回测走 LabRunner、
+ * 参数扫描走 SweepRunner（每点一次完整回测，上限 SWEEP_MAX_POINTS）。
+ *
+ * 唯一不许出现的是**示例数据**：假的净值曲线与补出来的热力图格子，
+ * 是这套系统里最危险的产物 —— 它们会被当成策略成绩读，而策略成绩决定投多少钱。
+ * 所以拿不到合法配置时按钮禁用、格子没评估过就画破折号，不插值不补零。
+ */
+export default function LabPage() {
+  const db = readDb();
+  if (!db) return <NoDatabase why={dbUnavailable()} />;
+
+  const cfg = readStrategyConfig();
+  const strats = strategies(db);
+  const cal = calendarRange(db);
+  // 行数由夜间 job 数好存进 app_meta，这里只是读快照 —— 见 lib/data/table-counts
+  const { counts, at: countsAt } = tableCountsCached(db);
+  const archive = backtestReports(db);
+  const count = (t: string) => counts.find((c) => c.table === t)?.rows ?? -1;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <Panel title="选策略" hint="多策略并存，每个策略有 id + 语义化版本">
+          {strats.length === 0 ? (
+            <NoRows
+              what="strategy 表无记录"
+              hint={`策略由 ${strategyYamlRel()} 定义；产生第一条预测时原文自动快照进 strategy 表`}
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="dense">
+                <thead>
+                  <tr>
+                    <th>id</th>
+                    <th>版本</th>
+                    <th>状态</th>
+                    <th className="text-right">创建时间</th>
+                    <th className="text-right">因子锁</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strats.map((s) => (
+                    <tr key={`${s.id}-${s.version}`}>
+                      <td className="num text-ink">{s.id}</td>
+                      <td className="num">{s.version}</td>
+                      <td>{s.active ? <Tag tone="up">启用</Tag> : <Tag>历史</Tag>}</td>
+                      <td className="num text-ink-3">{fmtTs(s.createdAt, true)}</td>
+                      <td className="num text-ink-2">
+                        {s.factorsLock ? Object.keys(s.factorsLock).length : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+
+        <Panel
+          title="调参"
+          hint="参数面板是 YAML 的投影（D7），改动写回 YAML，不存在第二份状态"
+        >
+          {!cfg.available ? (
+            <EmptyState u={cfg} compact />
+          ) : (
+            <>
+              {/*
+                用 ParamPanel 而不是在这里另写一张只读表：同一份数据两套渲染，
+                迟早有一套落后于事实 —— 这里原先就挂着一句"写回需 loader（未就绪）"，
+                而 loader 早就实装了，那句话把人赶去手改 YAML。
+              */}
+              <p className="text-ink-2 text-[11px] mb-2">
+                改动直接写回 <code className="text-ink">{strategyYamlRel()}</code>：
+                原文上替换纯量（保留注释）→ 写前备份成带时间戳的副本 → 整份重新校验 → 通过才落盘。
+                列表与整段规则用设置页的「策略原文编辑」。
+              </p>
+              <ParamPanel params={flattenConfig(cfg.config)} />
+            </>
+          )}
+        </Panel>
+      </div>
+
+      <Panel
+        title="跑回测"
+        tone="warn"
+        hint="A股约束默认全开且不提供开关：关掉任何一条都会让回测虚高"
+        right={
+          <>
+            T+1 · 涨停买不进 · 跌停卖不出 · 停牌不成交 · 滑点{" "}
+            {(DEFAULT_CONSTRAINTS.slippage * 100).toFixed(2)}% · 费率{" "}
+            {(DEFAULT_CONSTRAINTS.feeRate * 100).toFixed(2)}%
+          </>
+        }
+      >
+        {cfg.available ? (
+          <LabRunner
+            strategies={
+              strats.length > 0
+                ? strats.map((s) => ({ id: s.id, version: s.version }))
+                : [{ id: cfg.config.id, version: cfg.config.version }]
+            }
+            defaultRange={{ from: cal.from ?? "", to: cal.to ?? "" }}
+          />
+        ) : (
+          <>
+            <EmptyState u={cfg} />
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                className="border border-line-2 rounded-sm px-3 py-1 text-ink-3 opacity-40 cursor-not-allowed"
+                disabled
+                title={cfg.reason}
+              >
+                开始回测
+              </button>
+              <span className="text-ink-3 text-[11px]">
+                按钮禁用不是界面没做完 —— 拿不到合法策略配置时，能点的按钮只会产出一个假成绩。
+              </span>
+            </div>
+          </>
+        )}
+        <p className="mt-2 text-ink-3 text-[11px]">
+          回测在请求线程里同步跑完，区间长会卡住这一页 —— 先用小区间试，别一上来就跑全历史。
+        </p>
+      </Panel>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <Panel title="净值 / 回撤 / 覆盖率" hint="跑完在上方「跑回测」面板内就地渲染">
+          <p className="text-ink-3 text-[12px] leading-6">
+            报告首页四项必含：覆盖率、缺口天数、低置信因子（ρ&lt;0.8 标红）、有效区间。
+            它们和 Calmar 同等份量地显示在 metrics 之前 —— 覆盖率 60% 的 Calmar 3.0
+            和覆盖率 99% 的 Calmar 1.5，后者才是可信的那个。
+          </p>
+        </Panel>
+
+        <Panel
+          title="参数热力图"
+          hint="目标是 Calmar（spec §10.4）。峰陡 = 过拟合信号，比最优点更该看"
+          right={`上限 ${SWEEP_MAX_POINTS} 点`}
+        >
+          {cfg.available ? (
+            <SweepRunner
+              // 轴只给纯量路径：非纯量扫不了，让人手打路径等于打错了要跑完才知道
+              paramPaths={flattenConfig(cfg.config)
+                .filter((p) => p.kind === "scalar" && p.path !== "id" && p.path !== "version")
+                .map((p) => p.path)}
+              defaultRange={{ from: cal.from ?? "", to: cal.to ?? "" }}
+              maxPoints={SWEEP_MAX_POINTS}
+            />
+          ) : (
+            <EmptyState u={cfg} compact />
+          )}
+        </Panel>
+
+        <Panel title="回测可用区间" hint="这些是真实数据，现在就能看" right={`行数统计于 ${countsAt.slice(5, 16)}`}>
+          <KV label="交易日历区间">
+            {cal.from ?? "—"} → {cal.to ?? "—"}
+          </KV>
+          <KV label="日历内交易日">
+            <Num v={cal.openDays} kind="int" />
+          </KV>
+          <KV label="kline_daily 行数">
+            <Num v={count("kline_daily")} kind="int" />
+          </KV>
+          <KV label="kline_min 行数" hint="不可回补">
+            <Num v={count("kline_min")} kind="int" />
+          </KV>
+          <KV label="zt_pool 行数" hint="情绪因子原料，不可回补">
+            <Num v={count("zt_pool")} kind="int" />
+          </KV>
+          <KV label="sector_rank 行数" hint="主线识别原料">
+            <Num v={count("sector_rank")} kind="int" />
+          </KV>
+          <p className="mt-2 text-ink-3 text-[11px]">
+            截面表行数少 = 情绪/主线因子在历史区间无原料，回测只能用代理重建，
+            结论天然带误差且必须在报告首页标注（spec §10.3）。
+            复权断层（spec R1）还可能把有效区间从 4 年压到 2.6 年。
+          </p>
+        </Panel>
+      </div>
+
+      <p className="text-ink-3 text-[11px]">
+        幸存者偏差：回测标的池必须按 listDate/delistDate 过滤当日在市清单，
+        用当前在市清单回测 2022 年等于假装当年买的没一只退市（spec §10.2）。
+        这条约束在 PointInTimeView.universe() 里，不在前端。
+      </p>
+
+      <Panel
+        title="回测存档"
+        hint="报告不再只活在页面里 —— 四年跨度一次回测约 6 分钟，36 点扫描约 3.7 小时，切走就没了太贵"
+        right={`最近 ${archive.length} 份 / 上限 ${REPORT_KEEP}`}
+      >
+        {archive.length === 0 ? (
+          <NoRows what="还没有存档" hint="跑一次回测或参数扫描，结果会自动存下来" />
+        ) : (
+          <ReportArchive rows={archive} keep={REPORT_KEEP} />
+        )}
+      </Panel>
+    </div>
+  );
+}

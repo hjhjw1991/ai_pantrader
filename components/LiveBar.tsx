@@ -104,6 +104,7 @@ export function LiveBar() {
   // 采集逻辑与候选池那个按钮共用一份：/api/collect 现在是 NDJSON 流，
   // 两处各写一遍解析必然漂移，而漂移的那一份只在少用的入口上炸
   const scan = useCollectScan();
+  const [showAll, setShowAll] = useState(false);
 
   const btn = "border border-line-2 rounded-sm px-2 py-0.5 text-[11px] hover:bg-panel-2 disabled:opacity-50";
 
@@ -138,7 +139,8 @@ export function LiveBar() {
 
       {notices.length > 0 ? (
         <ul className="flex flex-col gap-0.5">
-          {notices.map(n => (
+          {/* 只露最新两条（硬线告警永远露着），其余折起来：一早上的买入提醒能占满半屏，把作战台挤到下面去 */}
+          {notices.filter((n, i) => showAll || i < 2 || n.severity === "critical").map(n => (
             <li
               key={n.id}
               className={
@@ -153,6 +155,13 @@ export function LiveBar() {
               {n.body ? <span className="text-ink-3">　{n.body}</span> : null}
             </li>
           ))}
+          {notices.length > 2 ? (
+            <li>
+              <button type="button" className="text-info text-[11px]" onClick={() => setShowAll(v => !v)}>
+                {showAll ? "收起" : `还有 ${notices.filter((n, i) => i >= 2 && n.severity !== "critical").length} 条`}
+              </button>
+            </li>
+          ) : null}
         </ul>
       ) : null}
     </div>

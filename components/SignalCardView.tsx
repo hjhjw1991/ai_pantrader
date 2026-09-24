@@ -5,6 +5,7 @@ import { KV, Tag } from "@/components/Panel";
 import { NoRows } from "@/components/EmptyState";
 import { gearClass } from "@/lib/ui/format";
 import type { PricingRef } from "@/lib/ui/adapters/overview";
+import { ChartLink } from "@/components/ChartLink";
 
 /**
  * 信号卡渲染。
@@ -50,7 +51,12 @@ export function GearLight({ env }: { env: EnvAssessment }) {
         </div>
       ) : null}
 
-      {env.factors.length > 0 ? <FactorTable factors={env.factors} /> : null}
+      {env.factors.length > 0 ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-ink-2 text-[12px]">因子读数（{env.factors.length}）</summary>
+          <FactorTable factors={env.factors} />
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -145,8 +151,7 @@ export function CandidateTable({
               <tr key={`${c.account}-${c.code}`}>
                 <td className="num text-ink">
                   {c.code}
-                  <a className="ml-1 text-info text-[10px]" title="在下方 K 线图里看结构位与计划价位"
-                    href={chartHref(c.code, { trigger: c.triggerPx, stop: c.stopPx, target: pricing?.get(c.code)?.targetPx ?? null })}>看图</a>
+                  <ChartLink code={c.code} levels={{ trigger: c.triggerPx, stop: c.stopPx, target: pricing?.get(c.code)?.targetPx ?? null }} />
                 </td>
                 <td>{c.name}</td>
                 <td>
@@ -187,15 +192,6 @@ export function CandidateTable({
   );
 }
 
-/** 页面内跳到 K 线图并带上计划价位（服务端从 searchParams 读） */
-export function chartHref(code: string, lv: { trigger?: number | null; stop?: number | null; target?: number | null; cost?: number | null }): string {
-  const q = new URLSearchParams({ chart: code });
-  for (const [k, v] of [["trig", lv.trigger], ["stop", lv.stop], ["tgt", lv.target], ["cost", lv.cost]] as const) {
-    if (typeof v === "number" && Number.isFinite(v)) q.set(k, String(v));
-  }
-  return `?${q.toString()}#chart`;
-}
-
 /** 目标价与盈亏比两格。参考值（正式组合没用它选股）标一个"参考"，盈亏比不到 1.5 标黄 */
 function PricingCells({ p }: { p: PricingRef | undefined }) {
   if (p === undefined) return (<><td className="num">—</td><td className="num">—</td></>);
@@ -220,16 +216,32 @@ export function ActionTag({ action }: { action: Candidate["action"] }) {
 }
 
 /** 数据覆盖率警告：有缺口就必须出现在卡上（契约注释里写死的要求） */
-export function CardWarnings({ card }: { card: SignalCard }) {
+export function CardWarnings({ card, collapsible = false }: { card: SignalCard; collapsible?: boolean }) {
   if (card.warnings.length === 0) return null;
+  const list = (
+    <ul className="mt-1 list-disc pl-4 text-[12px] text-ink-2 leading-6">
+      {card.warnings.map((w, i) => (
+        <li key={i}>{w}</li>
+      ))}
+    </ul>
+  );
+  // 折叠只折正文，条数一直露在外面：警告可以不细看，但不能看不见
+  if (collapsible) {
+    const gaps = card.warnings.filter(w => w.includes("缺口")).length;
+    return (
+      <details className="border border-warn/60 bg-warn/5 rounded-sm px-3 py-1.5">
+        <summary className="cursor-pointer text-warn font-medium">
+          信号卡警告 {card.warnings.length} 条{gaps > 0 ? <span className="ml-2 text-danger">含数据缺口 {gaps} 条</span> : null}
+          <span className="ml-2 text-ink-3 text-[11px] font-normal">点开看明细</span>
+        </summary>
+        {list}
+      </details>
+    );
+  }
   return (
     <div className="border border-warn/60 bg-warn/5 rounded-sm px-3 py-2">
       <div className="text-warn font-medium">信号卡警告 {card.warnings.length} 条</div>
-      <ul className="mt-1 list-disc pl-4 text-[12px] text-ink-2 leading-6">
-        {card.warnings.map((w, i) => (
-          <li key={i}>{w}</li>
-        ))}
-      </ul>
+      {list}
     </div>
   );
 }

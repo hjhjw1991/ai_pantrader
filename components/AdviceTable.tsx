@@ -2,7 +2,7 @@ import type { StockAdvice } from "@/lib/contracts/strategy";
 import { Num } from "@/components/Num";
 import { Tag } from "@/components/Panel";
 import { NoRows } from "@/components/EmptyState";
-import { chartHref } from "@/components/SignalCardView";
+import { ChartLink } from "@/components/ChartLink";
 
 /**
  * 持仓 / 观察池的逐只建议。
@@ -49,7 +49,7 @@ export function AdviceTable({ rows, kind, emptyWhat, emptyHint }: {
             <tr key={`${a.kind}-${a.code}`}>
               <td className="num text-ink">
                 {a.code}
-                <a className="ml-1 text-info text-[10px]" href={chartHref(a.code, { trigger: a.triggerPx, stop: a.stopPx, target: a.targetPx })}>看图</a>
+                <ChartLink code={a.code} levels={{ trigger: a.triggerPx, stop: a.stopPx, target: a.targetPx }} />
               </td>
               <td>{a.name ?? "—"}</td>
               <td><ActionCell a={a} /></td>

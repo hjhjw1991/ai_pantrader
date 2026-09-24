@@ -93,14 +93,17 @@ Every data source is a free, unofficial endpoint: they drop out, rate-limit, and
 
 ## Pages
 
-| Path | Contents |
-|---|---|
-| `/today` | Today's signal card: environment gear, target exposure, buy candidates, hard-line alerts |
-| `/positions` | Holdings, P&L, distance to stop, execution fill-back, **account management** |
-| `/watchpool` | Watchlist: each entry carries a trigger price, a stop price, and a one-line rationale |
-| `/ledger` | Prediction ledger and reconciliation: hit rate, error attribution, parameter suggestions |
-| `/lab` | Backtesting and walk-forward |
-| `/settings` | Source health, gaps, scheduler status, **strategy management**, parameter panel, import/export |
+There is one main page: `/`, the cockpit. The top row shows the environment gear, the sentiment-cycle stage and a shadow-book summary; the left column holds buy candidates (with target price and reward/risk), holding actions and watchlist advice; the right column is an interactive candlestick chart (any "看图" link switches the stock without reloading). Everything else is a drawer that slides in from the right, opened with a number key and closed with Esc; drawer URLs survive reloads and bookmarks:
+
+| Key | Path | Drawer |
+|---|---|---|
+| 1 | `/positions` | Holdings, P&L, distance to stop, execution fill-back, **account management** |
+| 2 | `/watchpool` | Watchlist: each entry carries a trigger price, a stop price, and a one-line rationale |
+| 3 | `/shadow` | Shadow book: per-combination results, graduation progress, pending switches, rollback |
+| 4 | `/market` | Market raw data: limit-up aggregates, board ladder, sector moves, dragon-tiger list |
+| 5 | `/ledger` | Prediction ledger and reconciliation: hit rate, error attribution, parameter suggestions |
+| 6 | `/lab` | Backtesting and walk-forward |
+| 7 | `/settings` | Source health, gaps, scheduler status, **strategy management**, parameter panel, import/export |
 
 Pages refresh themselves every 60 seconds, plus an SSE push — gear changes, new buy candidates, and hard-line breaks raise a desktop notification; routine data refreshes do not.
 
