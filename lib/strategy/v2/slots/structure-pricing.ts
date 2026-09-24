@@ -22,6 +22,26 @@ const round2 = (x: number): number => Math.round(x * 100) / 100;
 const round6 = (x: number): number => Math.round(x * 1e6) / 1e6;
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
+/**
+ * 目标位与盈亏比的纯计算。槽与界面共用：正式策略不带定价时，界面照同一套口径给"参考目标位"，
+ * 两处各算一遍必然漂移，而漂移的后果是影子盘里的盈亏比和页面上的对不上。
+ */
+export function structureTarget(
+  trig: number, stop: number | null, resistance: number | null, atr: number | null, atrK = 3,
+): { target: number; source: string; rr: number | null } | null {
+  let target: number | null = null, source = "";
+  // 前高是后复权价除回来的，带浮点尾巴（8.030673）。券商只收到分的价格，挂单前必须取整
+  if (resistance !== null && round2(resistance) > trig) {
+    target = round2(resistance); source = "前高";
+  } else if (atr !== null && atr > 0) {
+    target = round2(trig + atrK * atr);
+    source = resistance === null ? `上方无前高，ATR×${atrK}` : `前高 ${resistance} 已在触发价下方，ATR×${atrK}`;
+  }
+  if (target === null) return null;
+  const rr = stop !== null && trig > stop ? round6((target - trig) / (trig - stop)) : null;
+  return { target, source, rr };
+}
+
 export const 评估器_结构位定价: EvaluatorSlot = {
   kind: "评估器", name: "结构位定价", version: "1.0.0",
   evaluate(
@@ -41,21 +61,13 @@ export const 评估器_结构位定价: EvaluatorSlot = {
     const res = num(struct?.inputs?.["阻力"]);
     const atr = num(atrF?.inputs?.["ATR"]);
 
-    let target: number | null = null, source = "";
-    // 前高是后复权价除回来的，带浮点尾巴（8.030673）。券商只收到分的价格，挂单前必须取整
-    if (res !== null && round2(res) > trig) {
-      target = round2(res); source = "前高";
-    } else if (atr !== null && atr > 0) {
-      target = round2(trig + atrK * atr);
-      source = res === null ? `上方无前高，ATR×${atrK}` : `前高 ${res} 已在触发价下方，ATR×${atrK}`;
-    }
-    if (target === null) {
+    const st = structureTarget(trig, base.stopPx, res, atr, atrK);
+    if (st === null) {
       ctx.warn(`结构位定价：${row.code} 算不出目标位（无结构位也无 ATR），不进候选`);
       return null;
     }
+    const { target, source, rr } = st;
 
-    const stop = base.stopPx;
-    const rr = stop !== null && trig > stop ? round6((target - trig) / (trig - stop)) : null;
     if (rr === null) {
       ctx.warn(`结构位定价：${row.code} 所在账户（${base.account}）没有止损价，盈亏比无法判定，按最低优先级保留`);
     } else if (rr < minRr) {

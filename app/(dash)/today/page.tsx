@@ -9,6 +9,9 @@ import { fmtAmount, fmtPct, fmtTs, dirClass } from "@/lib/ui/format";
 import { ztStats, unavailable } from "@/lib/ui/derive";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
+import { cycleStage, pricingRefs, shadowOverview } from "@/lib/ui/adapters/overview";
+import { CycleStageLight } from "@/components/CycleStage";
+import { ShadowPanelBody } from "@/components/ShadowPanel";
 import {
   CandidateTable,
   CardMeta,
@@ -52,6 +55,12 @@ export default function TodayPage() {
     ? todaySignalCard(db, shanghaiTs(now), cfg.config)
     : unavailable(`策略配置不可用：${cfg.reason}`, cfg.needs);
 
+  const asOf = shanghaiTs(now);
+  const stage = cfg.available ? cycleStage(db, asOf, cfg.config) : null;
+  const timerInUse = cfg.available && cfg.config.槽位?.择时器?.用 === "五段状态机";
+  const pricing = cfg.available && card.available ? pricingRefs(db, asOf, cfg.config, card.card.candidates) : undefined;
+  const shadow = shadowOverview(db);
+
   const ztDate = latestZtDate(db);
   const zt = ztDate ? ztPool(db, ztDate) : [];
   const stats = ztStats(zt);
@@ -65,13 +74,20 @@ export default function TodayPage() {
   return (
     <div className="flex flex-col gap-3">
       {/* ── 环境档位灯 ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-4 gap-3">
         <Panel
           title="环境档位灯"
           hint="择时：进攻 0.7 / 中性 0.4 / 防守 0（防守 = 0 仓，不是轻仓）"
           right={tradeDay ? `交易日 ${tradeDay}` : "无日历"}
         >
           {!card.available ? <EmptyState u={card} /> : <GearLight env={card.card.env} />}
+        </Panel>
+
+        <Panel
+          title="情绪阶段"
+          hint="冰点 → 启动 → 发酵 → 高潮 → 退潮；名字人定，阈值由数据学"
+        >
+          {stage === null ? <EmptyState u={cfg as any} compact /> : !stage.available ? <EmptyState u={stage} compact /> : <CycleStageLight s={stage} timerInUse={timerInUse} />}
         </Panel>
 
         <Panel
@@ -152,6 +168,7 @@ export default function TodayPage() {
             <div className="mt-2">
               <CandidateTable
                 rows={card.card.candidates}
+                pricing={pricing}
                 emptyWhat="引擎已跑，今日无买入候选"
                 emptyHint="档位为防守（0 仓）或全部标的被过滤器否决时，这是正常且正确的结果"
               />
@@ -164,6 +181,15 @@ export default function TodayPage() {
             ) : null}
           </>
         )}
+      </Panel>
+
+      {/* ── 影子盘 ── */}
+      <Panel
+        title="影子盘"
+        hint="几套槽位组合用同一份输入并行出信号、各自结算；赢过正式组合才换上去"
+        right="命令行：pnpm shadow:switch"
+      >
+        {!shadow.available ? <EmptyState u={shadow} /> : <ShadowPanelBody v={shadow} />}
       </Panel>
 
       {/* ── 持仓动作 ── */}

@@ -4,6 +4,7 @@ import { Num } from "@/components/Num";
 import { KV, Tag } from "@/components/Panel";
 import { NoRows } from "@/components/EmptyState";
 import { gearClass } from "@/lib/ui/format";
+import type { PricingRef } from "@/lib/ui/adapters/overview";
 
 /**
  * 信号卡渲染。
@@ -102,10 +103,13 @@ export function CandidateTable({
   rows,
   emptyWhat,
   emptyHint,
+  pricing,
 }: {
   rows: Candidate[];
   emptyWhat: string;
   emptyHint?: string;
+  /** 目标位与盈亏比。给了才出这两列；正式组合不带定价时是界面补的参考值 */
+  pricing?: Map<string, PricingRef>;
 }) {
   if (rows.length === 0) return <NoRows what={emptyWhat} hint={emptyHint} />;
   return (
@@ -120,6 +124,8 @@ export function CandidateTable({
             <th className="text-right">触发价</th>
             <th className="text-right">止损价</th>
             <th className="text-right">计划亏损</th>
+            {pricing ? <th className="text-right" title="优先取前高，前高已被突破或没有前高时用触发价 + 3×ATR">目标价</th> : null}
+            {pricing ? <th className="text-right" title="(目标 − 触发) ÷ (触发 − 止损)">盈亏比</th> : null}
             <th className="text-right">建议仓位</th>
             <th className="text-right">评分</th>
             <th>逻辑</th>
@@ -152,6 +158,7 @@ export function CandidateTable({
                 <td className="num">
                   <Num v={plannedLoss} kind="ratio" dir />
                 </td>
+                {pricing ? <PricingCells p={pricing.get(c.code)} /> : null}
                 <td className="num">
                   <Num v={c.size} kind="ratio" />
                 </td>
@@ -173,6 +180,23 @@ export function CandidateTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** 目标价与盈亏比两格。参考值（正式组合没用它选股）标一个"参考"，盈亏比不到 1.5 标黄 */
+function PricingCells({ p }: { p: PricingRef | undefined }) {
+  if (p === undefined) return (<><td className="num">—</td><td className="num">—</td></>);
+  return (
+    <>
+      <td className="num" title={p.source}>
+        <Num v={p.targetPx} />
+        {!p.formal && p.targetPx !== null ? <span className="ml-1 text-ink-3 text-[10px]">参考</span> : null}
+      </td>
+      <td className={`num ${p.rrRatio !== null && p.rrRatio < 1.5 ? "text-warn" : p.rrRatio !== null && p.rrRatio >= 3 ? "text-up" : ""}`}
+        title={p.rrRatio === null ? "没有止损价，盈亏比算不出" : p.source}>
+        {p.rrRatio === null ? "—" : p.rrRatio.toFixed(2)}
+      </td>
+    </>
   );
 }
 
