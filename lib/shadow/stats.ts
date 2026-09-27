@@ -90,6 +90,34 @@ export function summarize(ts: Trade[]): Summary {
   };
 }
 
+/**
+ * 日度收益序列：同一基准日发出的推荐合成一个数，再按日排序。
+ *
+ * 为什么显著性检验只能吃这个、不能吃逐笔（2026-09-27 修正）：
+ * 同一天成交的几笔**不是独立观测** —— 它们踩的是同一段行情、同一个择时判断，
+ * 同涨同跌。按笔算 t 值会把"今天行情好"数成 N 份独立证据，于是
+ * 13,294 笔混在一起能算出 t = 7.08 这种数；换成 690 个交易日的口径，
+ * 同一个策略的日度 t 只有 1.66。前者是幻觉，后者才是真凭实据。
+ *
+ * 未触发的推荐记 0，不是跳过：那天挂单没成交，这笔机会就是没兑现
+ * （等价于按预测数均分资金、没成交的那份资金闲置）。跳过它们等于宣称
+ * "成交率不影响收益"，而挂单挂多低恰恰是靠成交率在起作用。
+ */
+export function dailyReturns(ts: Trade[]): number[] {
+  const byDay = new Map<string, number[]>();
+  for (const t of ts) {
+    if (t.status === "已结算") {
+      if (t.netPct === null) continue;
+      if (!byDay.has(t.baseDate)) byDay.set(t.baseDate, []);
+      byDay.get(t.baseDate)!.push(t.netPct);
+    } else if (!byDay.has(t.baseDate)) {
+      byDay.set(t.baseDate, []);                     // 未触发：占位 0，别让这天消失
+    }
+  }
+  return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([, xs]) => (xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length));
+}
+
 /** Welch t：a 的均值减 b 的均值，除以 sqrt(va/na + vb/nb)（样本方差，n−1） */
 export function welch(a: number[], b: number[]): { diff: number; t: number; se: number } | null {
   if (a.length < 2 || b.length < 2) return null;

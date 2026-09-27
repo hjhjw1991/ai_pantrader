@@ -3,7 +3,7 @@
  * 毕业门槛（④期3）直接读这里的数，口径必须钉死。
  */
 import { describe, it, expect } from "vitest";
-import { summarize, welch, maxDrawdown, type Trade } from "@/lib/shadow/stats";
+import { summarize, welch, maxDrawdown, dailyReturns, type Trade } from "@/lib/shadow/stats";
 
 const tr = (net: number, over: Partial<Trade> = {}): Trade => ({
   status: "已结算", netPct: net, exitDate: "2026-09-01", exitReason: "期满", stage: null, baseDate: "2026-08-25", ...over,
@@ -69,5 +69,63 @@ describe("welch（两组均值差的 t）", () => {
   });
   it("任一组少于 2 个 → null（算不出方差，不给一个假的 t）", () => {
     expect(welch([1], [1, 2, 3])).toBeNull();
+  });
+});
+
+/**
+ * 日度序列。毕业判定的两个 t 都改吃它（2026-09-27），因为同一天成交的几笔
+ * 不是独立观测 —— 按笔算 t 会把"今天行情好"数成 N 份证据。
+ */
+describe("dailyReturns（按基准日合成的独立观测）", () => {
+  it("同一天的几笔合成一个数，按日升序", () => {
+    const ts = [
+      tr(2, { baseDate: "2026-03-02" }), tr(4, { baseDate: "2026-03-02" }),
+      tr(-1, { baseDate: "2026-03-01" }),
+    ];
+    expect(dailyReturns(ts)).toEqual([-1, 3]);
+  });
+
+  it("未触发的那天记 0，不是跳过 —— 挂单没成交就是这笔机会没兑现", () => {
+    const ts = [
+      tr(5, { baseDate: "2026-03-01" }),
+      { ...tr(0), status: "未触发" as const, netPct: null, baseDate: "2026-03-02" },
+      tr(1, { baseDate: "2026-03-03" }),
+    ];
+    expect(dailyReturns(ts)).toEqual([5, 0, 1]);
+  });
+
+  it("整天没成交的日子仍在序列里：那天资金闲置，收益就是 0", () => {
+    const ts = [{ ...tr(0), status: "未触发" as const, netPct: null, baseDate: "2026-03-02" }];
+    expect(dailyReturns(ts)).toEqual([0]);
+  });
+
+  /**
+   * 这条是改口径的全部理由，不能被别的断言替代。
+   * 同样这批样本：逐笔看 60 笔、日度看 30 天，样本量差一倍，
+   * 而逐笔的标准误比日度小得多 —— 因为同日的两笔完全正相关，
+   * 逐笔把它们当成两条独立的证据了。t 值因此虚高一倍多。
+   */
+  it("同日相关让逐笔 t 虚高：同一批数据按笔算的 t 明显大于按天算", () => {
+    const ts: Trade[] = [];
+    for (let i = 0; i < 30; i++) {
+      const d = `2026-03-${String(i + 1).padStart(2, "0")}`;
+      const day = i % 2 === 0 ? 2 : -1;                 // 隔日好坏，日子之间有真差异
+      ts.push(tr(day - 0.2, { baseDate: d }), tr(day + 0.2, { baseDate: d }));
+    }
+    const perTrade = ts.map(t => t.netPct as number);
+    const perDay = dailyReturns(ts);
+    expect(perTrade).toHaveLength(60);
+    expect(perDay).toHaveLength(30);
+
+    const tVs0 = (xs: number[]) => {
+      const m = xs.reduce((s, x) => s + x, 0) / xs.length;
+      const sd = Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1));
+      return m / (sd / Math.sqrt(xs.length));
+    };
+    // 两边均值一样（都是 +0.5），样本量差一倍却得出不同的 t：
+    // 逐笔把同日的两笔当成两条独立证据，标准误被 √2 压小，于是 t 大了约 40%
+    expect(tVs0(perTrade)).toBeGreaterThan(2.4);
+    expect(tVs0(perDay)).toBeLessThan(2.0);
+    expect(tVs0(perTrade)).toBeGreaterThan(tVs0(perDay));
   });
 });

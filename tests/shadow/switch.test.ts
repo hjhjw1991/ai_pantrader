@@ -27,7 +27,22 @@ function weekdays(n: number): string[] {
   return out;
 }
 
-/** 每个变体每天两笔实盘样本：均值 mean（百分点），±0.5 的波动 */
+/**
+ * 由日期派生的确定性抖动（约 ±1.2）。
+ *
+ * 为什么必须有它：毕业判定的显著性 2026-09-27 起改吃**日度**序列 ——
+ * 同一天成交的几笔不是独立观测。造数据时只让"笔与笔之间"有波动、
+ * 每天的均值一模一样，日度方差就是 0，welch 的分母为 0，t 恒等于 0，
+ * 整组测试会以一种看起来像"实现有 bug"的方式红掉。
+ * 真实数据里日子与日子的差异远大于同日两笔之间的差异，fixture 必须反映这一点。
+ */
+function dayJitter(d: string): number {
+  let h = 0;
+  for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) % 1000;
+  return (h / 1000 - 0.5) * 2.4;
+}
+
+/** 每个变体每天两笔实盘样本：日均值 = mean + 当日抖动，笔间再 ±0.5 */
 function seedLive(db: TempDb["db"], variant: string, days: string[], mean: number, lock = LOCK): void {
   const p = db.prepare(
     `INSERT INTO shadow_pred (id, variant_id, source, base_date, decided_on, code, account, trigger_px, size, gear, strategy_id, slot_lock, created_at)
@@ -35,13 +50,18 @@ function seedLive(db: TempDb["db"], variant: string, days: string[], mean: numbe
   const o = db.prepare(
     `INSERT INTO shadow_outcome (pred_id, status, entry_date, entry_px, exit_date, exit_px, exit_reason, net_pct, settled_at)
      VALUES (?, '已结算', ?, 10, ?, 10, '期满', ?, 'x')`);
-  for (const d of days) {
-    for (const [code, net] of [["600001", mean + 0.5], ["600002", mean - 0.5]] as const) {
+  // 抖动先去均值：让这批样本的日期序列均值精确等于 mean，
+  // 否则"mean = 0.02"造出来的实际是 0.02 ± 一段抽样的日子偏移，用例就没法照着数字写断言
+  const js = days.map(dayJitter);
+  const mj = js.reduce((a, b) => a + b, 0) / js.length;
+  days.forEach((d, i) => {
+    const j = js[i] - mj;
+    for (const [code, off] of [["600001", 0.5], ["600002", -0.5]] as const) {
       const id = `${d}:${variant}:live:${code}`;
       p.run(id, variant, d, d, code, lock);
-      o.run(id, d, d, net);
+      o.run(id, d, d, mean + j + off);
     }
-  }
+  });
 }
 
 let t: TempDb;

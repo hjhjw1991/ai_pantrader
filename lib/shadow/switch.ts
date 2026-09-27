@@ -29,7 +29,7 @@ import { writeSlotsInText, writeParamInText, bumpPatch } from "@/lib/strategy/lo
 import { snapshotStrategy, hasSnapshot } from "@/lib/ledger/strategy-snapshot";
 import { pushNotification } from "@/lib/ui/notify";
 import { shanghaiTs } from "@/lib/data/clock";
-import { maxDrawdown, welch, type Trade } from "@/lib/shadow/stats";
+import { dailyReturns, maxDrawdown, welch, type Trade } from "@/lib/shadow/stats";
 
 /**
  * 毕业门槛。
@@ -56,6 +56,13 @@ import { maxDrawdown, welch, type Trade } from "@/lib/shadow/stats";
  *
  * 一句话：**毕业要证明的是「能赚钱」，不是「比另一个亏得少」。**
  * 样本量只是基础功防线；真正拦住"换个亏法"的是下面那三条绝对门槛。
+ *
+ * 2026-09-27 补一条口径修正：**两个 t 都改吃日度序列，不再吃逐笔**。
+ * 同一天成交的几笔不是独立观测（同一段行情、同一个择时判断，同涨同跌），
+ * 按笔算 t 会把"今天行情好"数成 N 份独立证据 —— 13,294 笔混在一起能算出
+ * t = 7.08，换成 690 个交易日的口径同一个策略只有 t = 1.66。前者是幻觉。
+ * 门槛值不用改（门槛说的是"要多大的 t"，不是"t 怎么算"），
+ * 但达到它的难度实实在在变大了，这正是它该有的样子。
  */
 export const GRADUATION = {
   minSettled: 120,
@@ -191,6 +198,9 @@ export interface GradCheck {
   days: number;
   settled: number;
   meanNet: number | null;
+  /** 日度口径的平均收益（百分点/日）。显著性检验用的是它，给人看的也是它 */
+  dailyMean: number | null;
+  incumbentDailyMean: number | null;
   incumbentSettled: number;
   incumbentMean: number | null;
   diff: number | null;
@@ -230,20 +240,23 @@ export function checkGraduation(db: Db, challengerId: string, incumbentId: strin
   const common = [...a.days.keys()].filter(d => b.days.has(d)).sort();
   const ta = common.flatMap(d => a.days.get(d)!), tb = common.flatMap(d => b.days.get(d)!);
   const na = settledNets(ta), nb = settledNets(tb);
-  const w = welch(na, nb);
+  // 显著性只认日度序列（见 GRADUATION 的口径修正说明）
+  const da = dailyReturns(ta), dbb = dailyReturns(tb);
+  const w = welch(da, dbb);
   const ddA = maxDrawdown(ta), ddB = maxDrawdown(tb);
   const ma = avg(na), mb = avg(nb);
+  const dma = avg(da), dmb = avg(dbb);
 
-  const tVs0 = tStatVsZero(na);
+  const tVs0 = tStatVsZero(da);
 
   const f: string[] = [];
   if (na.length < GRADUATION.minSettled) f.push(`已结算 ${na.length} 笔，要 ≥ ${GRADUATION.minSettled}`);
   if (common.length < GRADUATION.minDays) f.push(`共同交易日 ${common.length} 天，要 ≥ ${GRADUATION.minDays}`);
-  if (ma === null || mb === null || !(ma > mb)) f.push("期望没有高过在任者");
+  if (dma === null || dmb === null || !(dma > dmb)) f.push("日度期望没有高过在任者");
   if (w === null || w.t < GRADUATION.minT) f.push(`t = ${w === null ? "—" : w.t.toFixed(2)}，要 ≥ ${GRADUATION.minT}`);
   // ── 绝对门槛：赢了在任者不等于赚钱 ──
-  if (ma !== null && !(ma > 0))
-    f.push(`期望 ${ma.toFixed(3)}%/笔 不为正 —— 比在任者亏得少并不是赚钱`);
+  if (dma !== null && !(dma > 0))
+    f.push(`日度期望 ${dma.toFixed(3)}% 不为正 —— 比在任者亏得少并不是赚钱`);
   if (tVs0 !== null && tVs0 < GRADUATION.minAbsT)
     f.push(`对 0 检验 t = ${tVs0.toFixed(2)}，要 ≥ ${GRADUATION.minAbsT}（期望还没被证实为正）`);
   if (ddA !== null && ddA > GRADUATION.maxDrawdown)
@@ -255,7 +268,8 @@ export function checkGraduation(db: Db, challengerId: string, incumbentId: strin
 
   return {
     variant: ch.id, name: ch.name, days: common.length,
-    settled: na.length, meanNet: ma, incumbentSettled: nb.length, incumbentMean: mb,
+    settled: na.length, meanNet: ma, dailyMean: dma, incumbentDailyMean: dmb,
+    incumbentSettled: nb.length, incumbentMean: mb,
     diff: w?.diff ?? null, t: w?.t ?? null, maxDrawdown: ddA, incumbentMaxDrawdown: ddB,
     passed: f.length === 0, failures: [...new Set(f)],
   };
@@ -281,13 +295,15 @@ export function graduationBoard(db: Db, incumbentId: string, lock: Record<string
   }
 
   /**
-   * 排序：**合格者在前，合格者内部按期望（%/笔）从高到低**。
+   * 排序：**合格者在前，合格者内部按日度期望（%/日）从高到低**。
    * 目标是挑「期望最大、最可能赚钱」的那套，所以钱数排第一；
    * t 只用来给同期望的解并列 —— 它回答的是「可信不可信」，不是「赚得多不多」。
+   *
+   * 用日度而不是逐笔：逐笔均值会被"哪天发得多"加权，日度才是每等份时间赚多少。
    */
   return checks.sort((x, y) =>
     Number(y.passed) - Number(x.passed)
-    || (y.meanNet ?? -Infinity) - (x.meanNet ?? -Infinity)
+    || (y.dailyMean ?? -Infinity) - (x.dailyMean ?? -Infinity)
     || (y.t ?? -Infinity) - (x.t ?? -Infinity)
     || (x.variant < y.variant ? -1 : 1));
 }
@@ -363,7 +379,8 @@ function rewriteStrategy(db: Db, cur: Current, slots: SlotConfig, comment: strin
 
 const fmtPct = (x: number | null): string => (x === null ? "—" : `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`);
 const evidenceLine = (g: GradCheck): string =>
-  `${g.days} 个共同交易日、${g.settled} 笔：期望 ${fmtPct(g.meanNet)}/笔 对在任者 ${fmtPct(g.incumbentMean)}（t = ${g.t?.toFixed(2) ?? "—"}），` +
+  `${g.days} 个共同交易日、${g.settled} 笔：日度期望 ${fmtPct(g.dailyMean)}/日 对在任者 ${fmtPct(g.incumbentDailyMean)}` +
+  `（逐笔 ${fmtPct(g.meanNet)}/笔 对 ${fmtPct(g.incumbentMean)}，t = ${g.t?.toFixed(2) ?? "—"}），` +
   `最大回撤 ${g.maxDrawdown?.toFixed(1) ?? "—"} 对 ${g.incumbentMaxDrawdown?.toFixed(1) ?? "—"}`;
 
 /**
