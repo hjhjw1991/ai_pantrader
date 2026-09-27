@@ -131,6 +131,53 @@ describe("collectDaily", () => {
     const g = db.prepare("SELECT * FROM data_gap").get() as any;
     expect(g.recoverable).toBe(1);
   });
+
+  /**
+   * 回归：2026-09-27 实测太极实业 600667，2026-09-23 真实收盘 20.59
+   * 在决策卡 K 线上显示成 119.50（× 5.80）。
+   *
+   * 前复权价 = 后复权价 ÷ **最新一根的复权因子**。新一根若落回默认 1.0，
+   * 归一化等于没做，历史整段按后复权价原样显示 —— 错的是一整张图，不是一根。
+   */
+  it("新一根日线顺延上一根的复权因子，不落回 1.0", async () => {
+    db.prepare(
+      `INSERT INTO kline_daily (code,date,o,h,l,c,vol,amount,adj_factor)
+       VALUES ('601012','2026-07-30',1,2,0.5,1.5,100,NULL,5.8038)`
+    ).run();
+    const bars = JSON.stringify([
+      { day: "2026-07-31", open: "1", high: "2", low: "0.5", close: "1.5", volume: "100" },
+    ]);
+    await collectDaily(db, clientReturning(bars) as any, ["601012"], 10);
+    const rows = db
+      .prepare("SELECT date, adj_factor FROM kline_daily ORDER BY date")
+      .all() as any[];
+    expect(rows.map((r) => r.adj_factor)).toEqual([5.8038, 5.8038]);
+  });
+
+  it("重采同一天更新价格但不覆盖既有复权因子", async () => {
+    db.prepare(
+      `INSERT INTO kline_daily (code,date,o,h,l,c,vol,amount,adj_factor)
+       VALUES ('601012','2026-07-31',1,2,0.5,1.5,100,NULL,5.8038)`
+    ).run();
+    const bars = JSON.stringify([
+      { day: "2026-07-31", open: "9", high: "9.5", low: "8", close: "8.8", volume: "200" },
+    ]);
+    await collectDaily(db, clientReturning(bars) as any, ["601012"], 10);
+    const row = db
+      .prepare("SELECT c, adj_factor FROM kline_daily WHERE date = '2026-07-31'")
+      .get() as any;
+    expect(row.c).toBe(8.8);
+    expect(row.adj_factor).toBe(5.8038);
+  });
+
+  it("首根日线没有上一根可顺延时才用默认 1.0", async () => {
+    const bars = JSON.stringify([
+      { day: "2026-07-31", open: "1", high: "2", low: "0.5", close: "1.5", volume: "100" },
+    ]);
+    await collectDaily(db, clientReturning(bars) as any, ["601012"], 10);
+    const row = db.prepare("SELECT adj_factor FROM kline_daily").get() as any;
+    expect(row.adj_factor).toBe(1.0);
+  });
 });
 
 describe("collectLhb", () => {

@@ -18,8 +18,24 @@ const NO_DATA_ALERT_MIN_BATCH = 100;
 /**
  * 日线。可回补（新浪 scale=240 一次 1023 根，约到 2022-05），
  * 所以失败记的是 recoverable gap，夜间 job 会重来。
- * 注：新浪日线不复权，adj_factor 保留既有值（默认 1.0），
- * 复权因子计算属于 M0 之外（见 spec R1）。
+ *
+ * 注：新浪日线不复权，adj_factor 保留既有值，复权因子计算属于 M0 之外（见 spec R1）。
+ *
+ * **新一根的因子必须向前顺延，不能落回默认 1.0**（2026-09-27 修）。
+ * 复权因子是台阶函数：两次除权之间恒定不变。所以"上一根是什么因子，今天就是什么因子"。
+ * 但回填任务（collectors/adjust-factor.ts）的 tail 语句是 `WHERE date >= 起点`，
+ * 只覆盖**它跑的那一刻已存在**的行；之后日线采集新插入的行轮不到它，
+ * 于是最新一根永远是 1.0，直到下一次回填——而回填一旦因断网没跑成，就一直挂着。
+ *
+ * 后果不是"最新一根偏一点"，而是**整张图全错**：
+ * 前复权价 = 后复权价 ÷ **最新一根的因子**（见 lib/ui/adapters/chart.ts）。
+ * 基准因子被写成 1，等于没做归一化，历史整段按后复权价原样显示。
+ * 实测太极实业 600667：2026-09-23 真实收盘 20.59，图上显示成 119.50（× 5.80），
+ * 而 9-24 那根因为因子恰好是 1 反而显示成对的 19.41 —— 一眼看上去像"只有一天是对的"。
+ * 同一处还会污染结构位与 ATR（factors/structure.ts 也用最新一根的因子做归一化）。
+ *
+ * COALESCE 是短路求值的：绝大多数行是既有行，第一个子查询就命中，
+ * 顺延子查询不会执行，没有额外开销。
  */
 export async function collectDaily(
   db: Db, client: SourceClient, codes: string[], datalen: number
@@ -27,7 +43,10 @@ export async function collectDaily(
   const stmt = db.prepare(
     `INSERT OR REPLACE INTO kline_daily (code, date, o, h, l, c, vol, amount, adj_factor)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
-       (SELECT adj_factor FROM kline_daily WHERE code = ? AND date = ?), 1.0))`
+       (SELECT adj_factor FROM kline_daily WHERE code = ? AND date = ?),
+       (SELECT adj_factor FROM kline_daily WHERE code = ? AND date < ?
+          ORDER BY date DESC LIMIT 1),
+       1.0))`
   );
   let written = 0; const failed: string[] = []; const noData: string[] = [];
 
@@ -37,7 +56,7 @@ export async function collectDaily(
       db.transaction(() => {
         for (const b of bars) {
           const d = b.ts.slice(0, 10);
-          stmt.run(code, d, b.o, b.h, b.l, b.c, b.vol, null, code, d);
+          stmt.run(code, d, b.o, b.h, b.l, b.c, b.vol, null, code, d, code, d);
         }
       })();
       written += bars.length;
