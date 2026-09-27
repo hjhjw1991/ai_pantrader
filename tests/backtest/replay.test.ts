@@ -11,7 +11,7 @@ const D = fakeTradingDays("2026-03-02", 6); // 03-02,03,04,05,06,09
 /**
  * 主力样本：D1 收盘 10.5，D2 跳空开在 11。
  * 这个跳空是 look-ahead 的照妖镜 —— 用同 bar 收盘决策 + 同 bar 收盘成交，会以 10.5 成交；
- * 正确实现只能拿到次日开盘 11（含滑点 11.022）。
+ * 正确实现只能拿到次日开盘 11（含滑点，倍数见 DEFAULT_CONSTRAINTS）。
  */
 const BARS = [
   makeBar("600000", D[0], 10, 10, 10, 10),
@@ -62,7 +62,7 @@ describe("重放顺序：昨日决策、今日成交", () => {
     const t = out.detail.trades[0];
     expect(t.decidedOn).toBe(D[1]);
     expect(t.filledOn).toBe(D[2]);
-    expect(t.px).toBeCloseTo(11 * 1.002, 10);
+    expect(t.px).toBeCloseTo(11 * (1 + DEFAULT_CONSTRAINTS.slippage), 10);
     // 同 bar 收盘成交会是 10.5 —— 一旦实现退化成那样，这两条会红
     expect(t.px).not.toBeCloseTo(10.5, 3);
     expect(t.px).toBeGreaterThan(10.5);
@@ -77,7 +77,8 @@ describe("重放顺序：昨日决策、今日成交", () => {
     const eq = Object.fromEntries(out.report.equity.map((p) => [p.date, p.equity]));
     expect(eq[D[0]]).toBe(100_000);
     expect(eq[D[1]]).toBe(100_000);
-    const cash = 100_000 - 11.022 * 4700 - 11.022 * 4700 * DEFAULT_CONSTRAINTS.feeRate;
+    const fillPx = 11 * (1 + DEFAULT_CONSTRAINTS.slippage);
+    const cash = 100_000 - fillPx * 4700 - fillPx * 4700 * DEFAULT_CONSTRAINTS.feeRate;
     expect(eq[D[2]]).toBeCloseTo(cash + 4700 * 11.2, 6);
     const p2 = out.report.equity.find((p) => p.date === D[2])!;
     expect(p2.position).toBeCloseTo((4700 * 11.2) / p2.equity, 10);
@@ -122,9 +123,11 @@ describe("T+1 在引擎层也成立", () => {
     expect(c.exitDate).toBe(D[3]); // 不是 D[2]
     expect(c.holdDays).toBe(1);
     expect(c.qty).toBe(4700);
-    // 11.2*0.998 卖出，扣双边费用后的净盈亏
-    expect(c.exitPx).toBeCloseTo(11.2 * 0.998, 10);
-    expect(c.pnl).toBeCloseTo(595.680444, 4);
+    // 11.2 减滑点卖出，扣双边费用后的净盈亏
+    expect(c.exitPx).toBeCloseTo(11.2 * (1 - DEFAULT_CONSTRAINTS.slippage), 10);
+    // 锁死具体数字（不是照抄实现）：11×(1+s) 买、11.2×(1−s) 卖，各扣 max(minFee, 金额×feeRate)
+    // 2026-09-27 成本口径校准后由 595.680444 改为 783.490470；再校准时按上面这条算式重算
+    expect(c.pnl).toBeCloseTo(783.49047, 4);
   });
 
   it("减仓卖一半，取整到一手", () => {
@@ -205,7 +208,7 @@ describe("幸存者偏差：标的池只来自 view.universe()（spec §10.2）"
     const c = out.detail.closed.find((t) => t.code === DELIST);
     expect(c).toBeDefined();
     expect(c!.exitDate).toBe(D[3]);
-    expect(c!.exitPx).toBeCloseTo(11.2 * 0.998, 10);
+    expect(c!.exitPx).toBeCloseTo(11.2 * (1 - DEFAULT_CONSTRAINTS.slippage), 10);
     expect(out.report.equity[out.report.equity.length - 1].position).toBe(0);
   });
 });

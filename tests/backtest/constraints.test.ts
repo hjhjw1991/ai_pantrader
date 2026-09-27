@@ -174,18 +174,21 @@ describe("滑点与双边费用", () => {
   it("买入加滑点、卖出减滑点", () => {
     const m = normalMarket();
     // 限价 10 低于开盘 10.1 且当日最低 9.9 触及 → 按限价成交
+    // 从常量推导而不是抄死数字：滑点 / 费率是会被重新校准的参数（2026-09-27 校准过一次），
+    // 测试里写死 1.002 的话，每次校准都要回来改一遍魔数，而改错的那个数会伪装成"实现有 bug"
     const buy = evaluateFill({ code: "600000", side: "buy", qty: 1000, limitPx: 10 }, m, DEFAULT_CONSTRAINTS);
-    expect(buy.px).toBeCloseTo(10 * 1.002, 6);
+    expect(buy.px).toBeCloseTo(10 * (1 + DEFAULT_CONSTRAINTS.slippage), 6);
     const sell = evaluateFill({ code: "600000", side: "sell", qty: 1000, limitPx: 10.2 }, m, DEFAULT_CONSTRAINTS);
-    expect(sell.px).toBeCloseTo(10.2 * 0.998, 6);
+    expect(sell.px).toBeCloseTo(10.2 * (1 - DEFAULT_CONSTRAINTS.slippage), 6);
   });
 
   it("费用双边收，且有最低佣金", () => {
-    expect(roundFee(100_000, DEFAULT_CONSTRAINTS)).toBeCloseTo(130, 6);
-    expect(roundFee(1_000, DEFAULT_CONSTRAINTS)).toBe(5); // 1.3 < minFee
+    expect(roundFee(100_000, DEFAULT_CONSTRAINTS)).toBeCloseTo(100_000 * DEFAULT_CONSTRAINTS.feeRate, 6);
+    expect(roundFee(1_000, DEFAULT_CONSTRAINTS)).toBe(DEFAULT_CONSTRAINTS.minFee); // 按比例算低于最低佣金
     const m = normalMarket();
     const buy = evaluateFill({ code: "600000", side: "buy", qty: 1000, limitPx: 10 }, m, DEFAULT_CONSTRAINTS);
-    expect(buy.fee).toBeCloseTo(Math.max(5, 10 * 1.002 * 1000 * DEFAULT_CONSTRAINTS.feeRate), 6);
+    expect(buy.fee).toBeCloseTo(
+      Math.max(DEFAULT_CONSTRAINTS.minFee, 10 * (1 + DEFAULT_CONSTRAINTS.slippage) * 1000 * DEFAULT_CONSTRAINTS.feeRate), 6);
     const sell = evaluateFill({ code: "600000", side: "sell", qty: 1000, limitPx: 10.2 }, m, DEFAULT_CONSTRAINTS);
     expect(sell.fee).toBeGreaterThan(0);
   });
