@@ -66,7 +66,9 @@ const baseline = (struct: Parameters<typeof stubs>[0]) =>
   createV2Engine({ registry: stubRegistry(stubs(struct)), slots: createSlotRegistry([...BASELINE_SLOTS]) })(input());
 
 const LOOSE = { 最低盈亏比: 0 };
-// 夹具里 600183 在卫星账户（触发 10.89 / 止损 10.35），300750 在核心账户（没配止损）
+// 夹具里 600183 在卫星账户（昨收 11，触发 11×(1+相对昨收) / 止损 = 触发×0.95），300750 在核心账户（没配止损）
+// 注意触发价随 买点.相对昨收 变（2026-09-27 起默认 -3% → 10.67），
+// 下面"前高低于触发价"那条用的是 10.8，改折让时要连带检查它是否还真的低于触发价。
 
 describe("结构位定价", () => {
   it("上方有前高：目标 = 前高，盈亏比 = (目标 − 触发) / (触发 − 止损)", () => {
@@ -85,8 +87,14 @@ describe("结构位定价", () => {
   });
 
   it("前高低于触发价（买入即突破它）→ 同样改用 ATR 兜底，不拿一个已经被突破的位置当目标", () => {
-    const card = run({ "600183": { 阻力: 10.8, ATR: 0.5 }, "300750": { 阻力: 30, ATR: 1 } }, LOOSE);
-    const c = card.candidates.find(x => x.code === "600183")!;
+    // 阻力必须**低于**触发价这条才走得通：触发价随 买点.相对昨收 变，
+    // 写死 10.8 在折让从 -1% 改到 -3% 之后就失效了（10.8 变成高于 10.67，走的还是前高分支，
+    // 断言于是以一种看不出根因的方式红掉）。这里按实际触发价推一个必然更低的阻力。
+    const card = run({ "600183": { 阻力: 14, ATR: 0.5 }, "300750": { 阻力: 30, ATR: 1 } }, LOOSE);
+    const trig = card.candidates.find(x => x.code === "600183")!.triggerPx!;
+    const card2 = run({ "600183": { 阻力: trig - 0.5, ATR: 0.5 }, "300750": { 阻力: 30, ATR: 1 } }, LOOSE);
+    const c = card2.candidates.find(x => x.code === "600183")!;
+    expect(c.triggerPx).toBeCloseTo(trig, 9);
     expect(c.targetPx!).toBeGreaterThan(c.triggerPx!);
     expect(c.thesis).toMatch(/ATR×3/);
   });

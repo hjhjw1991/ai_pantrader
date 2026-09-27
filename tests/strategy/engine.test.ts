@@ -183,8 +183,16 @@ describe("候选池", () => {
       y.replace("  主线识别:", `  买点: ${line}
   主线识别:`);
 
-    it("默认按昨收 -1% 挂，不再压 MA5 —— 压了就等于挂在市价下方 4.5%", () => {
-      expect(trig()).toBe(10.89);          // 11 × 0.99
+    it("默认按昨收 -3% 挂，不再压 MA5 —— 2026-09-27 由 19,820 条影子盘预测实测定出", () => {
+      expect(trig()).toBe(10.67);          // 11 × 0.97
+    });
+
+    it("默认值与策略 YAML 保持一致 —— 引擎默认与 default.yaml 各写一份，漂移了就没人知道哪份生效", () => {
+      const fs = require("node:fs");
+      const yaml = fs.readFileSync("config/strategies/default.yaml.example", "utf8") as string;
+      const m = /买点:\s*\{\s*相对昨收:\s*(-?[\d.]+)/.exec(yaml);
+      expect(m).not.toBeNull();
+      expect(Number(m![1])).toBe(-0.03);
     });
 
     it("不高于MA5=true 复现旧行为 —— 参数还在，只是不再是默认", () => {
