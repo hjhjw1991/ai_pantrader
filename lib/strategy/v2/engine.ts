@@ -97,6 +97,31 @@ export function createV2Engine(deps: V2Deps) {
     const tm = pick<TimerSlot>(deps.slots, "择时器", sc.择时器 ?? BASELINE_CHOICE.择时器);
     const { env, stage } = tm.slot.assess(ctx, tm.params, mainline);
 
+    /**
+     * 准入闸门：仓位档位管"买多少"，这道闸管"要不要买"。
+     *
+     * 不配 = 不限制，与 2026-09 之前的行为一致（parity 测试据此成立）。
+     * 判不出阶段的择时器（baseline 三档阈值）遇到配了 开仓阶段 的情况按
+     * "未判定不等于通过"处理：不开仓，且在卡片上把原因说出来 ——
+     * 悄悄放行等于宣称"查过阶段了"，那是最危险的假阳性。
+     */
+    const gate = config.择时;
+    const gears = gate.开仓档位;
+    const stages = gate.开仓阶段;
+    const gateBlocks: string[] = [];
+    if (gears !== undefined && !gears.includes(env.gear)) {
+      gateBlocks.push(`今日档位 ${env.gear} 不在准入档位 ${gears.join("/")} 内`);
+    }
+    if (stages !== undefined) {
+      if (stage === undefined) {
+        gateBlocks.push(`配了 开仓阶段 ${stages.join("/")}，但今日择时器没判出情绪阶段 —— 未判定不等于通过`);
+      } else if (!stages.includes(stage)) {
+        gateBlocks.push(`今日阶段 ${stage} 不在准入阶段 ${stages.join("/")} 内`);
+      }
+    }
+    for (const m of gateBlocks) warn(`准入闸门：${m}，不开新仓（已有持仓照常给出离场判断）`);
+    const mayOpen = gateBlocks.length === 0;
+
     const heldCodes = new Set(input.positions.map(p => p.code));
     if (input.positions.length > 0) {
       /**
@@ -111,7 +136,7 @@ export function createV2Engine(deps: V2Deps) {
 
     /* ③ 候选源：按配置顺序扫，合并去重 */
     let candidates: Candidate[] = [];
-    if (env.gear !== "防守") {
+    if (env.gear !== "防守" && mayOpen) {
       const seen = new Set<string>();
       const pool: PoolRow[] = [];
       for (const choice of sc.候选源 ?? BASELINE_CHOICE.候选源) {
@@ -148,7 +173,8 @@ export function createV2Engine(deps: V2Deps) {
       (a.account < b.account ? -1 : a.account > b.account ? 1 : 0) || (a.code < b.code ? -1 : 1));
     const holdings = sorted.map(p => ex.slot.decide(ctx, ex.params, p, env));
 
-    const advice = input.advice === undefined ? undefined : buildAdvice(deps, input, ctx, date, env.gear, mainline.names, sc, candidates, holdings);
+    const advice = input.advice === undefined ? undefined
+      : buildAdvice(deps, input, ctx, date, env.gear, mainline.names, sc, candidates, holdings, gateBlocks);
 
     return {
       // 时间只来自视图。这里读一次系统时钟，回测与实盘就走了两条不同的路径
@@ -174,7 +200,7 @@ export function createV2Engine(deps: V2Deps) {
  */
 function buildAdvice(
   deps: V2Deps, input: V2Input, ctx: SlotCtx, date: string, gear: string, mainlines: string[],
-  sc: SlotConfig, candidates: Candidate[], holdings: Candidate[],
+  sc: SlotConfig, candidates: Candidate[], holdings: Candidate[], gateBlocks: string[],
 ): StockAdvice[] {
   let sink: string[] = [];
   const quiet = makeRunner(deps.registry, input.config, input.view, date, m => { sink.push(m); });
@@ -228,11 +254,12 @@ function buildAdvice(
     const c = ev.slot.evaluate(qctx, ev.params, { code: w.code, sector, lbc: 0, sealAmt: 0, source: "观察池" }, m ?? sector ?? "未知");
     const reasons: string[] = [];
     if (gear === "防守") reasons.push("今日防守档（0 仓），不开新仓");
+    reasons.push(...gateBlocks.map(x => `准入闸门：${x}`));
     if (m === null) reasons.push(sector === null ? "查不到行业，判断不了在不在主线上" : `不在今日主线（${sector}）`);
     // 按完整代码匹配（前后不能再接数字），免得一条讲别的票的告警恰好含这串数字
     const own = new RegExp(`(^|\\D)${w.code}(\\D|$)`);
     reasons.push(...sink.filter(x => own.test(x) || x.startsWith("过滤器未判定")).map(x => x.replace(`${w.code} `, "")));
-    const ok = c !== null && m !== null && gear !== "防守";
+    const ok = c !== null && m !== null && gear !== "防守" && gateBlocks.length === 0;
     out.push({
       ...base,
       action: ok ? "可买（到触发价）" : c === null ? "不买" : "暂不买",
