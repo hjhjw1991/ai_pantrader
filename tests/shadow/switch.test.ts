@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkGraduation, runSwitchCycle, approveSwitch, rejectSwitch, rollbackSwitch,
-  autoSwitchAllowed, switchStatus, incumbentOf,
+  autoSwitchAllowed, switchStatus, incumbentOf, GRADUATION, bonferroniT,
 } from "@/lib/shadow/switch";
 import { seedVariants, addVariant, retireVariant } from "@/lib/shadow/book";
 import { writeSlotsInText, bumpPatch } from "@/lib/strategy/loader";
@@ -105,13 +105,54 @@ describe("毕业判定", () => {
     expect(g.failures.join()).toMatch(/共同交易日 10 天/);
   });
 
-  it("≥30 笔、≥20 天、显著更好、回撤不更深 → 毕业", () => {
-    const days = weekdays(20);
+  it("≥120 笔、≥45 天、显著更好、回撤不更深 → 毕业", () => {
+    const days = weekdays(60);          // 每天两笔 → 120 笔
     seedLive(t.db, "baseline", days, -1);
     seedLive(t.db, "pricing", days, 1);
     const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
-    expect(g).toMatchObject({ passed: true, days: 20, settled: 40 });
-    expect(g.t!).toBeGreaterThan(2);
+    expect(g).toMatchObject({ passed: true, days: 60, settled: 120 });
+    expect(g.t!).toBeGreaterThan(2.5);
+  });
+
+  /**
+   * 2026-09-27 补：这是回放置信的下最要紧的一条。
+   * 旧判定只问「有没有高过在任者」，于是一个 −0.30%/笔 的挑战者
+   * 能打赢 −0.63%/笔 的在任者而毕业 —— 两个都亏钱，却判成「更好」。
+   */
+  it("期望不为正 → 再赢在任者也不毕业（比对手亏得少不等于赚钱）", () => {
+    const days = weekdays(60);
+    seedLive(t.db, "baseline", days, -2);   // 在任者 −2%/笔
+    seedLive(t.db, "pricing", days, -0.5);  // 挑战者 −0.5%/笔，确实赢很多
+    const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+    expect(g.passed).toBe(false);
+    expect(g.failures.join()).toMatch(/不为正/);
+    // 相对那一条是过的，唯独绝对门槛拦住了它
+    expect(g.failures.join()).not.toMatch(/期望没有高过在任者/);
+  });
+
+  it("个体效应的显著性门槛：赢了在任者但没被证实为正，仍不毕业", () => {
+    const days = weekdays(60);
+    seedLive(t.db, "baseline", days, -1);
+    seedLive(t.db, "pricing", days, 0.02); // 勉强为正，达不到对 0 的 minAbsT
+    const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+    expect(g.meanNet!).toBeGreaterThan(0);
+    expect(g.passed).toBe(false);
+    expect(g.failures.join()).toMatch(/对 0 检验/);
+  });
+
+  it("回撤超过绝对上限 → 不毕业（在任者更深也不行）", () => {
+    const days = weekdays(60);
+    seedLive(t.db, "baseline", days, -1);
+    seedLive(t.db, "pricing", days, 1);
+    const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+    expect(g.maxDrawdown!).toBeLessThan(GRADUATION.maxDrawdown);  // 这条样本本来很小 → 能过
+    expect(g.passed).toBe(true);
+  });
+
+  it("Bonferroni：多个候选同场参评时门槛抬高", () => {
+    expect(bonferroniT(1)).toBe(GRADUATION.minT);
+    expect(bonferroniT(9)).toBeGreaterThan(bonferroniT(2));
+    expect(bonferroniT(9)).toBeGreaterThan(2.7);   // 九个候选的标准校正门槛约 2.77
   });
 
   it("只比共同的日子：挑战者多出来的日子不算", () => {
@@ -130,7 +171,7 @@ describe("毕业判定", () => {
 });
 
 describe("切换流程", () => {
-  const days = weekdays(20);
+  const days = weekdays(60);
   const o = () => ({ path: file, now: "2026-02-10 22:30:00" });
 
   it("过线 → 提案待批并通知；批准 → 写槽位、升版本，在任者变成挑战者", () => {

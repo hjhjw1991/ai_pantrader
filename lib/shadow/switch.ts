@@ -31,7 +31,67 @@ import { pushNotification } from "@/lib/ui/notify";
 import { shanghaiTs } from "@/lib/data/clock";
 import { maxDrawdown, welch, type Trade } from "@/lib/shadow/stats";
 
-export const GRADUATION = { minSettled: 30, minDays: 20, minT: 2 } as const;
+/**
+ * 毕业门槛。
+ *
+ * 2026-09-27 依据 13,294 笔影子盘回放（2023-11 → 2026-09）实证收紧，
+ * 逐项的数字依据见 memory 2026-09-27 与 docs/ 下的回放复盘。改动前后：
+ *
+ * ┌ 项 ──────────┬── 前 ─┬── 后 ─┬── 为什么 ──────────────────────────────┐
+ * │ minSettled   │  30   │  120  │ 单笔净收益标准差约 8.7%。30 笔的标准误   │
+ * │              │       │       │ 就有 ±1.6pp，而九个变体的实际极差只有    │
+ * │              │       │       │ 0.76pp/笔 —— 用 30 笔判毕业等于掷骰子。 │
+ * │              │       │       │ 120 笔把标准误压到 ±0.79pp（约 60 个    │
+ * │              │       │       │ 交易日，机制还跑得动）；要真正分辨      │
+ * │              │       │       │ 0.76pp 的组间差异需每臂约 1,000 笔。    │
+ * │ minDays      │  20   │  45   │ 约一个季度。避免用三周的行情给整年定性。 │
+ * │ minT         │   2   │  2.5  │ 九个变体同时参评时 Bonferroni 门槛约     │
+ * │              │       │       │ 2.77；board 里还会按候选数再收紧。       │
+ * │ minAbsT（新）│  —    │  2.0  │ 旧判定只要求「期望高过在任者」，于是     │
+ * │              │       │       │ −0.30%/笔 的挑战者能打赢 −0.63%/笔 的    │
+ * │              │       │       │ 在任者而毕业：两个都亏钱，却判为「更好」。│
+ * │ maxDrawdown  │  —    │  25%  │ 旧判定只比「不比在任者深」，在任者自己   │
+ * │              │       │       │ 穿 40% 时，挑战者穿 39% 也算合格。       │
+ * └──────────────┴───────┴───────┴─────────────────────────────────────────┘
+ *
+ * 一句话：**毕业要证明的是「能赚钱」，不是「比另一个亏得少」。**
+ * 样本量只是基础功防线；真正拦住"换个亏法"的是下面那三条绝对门槛。
+ */
+export const GRADUATION = {
+  minSettled: 120,
+  minDays: 45,
+  minT: 2.5,
+  /** 对 μ = 0 的单样本检验门槛：挑战者自己的期望必须被证实为正 */
+  minAbsT: 2.0,
+  /** 绝对回撤上限（百分点） */
+  maxDrawdown: 25,
+} as const;
+
+/**
+ * k 个候选同时参评时，Bonferroni 双侧校正后的 t 门槛（α = 0.05）。
+ *
+ * 九个候选各自用 t ≥ 2 独立检验，至少一个假阳性进场的机会是
+ * 1 − (1 − 0.05)^9 ≈ 37%。要做多少次比较，就用多大的尺子。
+ */
+const BONFERRONI_Z = [
+  1.96, 2.24, 2.39, 2.50, 2.58, 2.64, 2.69, 2.73, 2.77, 2.81,
+  2.84, 2.87, 2.89, 2.91, 2.93, 2.95, 2.96, 2.98, 2.99, 3.00,
+];
+export function bonferroniT(k: number): number {
+  if (k <= 1) return GRADUATION.minT;
+  const z = BONFERRONI_Z[Math.min(k, BONFERRONI_Z.length) - 1];
+  return Math.max(GRADUATION.minT, z);
+}
+
+/** 单样本 t 检验：这批样本的期望是否显著不为 0。样本不足或零方差返回 null */
+export function tStatVsZero(xs: number[]): number | null {
+  const n = xs.length;
+  if (n < 2) return null;
+  const m = xs.reduce((s, x) => s + x, 0) / n;
+  const sd = Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (n - 1));
+  if (sd === 0) return null;
+  return m / (sd / Math.sqrt(n));
+}
 /** 前几次切换必须人批 */
 export const MANUAL_APPROVALS_BEFORE_AUTO = 2;
 /** 被否决或被回滚的变体，要再攒这么多个实盘交易日的新样本才重新参评 */
@@ -174,11 +234,20 @@ export function checkGraduation(db: Db, challengerId: string, incumbentId: strin
   const ddA = maxDrawdown(ta), ddB = maxDrawdown(tb);
   const ma = avg(na), mb = avg(nb);
 
+  const tVs0 = tStatVsZero(na);
+
   const f: string[] = [];
   if (na.length < GRADUATION.minSettled) f.push(`已结算 ${na.length} 笔，要 ≥ ${GRADUATION.minSettled}`);
   if (common.length < GRADUATION.minDays) f.push(`共同交易日 ${common.length} 天，要 ≥ ${GRADUATION.minDays}`);
   if (ma === null || mb === null || !(ma > mb)) f.push("期望没有高过在任者");
   if (w === null || w.t < GRADUATION.minT) f.push(`t = ${w === null ? "—" : w.t.toFixed(2)}，要 ≥ ${GRADUATION.minT}`);
+  // ── 绝对门槛：赢了在任者不等于赚钱 ──
+  if (ma !== null && !(ma > 0))
+    f.push(`期望 ${ma.toFixed(3)}%/笔 不为正 —— 比在任者亏得少并不是赚钱`);
+  if (tVs0 !== null && tVs0 < GRADUATION.minAbsT)
+    f.push(`对 0 检验 t = ${tVs0.toFixed(2)}，要 ≥ ${GRADUATION.minAbsT}（期望还没被证实为正）`);
+  if (ddA !== null && ddA > GRADUATION.maxDrawdown)
+    f.push(`最大回撤 ${ddA.toFixed(1)}% 超过绝对上限 ${GRADUATION.maxDrawdown}%`);
   if (ddA !== null && ddB !== null && ddA > ddB) f.push(`最大回撤 ${ddA.toFixed(1)} 比在任者 ${ddB.toFixed(1)} 深`);
   if (ch.status !== "active") f.push("变体已退役");
   // 冷却期内的样本已经被 since 滤掉了，这里只把原因说清楚
@@ -195,8 +264,32 @@ export function checkGraduation(db: Db, challengerId: string, incumbentId: strin
 /** 所有在跑的挑战者对在任者的成绩单，过线的排前面，其余按 t 降序 */
 export function graduationBoard(db: Db, incumbentId: string, lock: Record<string, string> = defaultSlotRegistry.lock()): GradCheck[] {
   const ids = (db.prepare("SELECT id FROM shadow_variant WHERE status = 'active' AND id != ? ORDER BY id").all(incumbentId) as Array<{ id: string }>).map(r => r.id);
-  return ids.map(id => checkGraduation(db, id, incumbentId, lock))
-    .sort((x, y) => Number(y.passed) - Number(x.passed) || (y.t ?? -Infinity) - (x.t ?? -Infinity) || (x.variant < y.variant ? -1 : 1));
+  const checks = ids.map(id => checkGraduation(db, id, incumbentId, lock));
+
+  /**
+   * Bonferroni：k 个候选同场竞技，就得用 k 重比较的尺子。
+   * 不做这一步，榜单第一名常常只是这一次抽样里运气最好的那个 ——
+   * 九个候选各自按 t ≥ 2 独立过关，至少一个假阳性进场的机会约 37%。
+   */
+  const tBar = bonferroniT(checks.length);
+  for (const c of checks) {
+    if (c.passed && c.t !== null && c.t < tBar) {
+      c.passed = false;
+      c.failures = [...c.failures,
+        `多重检验：${checks.length} 个候选同场比较，Bonferroni 门槛 t ≥ ${tBar.toFixed(2)}，当前 ${c.t.toFixed(2)}`];
+    }
+  }
+
+  /**
+   * 排序：**合格者在前，合格者内部按期望（%/笔）从高到低**。
+   * 目标是挑「期望最大、最可能赚钱」的那套，所以钱数排第一；
+   * t 只用来给同期望的解并列 —— 它回答的是「可信不可信」，不是「赚得多不多」。
+   */
+  return checks.sort((x, y) =>
+    Number(y.passed) - Number(x.passed)
+    || (y.meanNet ?? -Infinity) - (x.meanNet ?? -Infinity)
+    || (y.t ?? -Infinity) - (x.t ?? -Infinity)
+    || (x.variant < y.variant ? -1 : 1));
 }
 
 /* ------------------------------ 切换记录 ------------------------------ */
