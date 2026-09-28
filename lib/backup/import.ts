@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
-import { SCHEMA_VERSION, type BakMeta } from "@/lib/backup/export";
+import { SCHEMA_VERSION, TAR_STDIO, TAR, tarPath, type BakMeta } from "@/lib/backup/export";
 
 export type ImportMode = "replace" | "merge" | "dry-run";
 export type Prefer = "newer" | "local" | "incoming";
@@ -59,7 +59,7 @@ const TABLES: TableSpec[] = [
 
 function unpack(bakPath: string): { stage: string; dbFile: string; meta: BakMeta } {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), "ptimp-"));
-  execFileSync("tar", ["-xzf", bakPath, "-C", stage]);
+  execFileSync(TAR.bin, [...TAR.extra, "-xzf", tarPath(bakPath), "-C", tarPath(stage)], { stdio: TAR_STDIO });
   const dbFile = path.join(stage, "pantrader.db");
   const meta: BakMeta = JSON.parse(fs.readFileSync(path.join(stage, "meta.json"), "utf8"));
 

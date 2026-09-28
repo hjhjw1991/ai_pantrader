@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
-import { exportBak } from "@/lib/backup/export";
+import { exportBak, TAR_STDIO, TAR, tarPath } from "@/lib/backup/export";
 
 let dir: string, dbPath: string, db: any;
 beforeEach(() => {
@@ -38,7 +38,9 @@ describe("exportBak", () => {
   it("包内含 pantrader.db 与 meta.json", async () => {
     const out = path.join(dir, "b.ptbak");
     await exportBak(db, dbPath, out);
-    const listing = execSync(`tar -tzf "${out}"`).toString();
+    // 走 execFileSync 而不是 execSync：列包不需要 shell，经 shell 反而多一层
+    // 「stdin 管道建不起来」的失败点；参数也跟生产打包保持一致
+    const listing = execFileSync(TAR.bin, [...TAR.extra, "-tzf", tarPath(out)], { stdio: TAR_STDIO }).toString();
     expect(listing).toContain("pantrader.db");
     expect(listing).toContain("meta.json");
   });

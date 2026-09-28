@@ -7,6 +7,61 @@ import type { Db } from "@/lib/db";
 
 export const SCHEMA_VERSION = "1";
 
+/**
+ * 调 tar 时的 stdio：**不给 stdin**。
+ *
+ * 打包/解包都不读标准输入，但 execFileSync 默认会给子进程接一根 stdin 管道。
+ * 在受限的 shell / CI 环境里（父进程的 stdin 不是可继承的常规句柄时），
+ * 建这根管道会直接 EBUSY —— 表现为「导出备份失败」，而 tar 本身一点问题没有。
+ *
+ * 关掉 stdin 顺带堵掉另一个隐患：万一 tar 因为参数异常想去读输入，
+ * 有管道就会挂在那里等到超时，没管道则立刻失败并报出真正的错。
+ * stdout/stderr 仍走 pipe，tar 的诊断信息照常能拿到。
+ */
+export const TAR_STDIO: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
+
+/**
+ * 备份包用哪个 tar 打/解。
+ *
+ * 不能简单地调 `tar` 了事 —— Windows 上 **PATH 里第一个 tar 是什么完全看运气**，
+ * 而 Git for Windows 的 GNU tar 在 Windows 路径上有两个实测踩到的坑：
+ *
+ *   1. 盘符被当成远程主机。GNU tar 的 `主机:文件` 语法把 `C:\...\x.ptbak`
+ *      里的 `C` 读成主机名，真的去连：
+ *        tar (child): Cannot connect to C: resolve failed
+ *        tar: Child returned status 128
+ *      报错跟「路径写错了」毫无相似之处，不查根本想不到是打包命令的问题。
+ *      要 `--force-local` 才关得掉。
+ *   2. 反斜杠被它转义坏掉。`-C C:\Users\...` 会被转成
+ *        tar: C\:\\Users\\Admin\\...: Cannot open: No such file or directory
+ *      路径必须给成正斜杠才对。
+ *
+ * 麻烦在于**两个 tar 对 `--force-local` 互斥**：
+ *   GNU tar(MSYS) 要它；系统自带的 bsdtar 不认它（`Option --force-local is not supported`）。
+ * 没有一套参数能通吃，所以直接选实现：Windows 上用系统自带的 bsdtar
+ * （Win10 17063+ 内置，路径语义正常），找不到再退回 PATH 上的 tar 并补 --force-local。
+ *
+ * macOS / Linux 一律走 PATH 里的原生 tar，行为与此前完全一致。
+ */
+export const TAR: { bin: string; extra: string[] } = pickTar();
+
+function pickTar(): { bin: string; extra: string[] } {
+  if (process.platform !== "win32") return { bin: "tar", extra: [] };
+  const root = process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows";
+  const sysTar = path.join(root, "System32", "tar.exe");
+  return fs.existsSync(sysTar)
+    ? { bin: sysTar, extra: [] }
+    : { bin: "tar", extra: ["--force-local"] };
+}
+
+/**
+ * 传给 tar 的路径一律用正斜杠。
+ *
+ * Windows 的文件 API 本来就认正斜杠，所以这个转换对调用方无感；
+ * 但对 MSYS 版的 GNU tar 是必须的（见上面第 2 条），否则反斜杠会被转义坏。
+ */
+export const tarPath = (p: string): string => p.replace(/\\/g, "/");
+
 export interface BakMeta {
   schemaVersion: string;
   createdAt: string;
@@ -125,7 +180,7 @@ export async function exportBak(db: Db, _dbPath: string, outPath: string): Promi
     fs.writeFileSync(path.join(stage, "meta.json"), JSON.stringify(meta, null, 2));
 
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    execFileSync("tar", ["-czf", outPath, "-C", stage, "pantrader.db", "meta.json"]);
+    execFileSync(TAR.bin, [...TAR.extra, "-czf", tarPath(outPath), "-C", tarPath(stage), "pantrader.db", "meta.json"], { stdio: TAR_STDIO });
     return meta;
   } finally {
     fs.rmSync(stage, { recursive: true, force: true });

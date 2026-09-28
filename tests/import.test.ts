@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+// 造 .ptbak 用的就是生产的打包方式（含 Windows 的 --force-local / 不给 stdin），
+// 否则测试造出来的包跟真实导出的包在两个平台上的行为会分叉
+import { TAR_STDIO, TAR, tarPath } from "@/lib/backup/export";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { exportBak } from "@/lib/backup/export";
@@ -109,9 +112,9 @@ describe("importBak", () => {
     const { bak } = await makeBak([["601012", "2026-07-31", 14]]);
 
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tamper-"));
-    execFileSync("tar", ["-xzf", bak, "-C", tmp]);
+    execFileSync(TAR.bin, [...TAR.extra, "-xzf", tarPath(bak), "-C", tarPath(tmp)], { stdio: TAR_STDIO });
     fs.appendFileSync(path.join(tmp, "pantrader.db"), "corrupt");
-    execFileSync("tar", ["-czf", bak, "-C", tmp, "pantrader.db", "meta.json"]);
+    execFileSync(TAR.bin, [...TAR.extra, "-czf", tarPath(bak), "-C", tarPath(tmp), "pantrader.db", "meta.json"], { stdio: TAR_STDIO });
     fs.rmSync(tmp, { recursive: true, force: true });
 
     await expect(
@@ -123,12 +126,12 @@ describe("importBak", () => {
     const { bak } = await makeBak([["601012", "2026-07-31", 14]]);
 
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ver-"));
-    execFileSync("tar", ["-xzf", bak, "-C", tmp]);
+    execFileSync(TAR.bin, [...TAR.extra, "-xzf", tarPath(bak), "-C", tarPath(tmp)], { stdio: TAR_STDIO });
     const metaPath = path.join(tmp, "meta.json");
     const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
     meta.schemaVersion = "999";
     fs.writeFileSync(metaPath, JSON.stringify(meta));
-    execFileSync("tar", ["-czf", bak, "-C", tmp, "pantrader.db", "meta.json"]);
+    execFileSync(TAR.bin, [...TAR.extra, "-czf", tarPath(bak), "-C", tarPath(tmp), "pantrader.db", "meta.json"], { stdio: TAR_STDIO });
     fs.rmSync(tmp, { recursive: true, force: true });
 
     await expect(
