@@ -19,15 +19,26 @@ import { isAlive } from "@/lib/platform/singleton";
 
 export const DAEMON_MARK = "daemon.ts";
 
+/**
+ * 查询子进程时**不给 stdin**。
+ *
+ * 这两个查询都只读、不读标准输入，但 execFileSync 默认会给子进程接一根 stdin 管道。
+ * 父进程的 stdin 不是可继承的常规句柄时（受限 shell / CI / 某些守护环境），
+ * 建这根管道直接 EBUSY，命令根本没跑就失败 —— 而这里的 catch 会把失败吞成
+ * 「查不到命令行」，于是 stopDaemon 一律报 refused，守护进程永远停不掉。
+ */
+const QUERY_STDIO: ["ignore", "pipe", "pipe"] = ["ignore", "pipe", "pipe"];
+
 export function commandLineOf(pid: number, platform: NodeJS.Platform = process.platform): string | null {
   try {
     if (platform === "win32") {
       return execFileSync("powershell.exe", [
         "-NoProfile", "-NonInteractive", "-Command",
         `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-      ], { encoding: "utf8", windowsHide: true, timeout: 10_000 }).trim() || null;
+      ], { encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: QUERY_STDIO }).trim() || null;
     }
-    return execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 }).trim() || null;
+    return execFileSync("ps", ["-o", "command=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 10_000, stdio: QUERY_STDIO }).trim() || null;
   } catch {
     return null;
   }
