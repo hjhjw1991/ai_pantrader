@@ -1,4 +1,5 @@
 import { dbTsToMs, toShanghaiWall } from "@/lib/ui/time";
+import { shanghaiDay } from "@/lib/data/clock";
 
 /**
  * 纯格式化。唯一的硬规则：**没有数据就显示破折号，不显示 0**。
@@ -62,6 +63,38 @@ export function fmtTs(ts: string | null | undefined, withDate = false): string {
   const time = wall.slice(11, 19);
   if (!withDate) return time;
   return `${wall.slice(5, 7)}/${wall.slice(8, 10)} ${time}`;
+}
+
+/**
+ * 通知列表的时间。
+ *
+ * 只有 HH:MM:SS 是不够的：隔夜之后铃铛里三条通知并排，看不出哪条是今天早上
+ * 的、哪条是上周的 —— 而"什么时候说的"往往就是这条通知还有没有用的全部依据
+ * （三小时前的买入提醒，现在多半已经不在买点上了）。
+ *
+ * 阶梯式压缩：今天/昨天用相对说法（最高频，最短），同年省掉年份，跨年才带全。
+ * 日期一律按**上海日**判定，不按本机时区 —— 海外时区看盘时取本机日期会整体错一天。
+ */
+export function fmtNoticeTs(ts: string | null | undefined, now: Date = new Date()): string {
+  if (!ts) return DASH;
+  const wall = toShanghaiWall(ts);
+  if (wall === null) return ts;    // 认不出来的格式原样显示，不许伪造
+  const time = wall.slice(11, 19);
+  const day = wall.slice(0, 10);
+  const today = shanghaiDay(now);
+  if (day === today) return `今天 ${time}`;
+  if (day === shiftDay(today, -1)) return `昨天 ${time}`;
+  // 同年只留 月/日，跨年必须带年份
+  const date = day.slice(0, 4) === today.slice(0, 4)
+    ? `${day.slice(5, 7)}/${day.slice(8, 10)}`
+    : day.replace(/-/g, "/");
+  return `${date} ${time}`;
+}
+
+/** 日期串加减天数。按 UTC 整天算术，避开了本地时区的夏令时缺口 */
+function shiftDay(day: string, deltaDays: number): string {
+  const t = Date.parse(`${day}T00:00:00Z`) + deltaDays * 86_400_000;
+  return new Date(t).toISOString().slice(0, 10);
 }
 
 export function fmtDate(d: string | null | undefined): string {

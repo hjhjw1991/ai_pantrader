@@ -5,7 +5,8 @@ import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import {
-  pushNotification, recentNotifications, markRead, diffAndNotify, readSignalState,
+  pushNotification, recentNotifications, notificationsPage, countNotifications,
+  markRead, diffAndNotify, readSignalState,
 } from "@/lib/ui/notify";
 import type { SignalCard, Candidate } from "@/lib/contracts";
 
@@ -117,5 +118,62 @@ describe("diffAndNotify：只有需要人做动作的才响", () => {
     diffAndNotify(db, card("中性", []), 3);
     diffAndNotify(db, card("中性", []), 1);
     expect(recentNotifications(db).filter(n => n.kind === "hard_line")).toHaveLength(0);
+  });
+});
+
+describe("通知历史翻页", () => {
+  const seed = (n: number) => {
+    for (let i = 1; i <= n; i++) pushNotification(db, { kind: "k", severity: "info", title: `第${i}条` });
+  };
+
+  it("before=0 是第一页，倒序返回", () => {
+    seed(12);
+    const p1 = notificationsPage(db, 0, 10);
+    expect(p1).toHaveLength(10);
+    expect(p1[0].title).toBe("第12条");
+    expect(p1.map(n => n.id)).toEqual([...p1].sort((a, b) => b.id - a.id).map(n => n.id));
+  });
+
+  it("多取一条用来判断还有没有 —— 恰好整页时不误报", () => {
+    seed(10);
+    // 前端传 limit+1：总数正好等于 limit 时，多出来的一条不存在
+    expect(notificationsPage(db, 0, 11)).toHaveLength(10);
+    expect(notificationsPage(db, 0, 11).length > 10).toBe(false);
+  });
+
+  it("第二页以第一页最小 id 为游标，不重不漏", () => {
+    seed(15);
+    const p1 = notificationsPage(db, 0, 10);
+    const cursor = p1[p1.length - 1].id;
+    const p2 = notificationsPage(db, cursor, 10);
+    expect(p2).toHaveLength(5);
+    const overlap = p2.filter(n => p1.some(m => m.id === n.id));
+    expect(overlap).toHaveLength(0);          // 不与第一页重复
+    expect(new Set([...p1, ...p2].map(n => n.id)).size).toBe(15);   // 合起来正好是全部
+  });
+
+  it("翻页期间插入新通知不会污染后续页", () => {
+    seed(15);
+    const p1 = notificationsPage(db, 0, 10);
+    const cursor = p1[p1.length - 1].id;
+    pushNotification(db, { kind: "k", severity: "critical", title: "翻页中新来的" });
+    const p2 = notificationsPage(db, cursor, 10);
+    expect(p2.map(n => n.title)).not.toContain("翻页中新来的");   // 新来的是最新的，不属于更旧的页
+    expect(notificationsPage(db, 0, 1)[0].title).toBe("翻页中新来的");
+  });
+
+  it("countNotifications 是全表条数，且随去重失败不增长", () => {
+    seed(5);
+    expect(countNotifications(db)).toBe(5);
+    pushNotification(db, { kind: "k", severity: "info", title: "重了", dedupeKey: "dup" });
+    expect(countNotifications(db)).toBe(6);
+    // 重复 dedupeKey 被拒，总数不该动
+    pushNotification(db, { kind: "k", severity: "info", title: "重了2", dedupeKey: "dup" });
+    expect(countNotifications(db)).toBe(6);
+  });
+
+  it("空表不炸", () => {
+    expect(notificationsPage(db, 0, 10)).toEqual([]);
+    expect(countNotifications(db)).toBe(0);
   });
 });

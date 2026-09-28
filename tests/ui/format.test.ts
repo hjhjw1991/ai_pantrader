@@ -6,6 +6,7 @@ import {
   fmtAge,
   fmtAmount,
   fmtInt,
+  fmtNoticeTs,
   fmtPct,
   fmtPx,
   fmtQty,
@@ -165,5 +166,42 @@ describe("环境档位色", () => {
     expect(gearClass("防守")).toBe("text-gear-defend");
     expect(gearClass(null)).toBe("text-ink-3");
     expect(gearClass("乱写")).toBe("text-ink-3");
+  });
+});
+
+/**
+ * 通知时间必须答得出"哪一天"。
+ * 这是被真实场景逼出来的要求：隔夜之后铃铛里三条通知只有 HH:MM:SS，
+ * 看不出哪条还作数 —— 而"要不要现在动手"几乎全取决于这条通知多老。
+ */
+describe("通知时间带日期", () => {
+  // 上海 2026-09-28 12:00（本机时区无关，shanghaiDay 自己锁 Asia/Shanghai）
+  const now = new Date("2026-09-28T04:00:00Z");
+
+  it("今天 / 昨天用相对日", () => {
+    expect(fmtNoticeTs("2026-09-28 09:35:49.775", now)).toBe("今天 09:35:49");
+    expect(fmtNoticeTs("2026-09-27 14:00:00.000", now)).toBe("昨天 14:00:00");
+  });
+
+  it("同年省略年份，跨年必须带上", () => {
+    expect(fmtNoticeTs("2026-09-24 09:35:00.000", now)).toBe("09/24 09:35:00");
+    expect(fmtNoticeTs("2026-01-02 09:35:00.000", now)).toBe("01/02 09:35:00");
+    expect(fmtNoticeTs("2025-12-31 15:00:00.000", now)).toBe("2025/12/31 15:00:00");
+  });
+
+  it("UTC 老串先归一到上海再判日子 —— 别把收盘价显示成第二天", () => {
+    // 2026-09-28T01:30Z = 上海 09:30（同一天）
+    expect(fmtNoticeTs("2026-09-28T01:30:00.000Z", now)).toBe("今天 09:30:00");
+    // 2026-09-27T16:30Z = 上海 09-28 00:30（跨天）
+    expect(fmtNoticeTs("2026-09-27T16:30:00.000Z", now)).toBe("今天 00:30:00");
+  });
+
+  it("认不出来的格式原样返回，不伪造时间", () => {
+    expect(fmtNoticeTs("乱码", now)).toBe("乱码");
+  });
+
+  it("缺失仍是破折号", () => {
+    expect(fmtNoticeTs(null, now)).toBe(DASH);
+    expect(fmtNoticeTs("", now)).toBe(DASH);
   });
 });

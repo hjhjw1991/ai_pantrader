@@ -38,14 +38,44 @@ export function pushNotification(
   }
 }
 
+function rowToNotification(r: any): Notification {
+  return {
+    id: r.id, ts: r.ts, kind: r.kind, severity: r.severity,
+    title: r.title, body: r.body, readAt: r.read_at,
+  };
+}
+
 export function recentNotifications(db: Db, sinceId = 0, limit = 50): Notification[] {
   return (db.prepare(
     `SELECT id, ts, kind, severity, title, body, read_at FROM notification
      WHERE id > ? ORDER BY id DESC LIMIT ?`
-  ).all(sinceId, limit) as any[]).map(r => ({
-    id: r.id, ts: r.ts, kind: r.kind, severity: r.severity,
-    title: r.title, body: r.body, readAt: r.read_at,
-  }));
+  ).all(sinceId, limit) as any[]).map(rowToNotification);
+}
+
+/**
+ * 倒序翻页（铃铛里的"加载更多"）。
+ *
+ * beforeId = 0 是第一页（最新的 limit 条），之后每页传当前已加载的最小 id。
+ * 用 id 游标而不是 OFFSET：通知在盘中不断写入，OFFSET 会因为新插入的行
+ * 把已经在展示的那几条又推回来一次（重复项），而 id 游标不受插入影响。
+ */
+export function notificationsPage(db: Db, beforeId: number, limit: number): Notification[] {
+  const rows = (beforeId > 0
+    ? db.prepare(
+        `SELECT id, ts, kind, severity, title, body, read_at FROM notification
+         WHERE id < ? ORDER BY id DESC LIMIT ?`
+      ).all(beforeId, limit)
+    : db.prepare(
+        `SELECT id, ts, kind, severity, title, body, read_at FROM notification
+         ORDER BY id DESC LIMIT ?`
+      ).all(limit)) as any[];
+  return rows.map(rowToNotification);
+}
+
+/** 通知总条数。铃铛拿它算"还有 N 条没显示" */
+export function countNotifications(db: Db): number {
+  const r = db.prepare(`SELECT COUNT(*) n FROM notification`).get() as any;
+  return Number(r?.n ?? 0);
 }
 
 export function markRead(db: Db, upToId: number): number {
