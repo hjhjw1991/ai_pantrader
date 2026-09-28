@@ -3,7 +3,8 @@ import { shanghaiTs } from "@/lib/data/clock";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { positionsView } from "@/lib/ui/views";
-import { diffAndNotify } from "@/lib/ui/notify";
+import { intradayMood } from "@/lib/sentiment/intraday";
+import { diffAndNotify, pushNotification } from "@/lib/ui/notify";
 
 /**
  * 盘中信号盯守：每轮采集之后重算信号卡，与上次比对，把**需要人做动作的变化**写成通知。
@@ -32,5 +33,26 @@ export async function runSignalWatch(db: Db): Promise<{ notified: number; reason
   } catch {
     // 持仓算不出来不该挡住档位与候选的通知
   }
-  return { notified: diffAndNotify(db, out.card, alerts).length };
+  const notified = diffAndNotify(db, out.card, alerts).length;
+
+  // ── 盘中情绪 ──
+  // 上面那张卡是日线口径，盘中永远是昨收的结论，突发转弱它不会有任何反应。
+  // 这里补上快照口径的情绪转变。失败不上抛：通知是增强。
+  let moodNotified = 0;
+  try {
+    const mood = intradayMood(db, shanghaiTs());
+    for (const s of mood.signals) {
+      // info 级不弹："转强"与"过热"是让人知道，不是要求人做动作。
+      // 通知的原则是"要求人做动作的才响"，弹多了连 critical 一起被无视
+      if (s.level === "info") continue;
+      if (pushNotification(db, {
+        kind: `mood_${s.kind}`, severity: s.level,
+        title: s.title, body: s.body, dedupeKey: s.dedupeKey,
+      })) moodNotified++;
+    }
+  } catch {
+    // 情绪算不出来不该挡住档位与候选的通知
+  }
+
+  return { notified: notified + moodNotified };
 }

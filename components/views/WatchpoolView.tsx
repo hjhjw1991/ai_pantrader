@@ -6,6 +6,7 @@ import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtTs, ageMinutes } from "@/lib/ui/format";
 import { latestQuoteTs, accounts } from "@/lib/ui/queries";
 import { watchpoolView } from "@/lib/ui/views";
+import { MoodBar, VsMarketTag } from "@/components/MoodBar";
 
 export const dynamic = "force-dynamic";
 
@@ -20,13 +21,18 @@ export default function WatchpoolPage() {
   const db = readDb();
   if (!db) return <NoDatabase why={dbUnavailable()} />;
 
-  const rows = watchpoolView(db);
+  const view = watchpoolView(db);
+  const rows = view.rows;
   const snapTs = latestQuoteTs(db);
   const snapAge = ageMinutes(snapTs);
   const reached = rows.filter((r) => r.dist.reached);
+  // 市场在转弱时"已到买点"不等于"该买" —— 逆势接飞刀是这套系统最容易亏钱的方式
+  const moodWeak = view.mood !== null
+    && view.mood.signals.some(s => s.kind === "mood_shift" && s.level !== "info");
 
   return (
     <div className="flex flex-col gap-3">
+      <MoodBar mood={view.mood} />
       <Panel
         title="观察池"
         hint="只做回踩企稳低吸：价格跌到触发价及以下才算到位，不追突破"
@@ -55,6 +61,7 @@ export default function WatchpoolPage() {
                   <th className="text-right">距触发</th>
                   <th className="text-right">距触发%</th>
                   <th>状态</th>
+                  <th className="text-right">vs市场</th>
                   <th className="text-right">止损价</th>
                   <th className="text-right">触发→止损</th>
                   <th>买入逻辑</th>
@@ -102,6 +109,9 @@ export default function WatchpoolPage() {
                         ) : null}
                       </td>
                       <td className="num">
+                        <VsMarketTag vs={r.vsMarket} weak={moodWeak} />
+                      </td>
+                      <td className="num">
                         <Num v={r.row.stopPx} />
                       </td>
                       <td className="num">
@@ -133,6 +143,13 @@ export default function WatchpoolPage() {
               按快照价判断（{fmtTs(snapTs)}）。下单前先在券商 App 里核实实时价 ——
               历史上"复用旧缓存价下判断"是已记录过的误判类型（瞬时价误判）。
             </p>
+            {moodWeak ? (
+              <p className="mt-1 text-warn text-[11px]">
+                但盘中情绪正在转弱。价格到位只说明"到了你设定的位置"，
+                不说明"现在是买的时候" —— 弱势市场里回踩往往还有第二第三段。
+                这套系统的买点是 T−1 收盘算出来的，它不知道盘中已经变了。
+              </p>
+            ) : null}
           </div>
         ) : null}
       </Panel>

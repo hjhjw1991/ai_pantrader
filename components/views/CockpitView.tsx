@@ -14,6 +14,8 @@ import { cycleStage, pricingRefs, shadowOverview } from "@/lib/ui/adapters/overv
 import { cockpitItems } from "@/lib/ui/adapters/cockpit";
 import { latestZtDate, ztPool } from "@/lib/ui/queries";
 import { shanghaiTs } from "@/lib/ui/time";
+import { intradayMood } from "@/lib/sentiment/intraday";
+import { MoodBar } from "@/components/MoodBar";
 
 /**
  * 作战台 —— 系统唯一的主页：
@@ -69,8 +71,19 @@ export default function CockpitView() {
   const env = card.available ? card.card.env : null;
   const warns = card.available ? card.card.warnings : [];
 
+  /**
+   * 盘中情绪。与上面那张「情绪阶段」卡片刻意并列放在一起 ——
+   * 两者口径不同（日线 vs 快照）、结论也可以不同，摆在一起才看得出差异，
+   * 而不是让人以为其中一个是对的。
+   */
+  const mood = db === null ? null : (() => {
+    try { return intradayMood(db, asOf); } catch { return null; }
+  })();
+
   return (
     <div className="flex flex-col gap-3">
+      <MoodBar mood={mood} />
+
       {/* ── 顶部：盘面环境，一排紧凑卡片；明细点开看 ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-3 items-start">
         <Card title="环境档位" right={

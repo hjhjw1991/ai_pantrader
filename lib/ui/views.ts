@@ -23,6 +23,7 @@ import {
   type WatchpoolRow,
 } from "@/lib/ui/queries";
 import { accountRules } from "@/lib/ui/adapters/strategy";
+import { intradayMood, type IntradayMood } from "@/lib/sentiment/intraday";
 
 /**
  * 页面级视图组装。持仓与观察池被三个页面共用（作战台/持仓/观察池），
@@ -38,6 +39,23 @@ export interface PositionView {
   pnl: PositionPnl;
   /** 现价距止损价还有多远（负数 = 已破） */
   stopGapRatio: number | null;
+  /** 今日涨幅减去全市场平均涨幅（百分点）。正 = 跑赢。null = 无快照或无市场基准 */
+  vsMarket: number | null;
+}
+
+/**
+ * 个股相对强度 = 个股涨幅 − 全市场平均涨幅。
+ *
+ * 为什么要减掉市场：市场 −3% 时个股 −1% 是**强势**，可光看个股是绿的；
+ * 市场 +3% 时个股 +1% 是**弱势**，光看个股是红的。持仓要不要动，
+ * 判断依据是"它比市场强还是弱"，不是"它今天是红是绿"。
+ *
+ * 用平均涨幅而不是指数涨幅：库里没有指数序列（日线采集只拉 6 位代码），
+ * 而 quote_snapshot 是全市场 5887 只，直接算得出均值，不需要额外数据源。
+ */
+function relStrength(pct: number | null | undefined, marketAvg: number | null): number | null {
+  if (marketAvg === null || pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  return pct - marketAvg;
 }
 
 export interface PositionsView {
@@ -45,6 +63,8 @@ export interface PositionsView {
   accounts: AccountRow[];
   alerts: HardLineAlert[];
   risk: PortfolioRisk;
+  /** 盘中情绪。null = 今天没有快照（休市 / 还没开盘） */
+  mood: IntradayMood | null;
   /** 有 position 行但 account 表查不到对应账户 —— 会导致止损规则套错，必须点名 */
   orphanAccountIds: string[];
   /** YAML 里配了规则、但 account 表里没有的账户名 */
@@ -88,6 +108,10 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
   const accs = accounts(db);
   const accIds = new Set(accs.map((a) => a.id));
 
+  // 盘中情绪算不出来不能让持仓页挂掉 —— 它只是叠加的上下文，
+  // 而持仓的浮盈亏与硬线告警是必须出来的东西
+  const mood = moodOrNull(db);
+
   const rows: PositionView[] = pos.map((p) => {
     const q = quotes.get(p.code) ?? null;
     const pnl = positionPnl(p, q?.price ?? null);
@@ -98,6 +122,7 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
       pnl,
       stopGapRatio:
         q && p.stopPx !== null && p.stopPx > 0 ? (q.price - p.stopPx) / p.stopPx : null,
+      vsMarket: relStrength(q?.pct, mood?.now?.avgPct ?? null),
     };
   });
 
@@ -110,6 +135,7 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
   return {
     rows,
     accounts: accs,
+    mood,
     alerts: hardLineAlerts(
       rows.map((r) => ({
         position: r.position,
@@ -141,22 +167,47 @@ export interface WatchView {
   dist: TriggerDistance;
   /** 触发价与止损价的关系不对（止损 >= 触发）→ 这单一开就已经在止损下方 */
   inconsistent: boolean;
+  /** 今日涨幅减去全市场平均涨幅（百分点）。正 = 跑赢 */
+  vsMarket: number | null;
 }
 
-export function watchpoolView(db: Db): WatchView[] {
+export interface WatchpoolView {
+  rows: WatchView[];
+  mood: IntradayMood | null;
+}
+
+/**
+ * 盘中情绪。算不出来返回 null 而不是让调用方崩 ——
+ * 情绪是叠加的上下文，休市日没有它就是没有，页面照常显示观察池本身。
+ */
+function moodOrNull(db: Db): IntradayMood | null {
+  try {
+    const m = intradayMood(db);
+    return m.now === null ? null : m;
+  } catch {
+    return null;
+  }
+}
+
+export function watchpoolView(db: Db): WatchpoolView {
   const rows = watchpool(db);
   const codes = rows.map((r) => r.code);
   const quotes = latestQuotes(db, codes);
   const names = securities(db, codes);
-  return rows.map((row) => {
-    const q = quotes.get(row.code) ?? null;
-    return {
-      row,
-      name: row.name ?? names.get(row.code)?.name ?? null,
-      quote: q,
-      dist: triggerDistance(q?.price ?? null, row.triggerPx),
-      inconsistent:
-        row.triggerPx !== null && row.stopPx !== null && row.stopPx >= row.triggerPx,
-    };
-  });
+  const mood = moodOrNull(db);
+  return {
+    mood,
+    rows: rows.map((row) => {
+      const q = quotes.get(row.code) ?? null;
+      return {
+        row,
+        name: row.name ?? names.get(row.code)?.name ?? null,
+        quote: q,
+        dist: triggerDistance(q?.price ?? null, row.triggerPx),
+        inconsistent:
+          row.triggerPx !== null && row.stopPx !== null && row.stopPx >= row.triggerPx,
+        vsMarket: relStrength(q?.pct, mood?.now?.avgPct ?? null),
+      };
+    }),
+  };
 }

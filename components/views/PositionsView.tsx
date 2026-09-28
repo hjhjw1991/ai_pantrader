@@ -9,6 +9,7 @@ import { unavailable } from "@/lib/ui/derive";
 import { readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
 import { latestQuoteTs, trades } from "@/lib/ui/queries";
 import { positionsView, type PositionView } from "@/lib/ui/views";
+import { MoodBar, VsMarketTag } from "@/components/MoodBar";
 export const dynamic = "force-dynamic";
 
 /**
@@ -30,8 +31,14 @@ export default function PositionsPage() {
   const snapTs = latestQuoteTs(db);
   const recent = trades(db, 50);
 
+  // 市场在转弱时，持仓跑输大盘的那几只是最先该处理的
+  const moodWeak = pv.mood !== null
+    && pv.mood.signals.some(s => s.kind === "mood_shift" && s.level !== "info");
+
   return (
     <div className="flex flex-col gap-3">
+      <MoodBar mood={pv.mood} />
+
       {pv.alerts.length > 0 ? (
         <Panel title="硬线告警" tone="danger" right="纪律优先于当下的盘面感觉">
           <ul className="flex flex-col gap-1">
@@ -129,7 +136,7 @@ export default function PositionsPage() {
                 hint="手工成交回填后出现在这里；position 表不由行情 job 写"
               />
             ) : (
-              <PositionTable rows={rows} />
+              <PositionTable rows={rows} weak={moodWeak} />
             )}
           </Panel>
         );
@@ -266,7 +273,7 @@ export default function PositionsPage() {
   );
 }
 
-function PositionTable({ rows }: { rows: PositionView[] }) {
+function PositionTable({ rows, weak }: { rows: PositionView[]; weak: boolean }) {
   return (
     <div className="overflow-x-auto">
       <table className="dense">
@@ -282,6 +289,7 @@ function PositionTable({ rows }: { rows: PositionView[] }) {
             <th className="text-right">浮动%</th>
             <th className="text-right">止损价</th>
             <th className="text-right">距止损</th>
+            <th className="text-right">vs市场</th>
             <th className="text-right">建仓日</th>
             <th>逻辑</th>
           </tr>
@@ -314,6 +322,9 @@ function PositionTable({ rows }: { rows: PositionView[] }) {
               </td>
               <td className="num">
                 <Num v={r.stopGapRatio} kind="ratio" dir />
+              </td>
+              <td className="num">
+                <VsMarketTag vs={r.vsMarket} weak={weak} />
               </td>
               <td className="num text-ink-3">{r.position.openDate}</td>
               <td className="text-ink-3 max-w-[20rem] truncate" title={r.position.thesis}>
