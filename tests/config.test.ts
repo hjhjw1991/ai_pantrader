@@ -7,7 +7,13 @@ import { getConfig } from "@/lib/config";
  * 写死斜杠会把"产品代码在 Windows 上行为正确"误报成失败（实测 CI 上就是这样）。
  */
 const HOME = path.join(path.sep, "Users", "tester");
-const OTHER = path.join(path.sep, "tmp", "pt");
+/**
+ * 「另外的地方」。注意**不能放在 tmp 下**：下面那条用例要断言
+ * 「解析出来的目录不在 /tmp」，而 Windows 上 USERPROFILE 是参与解析的 ——
+ * 假 home 自己就带 tmp，断言就变成自相矛盾，必红且看不出跟实现有关。
+ * （Mac 上 USERPROFILE 不参与解析，会回落到真实 home，所以这个错在 Mac 上被掩盖。）
+ */
+const OTHER = path.join(path.sep, "Users", "other");
 
 describe("getConfig", () => {
   it("默认数据目录在 home 下的 PanTraderData", () => {

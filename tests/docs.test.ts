@@ -6,8 +6,8 @@
  * 某个贡献者照着它去找一个不存在的文件。
  */
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { resolve, extname } from "node:path";
 
 const ROOT = resolve(__dirname, "..");
 const read = (f: string): string => readFileSync(resolve(ROOT, f), "utf8");
@@ -43,12 +43,30 @@ describe("docs/ARCHITECTURE.md", () => {
    * 当初要解决的问题。
    */
   it("代码里引用的 spec 章节都收录在文档里", () => {
-    const { execSync } = require("node:child_process") as typeof import("node:child_process");
-    const out = execSync(
-      `grep -rhoE "spec §[0-9]+(\\.[0-9]+)?" lib app components tests config scripts || true`,
-      { cwd: ROOT, encoding: "utf8" }
-    );
-    const sections = [...new Set(out.split("\n").filter(Boolean).map((s) => s.replace("spec §", "")))];
+    /**
+     * 这里原先是 execSync("grep -rhoE ...")，两条理由换成 Node 自己扫：
+     *   1. 那条命令假设 shell 里有 grep —— Windows 的 cmd.exe 并没有，
+     *      能跑通全靠 Git for Windows 碰巧在 PATH 里排前面，换台机器就红；
+     *   2. 走 shell 还多一层「stdin 管道建不起来」的失败点。
+     * 直接在 Node 里读文件，跨平台，而且比起子进程快得多。
+     */
+    const SPEC_REF = /spec §\d+(?:\.\d+)?/g;
+    const TEXT = new Set([".ts", ".tsx", ".js", ".mjs", ".sql", ".md", ".yaml", ".yml", ".json"]);
+    const found = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+        const p = resolve(dir, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        if (!TEXT.has(extname(e.name))) continue;
+        for (const m of readFileSync(p, "utf8").match(SPEC_REF) ?? []) found.add(m);
+      }
+    };
+    for (const d of ["lib", "app", "components", "tests", "config", "scripts"]) {
+      const abs = resolve(ROOT, d);
+      if (existsSync(abs)) walk(abs);
+    }
+    const sections = [...new Set([...found].map((s) => s.replace("spec §", "")))];
     expect(sections.length).toBeGreaterThan(15);
 
     const uncovered = sections.filter((s) => !md.includes(`§${s}`));

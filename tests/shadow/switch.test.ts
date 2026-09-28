@@ -16,6 +16,22 @@ import { makeTempDb, type TempDb } from "../pit/helpers";
 const EXAMPLE = path.join(process.cwd(), "config/strategies/default.yaml.example");
 const LOCK = JSON.stringify(defaultSlotRegistry.lock());
 
+/**
+ * 夹具直接复制真实的 default.yaml.example，所以版本号会随策略迭代往前走。
+ *
+ * 测试要守的是「每批准一次，patch 号 +1」这个行为，不是「必须是 1.3.0」——
+ * 把号抄死在断言里，每次升版本都得回来改一遍，而改漏的那一个会伪装成
+ * 「实现有 bug」红给你看（2026-09-27 升 1.4.0 时就踩了一次）。
+ * 所以基线从文件读，期望值用生产实现自己的 bumpPatch 推。
+ */
+function baseVersion(): string {
+  const r = validateStrategyYaml(fs.readFileSync(EXAMPLE, "utf8"), EXAMPLE);
+  if (!r.ok) throw new Error(`策略样例文件校验不过：${r.issues.map(i => i.message).join("；")}`);
+  return r.config.version;
+}
+const V0 = baseVersion();
+const V1 = bumpPatch(V0), V2 = bumpPatch(V1), V3 = bumpPatch(V2);
+
 /** 从 2026-01-05 起的 n 个工作日 */
 function weekdays(n: number): string[] {
   const out: string[] = [];
@@ -201,14 +217,14 @@ describe("切换流程", () => {
     expect(r).toMatchObject({ action: "proposed", variant: "pricing" });
     const n = t.db.prepare("SELECT title, body FROM notification WHERE kind = 'shadow_switch'").all() as any[];
     expect(n[0].title).toMatch(/待你批准/);
-    expect(readSlots().version).toBe("1.3.0");               // 没批之前文件不动
+    expect(readSlots().version).toBe(V0);                    // 没批之前文件不动
 
     const a = approveSwitch(t.db, (r as any).id, "human", o());
-    expect(a).toMatchObject({ status: "applied", decidedBy: "human", fromVersion: "1.3.0", toVersion: "1.3.1" });
-    expect(readSlots()).toEqual({ slots: { 评估器: { 用: "结构位定价" } }, version: "1.3.1" });
+    expect(a).toMatchObject({ status: "applied", decidedBy: "human", fromVersion: V0, toVersion: V1 });
+    expect(readSlots()).toEqual({ slots: { 评估器: { 用: "结构位定价" } }, version: V1 });
     expect(incumbentOf(t.db, canonicalJson(readSlots().slots))).toBe("pricing");
     // 旧版本原文留了快照
-    expect(t.db.prepare("SELECT COUNT(*) n FROM strategy WHERE id = 'default' AND version = '1.3.0'").get()).toEqual({ n: 1 });
+    expect(t.db.prepare(`SELECT COUNT(*) n FROM strategy WHERE id = 'default' AND version = '${V0}'`).get()).toEqual({ n: 1 });
     // 有待批时不重复提案；批过之后按新在任者重新比 —— pricing 自己不再参评
     expect(runSwitchCycle(t.db, o()).action).toBe("none");
   });
@@ -239,7 +255,7 @@ describe("切换流程", () => {
     seedLive(t.db, "hot2", days, 7);
     const r4 = runSwitchCycle(t.db, o());
     expect(r4).toMatchObject({ action: "applied", variant: "hot2" });
-    expect(switchStatus(t.db, o()).history[0]).toMatchObject({ decidedBy: "auto", toVersion: "1.3.3" });
+    expect(switchStatus(t.db, o()).history[0]).toMatchObject({ decidedBy: "auto", toVersion: V3 });
   });
 
   it("回滚：恢复上一套槽位、版本照样往前升、自动切换暂停、被回滚的不立刻卷土重来", () => {
@@ -248,8 +264,8 @@ describe("切换流程", () => {
     const r = runSwitchCycle(t.db, o()) as any;
     approveSwitch(t.db, r.id, "human", o());
     const rb = rollbackSwitch(t.db, { ...o(), note: "看不顺眼" });
-    expect(rb).toMatchObject({ kind: "rollback", fromVariant: "pricing", toVariant: "baseline", toVersion: "1.3.2", reverts: r.id });
-    expect(readSlots()).toEqual({ slots: {}, version: "1.3.2" });
+    expect(rb).toMatchObject({ kind: "rollback", fromVariant: "pricing", toVariant: "baseline", toVersion: V2, reverts: r.id });
+    expect(readSlots()).toEqual({ slots: {}, version: V2 });
     expect(fs.readFileSync(file, "utf8")).not.toMatch(/^槽位/m);
     expect(autoSwitchAllowed(t.db)).toBe(false);
     expect(runSwitchCycle(t.db, o()).action).toBe("none");
