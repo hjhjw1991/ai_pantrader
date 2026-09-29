@@ -6,6 +6,9 @@ import type { ReactNode } from "react";
  * 抽屉用并行路由 + 拦截路由做：从作战台点开 /positions 时只渲染抽屉槽，
  * 作战台不重算（它一次要 0.3–2.5 秒）、K 线的状态也不丢；直接刷新 /positions 时
  * 走非拦截的那份，照样是"作战台 + 抽屉"。
+ *
+ * 「抽屉已关闭」的状态不在这一层，在根 layout 的 DrawerGate ——
+ * 那里也管着侧边栏那条关闭路径，两条路要写同一份。
  */
 export default function DashLayout({ children, drawer }: { children: ReactNode; drawer: ReactNode }) {
   return (

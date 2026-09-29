@@ -14,3 +14,18 @@ export const DRAWERS = [
 export type DrawerSlug = (typeof DRAWERS)[number]["slug"];
 export type DrawerIcon = (typeof DRAWERS)[number]["icon"];
 export const drawerOf = (slug: string) => DRAWERS.find(d => d.slug === slug) ?? null;
+
+/**
+ * 当前地址落在哪个抽屉里；不在抽屉上就 null。
+ *
+ * 抽屉槽显示什么，只看这个返回值 —— 而不是看"刚才谁按了关闭"。
+ * 认地址的好处是任何关法（右上角按钮、侧边栏数字键、点已打开的项、浏览器后退、
+ * 抽屉里的链接跳出去）都自动覆盖；认按钮的话，少写一条就会漏出一个不该在的抽屉。
+ *
+ * 严格相等：`/positionsExtra` 不算抽屉，`/positions?tab=1` 算（usePathname 不带查询串，
+ * 抽屉里切页签不会引起重解析）。别改成 startsWith —— 将来加子路由会整片误判。
+ */
+export function drawerAt(pathname: string | null | undefined): DrawerSlug | null {
+  if (!pathname) return null;
+  return DRAWERS.find(d => pathname === `/${d.slug}`)?.slug ?? null;
+}

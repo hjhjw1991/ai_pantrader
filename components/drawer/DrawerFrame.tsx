@@ -1,15 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useEffect, type ReactNode } from "react";
+import { useDrawerGate } from "@/components/drawer/DrawerGate";
 
 /**
- * 右侧抽屉。作战台是唯一的主页，其余功能都从这里滑出来，看完关掉回到盘面。
+ * 右侧抽屉的外壳。作战台是唯一的主页，其余功能都从这里滑出来，看完关掉回到盘面。
  *
  * 关闭 = 回到 "/"：抽屉是路由（/positions 等），刷新、收藏、前进后退都成立。
  * Esc 与点遮罩都能关；焦点在输入框里时 Esc 不拦，免得填表填到一半被关掉。
  *
- * ── 为什么关闭分两步：先撤掉自己，再换路由 ──
+ * ── 关闭为什么要「先撤掉自己，再换路由」 ──
  *
  * "/" 是 force-dynamic，服务端每次都要重算整张作战台（DB 侧实测 640–750ms，
  * dev 里加上渲染与串行化 2–4s；表单刚写入过更慢 —— useSubmit 的 router.refresh()
@@ -18,30 +18,23 @@ import { usePathname, useRouter } from "next/navigation";
  * 而 App Router 的导航是**整棵树一起提交**的：children 那一格还没算完，
  * drawer 这一格不会先变回空。于是点下去的画面是抽屉停在原地、
  * 内容被换成 @drawer/loading.tsx 的「加载中…」，几秒后才消失 ——
- * 看着就是点了没反应、卡住了再关上。
+ * 看着就是点了没反应、卡住了再关上。所以先撤掉自己：点击的下一帧抽屉就没了，
+ * 底下那次重算照旧发生（数据可能刚被表单改过，本来就该重算），只是不再挡在眼前。
  *
- * 所以这里先把自身撤掉：点击的下一帧抽屉就没了，底下那次重算照旧发生
- * （数据可能刚被表单改过，本来就该重算），只是不再挡在眼前。
+ * ── 这个 closed 不在这儿 ──
+ *
+ * 状态在 DrawerGate：@drawer 槽在关闭过程中会换到 loading.tsx 那一台上，
+ * 那台也有一个 DrawerFrame。各存一份的话，先撤掉的只是第一台，第二台会带着
+ * 「加载中…」重新出场 —— 表现就是"关了又弹一次"。详见 DrawerGate 的说明。
  */
-export function DrawerFrame({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const [closed, setClosed] = useState(false);
-
-  /**
-   * 换了地址就把自己恢复出来。
-   *
-   * 抽屉之间是同一个组件实例（@drawer 槽的 page.tsx 都渲染 DrawerFrame），
-   * 状态不会随路由自动重置 —— 少了这一句，"关掉 /positions 再打开同一个抽屉"
-   * 会拿回来一个 closed=true 的实例，表现为点了没反应。
-   */
-  useEffect(() => { setClosed(false); }, [pathname]);
-
-  const close = useCallback(() => {
-    if (closed) return;
-    setClosed(true);
-    router.push("/", { scroll: false });
-  }, [closed, router]);
+export function DrawerFrame({
+  title, hint, children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  const { closed, close } = useDrawerGate();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

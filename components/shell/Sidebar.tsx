@@ -3,11 +3,17 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { DRAWERS, type DrawerIcon } from "@/lib/ui/drawers";
+import { DRAWERS, drawerAt, type DrawerIcon } from "@/lib/ui/drawers";
+import { useDrawerGate } from "@/components/drawer/DrawerGate";
 
 /**
  * 左侧导航：作战台 + 五个抽屉。可折叠成一列图标（记在本机，下次打开保持）。
  * 数字键 1–5 开对应抽屉（再按一次关掉），0 回作战台，r 刷新；焦点在输入框里时不拦按键。
+ *
+ * 关抽屉一律走 DrawerGate 的 close()，不自己 push("/") —— 这里是第二条关闭路径
+ * （另一条是抽屉右上角的按钮）。自己 push 的话，"抽屉已经关了"这件事实
+ * 只有浏览器/路由器知道，@drawer 槽里的下一台 DrawerFrame 不知道，会带着
+ * 「加载中…」再出场一次。
  */
 
 const PATHS: Record<DrawerIcon | "home", string> = {
@@ -32,7 +38,8 @@ const KEY = "pt:sidebar-collapsed";
 export function Sidebar({ mode, health }: { mode: string; health: { label: string; tone: string } }) {
   const pathname = usePathname();
   const router = useRouter();
-  const open = DRAWERS.find(d => pathname === `/${d.slug}`)?.slug ?? null;
+  const { close } = useDrawerGate();
+  const open = drawerAt(pathname);
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -50,14 +57,14 @@ export function Sidebar({ mode, health }: { mode: string; health: { label: strin
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) return;
       const hit = DRAWERS.find(d => d.key === e.key);
-      if (hit) { router.push(open === hit.slug ? "/" : `/${hit.slug}`, { scroll: false }); return; }
-      if (e.key === "0") router.push("/", { scroll: false });
+      if (hit) { open === hit.slug ? close() : router.push(`/${hit.slug}`, { scroll: false }); return; }
+      if (e.key === "0") close();
       if (e.key === "r") router.refresh();
       if (e.key === "[") toggle();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, router]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, close, router]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const item = (active: boolean) =>
     `flex items-center gap-3 h-10 ${collapsed ? "justify-center px-0" : "px-4"} text-[13px] border-l-2 ${
@@ -81,12 +88,17 @@ export function Sidebar({ mode, health }: { mode: string; health: { label: strin
       </div>
 
       <nav className="flex-1 py-2 flex flex-col">
-        <Link href="/" scroll={false} className={item(open === null)} title="作战台（0）">
+        {/* 抽屉开着时点这里也是"回作战台"，和上面那条一样走 close */}
+        <Link href="/" scroll={false} className={item(open === null)} title="作战台（0）"
+          onClick={e => { if (open !== null) { e.preventDefault(); close(); } }}>
           <Icon name="home" />{!collapsed ? <span>作战台</span> : null}
         </Link>
         <div className={`${collapsed ? "mx-3" : "mx-4"} my-2 border-t border-line`} />
+        {/* 再点已打开的那一项 = 关掉：走 gate 的 close 而不是 Link 的 href，见文件头注释 */}
         {DRAWERS.map(d => (
-          <Link key={d.slug} href={open === d.slug ? "/" : `/${d.slug}`} scroll={false} className={item(open === d.slug)} title={`${d.title}（${d.key}）：${d.hint}`}>
+          <Link key={d.slug} href={`/${d.slug}`} scroll={false}
+            onClick={e => { if (open === d.slug) { e.preventDefault(); close(); } }}
+            className={item(open === d.slug)} title={`${d.title}（${d.key}）：${d.hint}`}>
             <Icon name={d.icon} />
             {!collapsed ? (<><span className="flex-1">{d.title}</span><span className="num text-[10px] text-ink-3">{d.key}</span></>) : null}
           </Link>
