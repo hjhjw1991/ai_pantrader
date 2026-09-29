@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fetchZtPool, fetchAllSecurities, fetchLhb, fetchLhbSeats, boardOf, EM_PUSH2_HOSTS, EM_MARKET_FILTER }
+import { fetchZtPool, fetchAllSecurities, fetchLhb, fetchLhbSeats, boardOf,
+  parseSectorMembersPage, fetchSectorMembers, EM_PUSH2_HOSTS, EM_MARKET_FILTER }
   from "@/lib/data/sources/eastmoney";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -268,5 +269,106 @@ describe("fetchLhbSeats", () => {
       stubClient(read("em-lhb-seat-buy.json")) as any, "2026-08-03", "buy");
     const key = new Set(rows.map(r => `${r.code}|${r.changeType}|${r.deptCode}`));
     expect(key.size).toBeLessThan(rows.length);
+  });
+});
+
+/* ────────────────── 板块成分：必须翻页 ────────────────── */
+
+/** 造一页 clist 报文。codes 用 6 位数字；total 不给就当作接口没带 */
+function mkPage(codes: string[], total?: number) {
+  const diff: Record<string, any> = {};
+  codes.forEach((c, i) => { diff[String(i)] = { f12: c, f14: `票${c}` }; });
+  const data: any = { diff };
+  if (total !== undefined) data.total = total;
+  return JSON.stringify({ data });
+}
+
+/** 按 pn 分别返回预置报文的客户端，顺便记录请求过哪些 pn */
+function pagedClient(pages: string[]) {
+  const pns: number[] = [];
+  const client = {
+    source: "eastmoney",
+    breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+    async get(url: string) {
+      const pn = Number(new URL(url).searchParams.get("pn") ?? "1");
+      pns.push(pn);
+      const text = pages[pn - 1];
+      if (text === undefined) return { ok: false as const, error: "no page", latencyMs: 5 };
+      return { ok: true as const, text, status: 200, latencyMs: 5 };
+    },
+  };
+  return { pns, client };
+}
+
+const seq = (n: number, start = 1) =>
+  Array.from({ length: n }, (_, i) => String(start + i).padStart(6, "0"));
+
+describe("板块成分分页", () => {
+  it("解析：diff 是数组或对象都认", () => {
+    const asArray = JSON.stringify({ data: { total: 2, diff: [
+      { f12: "600000", f14: "浦发银行" }, { f12: "000001", f14: "平安银行" }] } });
+    expect(parseSectorMembersPage(asArray)).toEqual({
+      rows: [{ code: "600000", name: "浦发银行" }, { code: "000001", name: "平安银行" }],
+      total: 2,
+    });
+    expect(parseSectorMembersPage(mkPage(["600000"])).rows).toEqual([{ code: "600000", name: "票600000" }]);
+  });
+
+  it("空板块不是错误 —— 返回空而不是抛", () => {
+    expect(parseSectorMembersPage(JSON.stringify({ data: { total: 0, diff: null } })))
+      .toEqual({ rows: [], total: null });
+  });
+
+  it("只要 6 位 A 股代码，板块里混着的指数代码不要", () => {
+    const p = JSON.stringify({ data: { total: 3, diff: [
+      { f12: "600000", f14: "浦发" }, { f12: "BK1234", f14: "某板块" }, { f12: "SH000001", f14: "上证" }] } });
+    expect(parseSectorMembersPage(p).rows.map(r => r.code)).toEqual(["600000"]);
+  });
+
+  /**
+   * 这条是核心：接口单页硬顶 100（pz 写多大都只回 100）。
+   * 只取 pn=1 会让大行业静默少掉一半以上成分，那些票在 代码→行业 映射里
+   * 查不到，再被主线筛当成"不在主线上"挡掉。
+   */
+  it("满页之后继续翻，直到把 total 取满", async () => {
+    const { pns, client } = pagedClient([
+      mkPage(seq(100), 161),
+      mkPage(seq(61, 101), 161),
+    ]);
+    const rows = await fetchSectorMembers(client as any, "BK0465", { rounds: 1 });
+    expect(rows).toHaveLength(161);
+    expect(pns).toEqual([1, 2]);
+    expect(new Set(rows.map(r => r.code)).size).toBe(161);
+  });
+
+  it("不满页就是最后一页，不再多打一次请求", async () => {
+    const { pns, client } = pagedClient([mkPage(seq(40), 40)]);
+    const rows = await fetchSectorMembers(client as any, "BK1312", { rounds: 1 });
+    expect(rows).toHaveLength(40);
+    expect(pns).toEqual([1]);
+  });
+
+  it("第二页回来 fewer 但 total 更大时也不无限翻（以不满页为准）", async () => {
+    const { pns, client } = pagedClient([
+      mkPage(seq(100), 9999),
+      mkPage(seq(30, 101), 9999),   // 不满页 → 停
+    ]);
+    const rows = await fetchSectorMembers(client as any, "BKxxxx", { rounds: 1 });
+    expect(rows).toHaveLength(130);
+    expect(pns).toEqual([1, 2]);   // 没有第 3 次请求
+  });
+
+  it("接口不带 total 也照翻，靠「不满页」收尾", async () => {
+    const { pns, client } = pagedClient([mkPage(seq(100)), mkPage(seq(12, 101))]);
+    const rows = await fetchSectorMembers(client as any, "BKyyyy", { rounds: 1 });
+    expect(rows).toHaveLength(112);
+    expect(pns).toEqual([1, 2]);
+  });
+
+  it("空板块：一次请求就结束", async () => {
+    const { pns, client } = pagedClient([JSON.stringify({ data: { total: 0, diff: null } })]);
+    const rows = await fetchSectorMembers(client as any, "BKzzzz", { rounds: 1 });
+    expect(rows).toEqual([]);
+    expect(pns).toEqual([1]);
   });
 });

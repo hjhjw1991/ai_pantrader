@@ -450,36 +450,83 @@ export async function fetchMacroQuote(
 export interface SectorMember { code: string; name: string }
 
 /**
- * 某个行业板块的成分股（`fs=b:BKxxxx`）。
+ * 解析一页成分股（纯函数，便于单测）。
  *
- * 用来建立全市场的 代码 → 行业 映射。此前库里唯一的映射来源是 zt_pool.sector，
- * 只覆盖曾涨停过的票，于是候选池只能从涨停池里选。
- *
- * 一次拿全（pz=600）：单个行业成分最多两三百只，分页只会多打一倍请求，
- * 而东财的限流额度很紧。
+ * diff 有时是数组、有时是以序号为键的对象 —— 两种都要认，这是同一个接口在
+ * 板块榜那里已经踩过的坑。total 缺失时返回 null，让调用方保留上一页的判断，
+ * 不要拿 undefined 去比大小（NaN 比较恒 false，会把"到底了"判成"还没到底"）。
  */
-export async function fetchSectorMembers(
-  client: SourceClient, bk: string, o: RotationOpts = {}
-): Promise<SectorMember[]> {
-  const r = await getWithHostRotation(
-    client,
-    host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=1&pz=600&po=1&fid=f3` +
-      `&fs=b%3A${encodeURIComponent(bk)}&fields=f12%2Cf14&ut=${UT}`,
-    `sector members ${bk}`, o
-  );
-
-  const j = JSON.parse(r.text);
+export function parseSectorMembersPage(text: string): { rows: SectorMember[]; total: number | null } {
+  const j = JSON.parse(text);
   const diff = j?.data?.diff;
   // total=0 且 diff=null 是合法的（空板块），不能当报文异常
-  if (diff === undefined || diff === null) return [];
+  if (diff === undefined || diff === null) return { rows: [], total: null };
   const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
 
-  return list
+  const rows = list
     .filter(x => x !== null && typeof x === "object" && typeof x.f12 === "string")
     // 只要 6 位 A 股代码：板块里混着的指数/其它市场代码不属于我们的宇宙
     .filter(x => /^\d{6}$/.test(x.f12))
     .map(x => ({ code: String(x.f12), name: String(x.f14 ?? "") }));
+
+  const t = Number(j?.data?.total);
+  return { rows, total: Number.isFinite(t) ? t : null };
 }
+
+/**
+ * 某个行业板块的成分股（`fs=b:BKxxxx`），**翻页取全**。
+ *
+ * 用来建立全市场的 代码 → 行业 映射。此前库里唯一的映射来源是 zt_pool.sector，
+ * 只覆盖曾涨停过的票，于是候选池只能从涨停池里选。
+ *
+ * ── 必须翻页，这是实测改的（2026-09-29）──
+ *
+ * 老代码写死 `pn=1&pz=600`，注释里还写着"单个行业成分最多两三百只，一次拿全"。
+ * 实测不成立：这个接口 **pz 超过 100 也只回 100**（与同文件 fetchSectorRank 那条
+ * 注释记的是同一个行为）。化学制药 total=161 只回 100、农林牧渔 total=114 只回 100，
+ * 而 pn=2 能正常把剩下的 61 / 14 只取回来。
+ *
+ * 后果不是"少几只"那么轻：大行业（机械设备 541 只、电子 494、医药生物 478）
+ * 被砍到 100 只，而它们在 代码→行业 映射里查不到，主线筛会把它们当成"不在主线上"
+ * 静默挡掉 —— 候选池看着一切正常，其实少了三分之二的市场。
+ * 用户层面看就是"这只有 K 线、有量价，就是查不到行业"。
+ *
+ * 翻页的代价是请求数从 ~496 涨到 ~800，而东财的限流额度很紧；
+ * 但比拿到一张三分之二缺失的映射表划算 —— 缺的那些票是永久静默的。
+ */
+export async function fetchSectorMembers(
+  client: SourceClient, bk: string, o: RotationOpts = {}
+): Promise<SectorMember[]> {
+  const out: SectorMember[] = [];
+  const seen = new Set<string>();
+  let total = Number.POSITIVE_INFINITY;
+
+  for (let pn = 1; pn <= SECTOR_MEMBERS_MAX_PAGES; pn++) {
+    const r = await getWithHostRotation(
+      client,
+      host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${CLIST_PAGE_MAX}` +
+        `&po=1&fid=f3&fs=b%3A${encodeURIComponent(bk)}&fields=f12%2Cf14&ut=${UT}`,
+      `sector members ${bk} p${pn}`, o
+    );
+
+    const page = parseSectorMembersPage(r.text);
+    // 后续页可能不带 total，保留上一页看到的总数，不要退化成 NaN
+    if (page.total !== null) total = page.total;
+    for (const m of page.rows) {
+      if (seen.has(m.code)) continue;
+      seen.add(m.code);
+      out.push(m);
+    }
+
+    if (page.rows.length === 0) break;                 // 空页 = 到底
+    if (page.rows.length < CLIST_PAGE_MAX) break;      // 不满页 = 最后一页
+    if (out.length >= total) break;                    // 凑够 total 就停
+  }
+  return out;
+}
+
+/** 单个行业最多翻几页。541 只（最大行业）÷ 100 = 6 页，10 页很充裕 */
+const SECTOR_MEMBERS_MAX_PAGES = 10;
 
 /* -------------------------------- 估值 -------------------------------- */
 
