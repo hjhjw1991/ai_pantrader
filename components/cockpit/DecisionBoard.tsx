@@ -5,6 +5,10 @@ import Link from "next/link";
 import type { CockpitItem, ItemGroup } from "@/lib/ui/adapters/cockpit";
 import { StockChart } from "@/components/StockChart";
 import { openChart } from "@/components/ChartLink";
+import {
+  NO_SORT, applyGroupSort, findSortOption, initialDir, rel, sortOptionsFor,
+} from "@/lib/ui/cockpit-sort";
+import type { SortDir } from "@/lib/ui/sort";
 
 /**
  * 作战台的主体：左边自选列表（候选 / 持仓 / 观察三组，各自成块），右边是选中那只的决策卡或几只的对比表，下面是 K 线。
@@ -12,6 +16,9 @@ import { openChart } from "@/components/ChartLink";
  * 列表放在决策卡旁边而不是下面：换一只看一眼，眼睛不用上下跑。
  * 决策卡只摆引擎已经给出的结论：大字是结论，价位卡是执行要用的数，技术面提示单独一块、标明参考。
  * 对比表把勾选的几只（最多 4）按同一组行并排，方便在几只候选之间挑一只。
+ *
+ * 三组各有自己的排序选项（评分、建议仓位只对候选有意义，距止损只对持仓有意义），
+ * 定义与派生算式在 `lib/ui/cockpit-sort.ts` —— 决策卡上的价位和这里的排序共用同一条算式。
  * 键盘：↑ / ↓ 换票，c 勾选 / 取消对比，v 在决策卡与对比之间切换（焦点在输入框里、或抽屉开着时不拦）。
  */
 
@@ -26,7 +33,6 @@ const GROUPS: ItemGroup[] = ["候选", "持仓", "观察"];
 
 const px = (x: number | null | undefined) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(2) : "—");
 const pctTxt = (x: number | null) => (x === null ? "" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`);
-const rel = (a: number | null, b: number | null) => (a !== null && b !== null && b > 0 ? a / b - 1 : null);
 
 function Spark({ xs, up }: { xs: number[]; up: boolean | null }) {
   if (xs.length < 2) return <span className="w-20 h-6 inline-block" />;
@@ -223,6 +229,56 @@ function Compare({ list, onOpen, onDrop }: { list: CockpitItem[]; onOpen: (k: st
   );
 }
 
+/**
+ * 一组的排序控件：维度下拉 + 升降序开关。
+ *
+ * ── 为什么这里不是一个 `<table>` 的表头 ──
+ *
+ * 侧栏只有 300px，一行已经有勾选框、名称、代码、迷你走势、价格五样东西，
+ * 再塞一行列头就什么也看不清了。所以这里是下拉选，不是点列头。
+ *
+ * ── 方向为什么要单独一个按钮 ──
+ *
+ * 把方向编进选项里（"评分 ↑" / "评分 ↓"）只会让选项数翻倍，而反向一次
+ * （看完"最高的"再看"最低的"）明明是最常见的第二步。
+ */
+function SortPick({
+  group, pick, onPick, onFlip,
+}: {
+  group: ItemGroup;
+  pick: { key: string; dir: SortDir } | undefined;
+  onPick: (key: string) => void;
+  onFlip: () => void;
+}) {
+  const def = pick ? findSortOption(group, pick.key) : null;
+  return (
+    <span className="ml-auto flex items-center gap-1 min-w-0">
+      <select
+        value={pick?.key ?? NO_SORT}
+        onChange={(e) => onPick(e.target.value)}
+        aria-label={`${group}排序`}
+        title={def?.title ?? "选一个维度排序"}
+        className="bg-panel border border-line-2 rounded-sm px-1 py-0.5 text-[11px] text-ink-2 max-w-[6.5rem] truncate"
+      >
+        <option value={NO_SORT}>默认顺序</option>
+        {sortOptionsFor(group).map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+      </select>
+      <button
+        type="button"
+        onClick={onFlip}
+        disabled={!pick}
+        title={pick ? `现在是${pick.dir === "desc" ? "降" : "升"}序，点击反向` : "先选一个排序维度"}
+        aria-label={pick ? (pick.dir === "desc" ? "改为升序" : "改为降序") : "切换升降序"}
+        className={`w-5 py-0.5 border border-line-2 rounded-sm text-[11px] leading-none ${
+          pick ? "text-ink hover:border-info" : "text-ink-3 opacity-50 cursor-default"
+        }`}
+      >
+        {pick?.dir === "asc" ? "↑" : "↓"}
+      </button>
+    </span>
+  );
+}
+
 const GROUP_STYLE: Record<ItemGroup, { title: string; bar: string; empty: string }> = {
   候选: { title: "今日候选", bar: "bg-up", empty: "今日无买入候选" },
   持仓: { title: "持仓", bar: "bg-info", empty: "没有持仓" },
@@ -233,9 +289,49 @@ export function DecisionBoard({ items, emptyNote }: { items: CockpitItem[]; empt
   const [sel, setSel] = useState<string | null>(items[0]?.key ?? null);
   const [view, setView] = useState<"card" | "compare">("card");
   const [cmp, setCmp] = useState<string[]>([]);
+  const [sorts, setSorts] = useState<Partial<Record<ItemGroup, { key: string; dir: SortDir }>>>({});
   const cur = useMemo(() => items.find(i => i.key === sel) ?? items[0] ?? null, [items, sel]);
   const cmpList = useMemo(() => cmp.map(k => items.find(i => i.key === k)).filter((x): x is CockpitItem => x !== undefined), [cmp, items]);
   const toggleCmp = (k: string) => setCmp(c => (c.includes(k) ? c.filter(x => x !== k) : c.length >= 4 ? c : [...c, k]));
+
+  /**
+   * 三组各自排序后的结果，以及它们的拼接 —— 「视觉顺序」。
+   *
+   * ── 为什么要注意这个顺序 ──
+   *
+   * ↑ / ↓ 换票以前直接在 props 传来的 items 上走 index。一旦各组有了排序，
+   * 屏幕上的顺序就不再等于 props 的顺序 —— 按评分排完再按 ↓，光标会突然跳到列表另一头。
+   * 所以键盘走 `ordered`（= 三组排序后首尾相接），`items` 只作为数据源。
+   *
+   * ── 为什么价格刷新后不用重新点排序 ──
+   *
+   * 这个组件是 client component：`router.refresh()` 只替换服务端渲染的那部分，
+   * 这里的 state（选中哪个维度、什么方向）是保留的，而新的价格随着 props 一起进来，
+   * useMemo 的依赖 `items` 变了就重排一遍。所以"排序结果在每次价格更新后更新"
+   * 不需要写任何同步代码 —— 只是别把排序结果缓存到 items 之外的地方。
+   */
+  const sorted = useMemo(() => {
+    const m = {} as Record<ItemGroup, CockpitItem[]>;
+    for (const g of GROUPS) {
+      const list = items.filter(i => i.group === g);
+      const pick = sorts[g];
+      m[g] = applyGroupSort(list, pick ? findSortOption(g, pick.key) : null, pick?.dir ?? "desc");
+    }
+    return m;
+  }, [items, sorts]);
+  const ordered = useMemo(() => GROUPS.flatMap(g => sorted[g]), [sorted]);
+
+  const pickSort = (g: ItemGroup, key: string) => setSorts(prev => {
+    if (key === NO_SORT) {
+      const { [g]: _drop, ...rest } = prev;
+      return rest;
+    }
+    return { ...prev, [g]: { key, dir: initialDir(g, key, items.filter(i => i.group === g)) } };
+  });
+  const flipDir = (g: ItemGroup) => setSorts(prev => {
+    const p = prev[g];
+    return p ? { ...prev, [g]: { key: p.key, dir: p.dir === "asc" ? "desc" : "asc" } } : prev;
+  });
 
   // 选中哪只，K 线就换成哪只并带上计划价位
   useEffect(() => {
@@ -250,13 +346,13 @@ export function DecisionBoard({ items, emptyNote }: { items: CockpitItem[]; empt
       if (e.key === "c" && cur) { toggleCmp(cur.key); return; }
       if (e.key === "v") { setView(v => (v === "card" ? "compare" : "card")); return; }
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-      const i = items.findIndex(x => x.key === cur?.key);
-      const j = e.key === "ArrowDown" ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1);
-      if (items[j]) { e.preventDefault(); setSel(items[j].key); setView("card"); }
+      const i = ordered.findIndex(x => x.key === cur?.key);
+      const j = e.key === "ArrowDown" ? Math.min(ordered.length - 1, i + 1) : Math.max(0, i - 1);
+      if (ordered[j]) { e.preventDefault(); setSel(ordered[j].key); setView("card"); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, cur?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ordered, cur?.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const tab = (v: "card" | "compare", label: string) => (
     <button type="button" onClick={() => setView(v)}
@@ -271,17 +367,37 @@ export function DecisionBoard({ items, emptyNote }: { items: CockpitItem[]; empt
           <span className="text-warn">★</span>
           <span className="text-ink font-medium">自选</span>
           <span className="text-[11px] text-ink-3">{items.length} 只 · ↑↓ 切换 · c 勾对比</span>
-          <Link href="/positions" scroll={false} className="ml-auto text-[11px] text-info">管理 →</Link>
+          <Link href="/positions" scroll={false} className="ml-auto text-[11px] text-info shrink-0">管理 →</Link>
         </div>
+        {/*
+         * 有组在排序时才出现的说明。下拉控件只有 6.5rem 宽，说不清"这个排序会不会自己更新"，
+         * 而这件事不说清楚，用户只能靠盯着看才知道 —— 所以单独占一行。
+         */}
+        {GROUPS.some(g => sorts[g] && items.filter(i => i.group === g).length > 1) ? (
+          <p className="px-1 -mt-1 text-[10px] leading-4 text-ink-3">
+            {GROUPS.filter(g => sorts[g] && items.filter(i => i.group === g).length > 1).map(g => {
+              const p = sorts[g]!;
+              const o = findSortOption(g, p.key);
+              return `${GROUP_STYLE[g].title}：${o?.label ?? p.key} ${p.dir === "desc" ? "降" : "升"}序`;
+            }).join(" · ")}
+            <span> · 有新高价进来会自动按新价重排</span>
+          </p>
+        ) : null}
         {GROUPS.map(g => {
-          const list = items.filter(i => i.group === g);
+          const raw = items.filter(i => i.group === g);
+          const list = sorted[g];
           const st = GROUP_STYLE[g];
+          const pick = sorts[g];
           return (
             <section key={g} className="bg-panel border border-line rounded-sm overflow-hidden">
               <header className="flex items-center gap-2 px-3 py-1.5 bg-panel-2 border-b border-line">
-                <span className={`w-1 h-3.5 rounded-sm ${st.bar}`} />
-                <span className="text-[12px] text-ink">{st.title}</span>
-                <span className="ml-auto num text-[11px] text-ink-2 bg-panel rounded-sm px-1.5">{list.length}</span>
+                <span className={`w-1 h-3.5 rounded-sm shrink-0 ${st.bar}`} />
+                <span className="text-[12px] text-ink shrink-0">{st.title}</span>
+                <span className="num text-[11px] text-ink-2 bg-panel rounded-sm px-1.5 shrink-0">{raw.length}</span>
+                {/* 只有一两行的组不摆排序控件：排了也是白费一次点击 */}
+                {raw.length > 1 ? (
+                  <SortPick group={g} pick={pick} onPick={k => pickSort(g, k)} onFlip={() => flipDir(g)} />
+                ) : null}
               </header>
               {list.length === 0 ? <div className="px-3 py-2 text-[11px] text-ink-3">{st.empty}</div>
                 : list.map(it => (
