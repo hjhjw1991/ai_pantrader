@@ -171,8 +171,22 @@ export interface WatchView {
   vsMarket: number | null;
 }
 
+/**
+ * 观察池视图里"最近移出、可恢复"条目最多列多少条。
+ * 池本身只有几十只量级，20 条足够覆盖误操作的回溯窗口；再多就成流水账了。
+ */
+const ARCHIVED_LIMIT = 20;
+
 export interface WatchpoolView {
   rows: WatchView[];
+  /**
+   * 移出过、可以放回的条目。按移出时间倒序没法知道（表里没记移出时刻），
+   * 就用加入时间倒序 —— 最近才盯的排在前面。
+   *
+   * 有这一项是因为软删只留了数据、没留回来的路：移错一只要重新手填
+   * 触发价、止损、买入逻辑，而那些值本来就在库里。
+   */
+  archived: WatchpoolRow[];
   mood: IntradayMood | null;
 }
 
@@ -194,9 +208,18 @@ export function watchpoolView(db: Db): WatchpoolView {
   const codes = rows.map((r) => r.code);
   const quotes = latestQuotes(db, codes);
   const names = securities(db, codes);
+  const activeCodes = new Set(rows.map((r) => r.code));
+  // 已归档的也要显示名称：很多条只记得代码，放回前得知道放回去的是哪只
+  const allRows = watchpool(db, true);
+  const archivedCodes = allRows.filter((r) => !activeCodes.has(r.code)).map((r) => r.code);
+  const archivedNames = securities(db, archivedCodes);
   const mood = moodOrNull(db);
   return {
     mood,
+    archived: allRows
+      .filter((r) => !activeCodes.has(r.code))
+      .slice(0, ARCHIVED_LIMIT)
+      .map((r) => ({ ...r, name: r.name ?? archivedNames.get(r.code)?.name ?? null })),
     rows: rows.map((row) => {
       const q = quotes.get(row.code) ?? null;
       return {

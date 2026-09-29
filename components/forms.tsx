@@ -204,16 +204,71 @@ export function WatchpoolForm({ accountIds = [] }: { accountIds?: string[] }) {
   );
 }
 
+/**
+ * 移出观察池。
+ *
+ * 两级点击，不上弹窗：移出是软删、能从"最近移出"一键放回，代价低到不值得
+ * 为它打断操作；但它也不该点一下就生效 —— 表格最右那一列在日常浏览里扫不到，
+ * 误点的概率不是零。
+ *
+ * 做成独立按钮而不是"选中多行批量删"，是因为观察池里每一条都是人逐个想清楚
+ * 写下来的（买入逻辑、触发价、止损），批量删的工具会让人不再逐条看。
+ */
 export function WatchpoolRemoveButton({ code }: { code: string }) {
+  const { busy, send } = useSubmit();
+  const [armed, setArmed] = useState(false);
+  return (
+    <span className="inline-flex items-center gap-1 whitespace-nowrap">
+      <button
+        type="button"
+        className={
+          armed
+            ? "border border-danger/60 rounded-sm px-2 py-0.5 text-danger"
+            : btnCls + " py-0.5 hover:text-danger hover:border-danger/50"
+        }
+        disabled={busy}
+        title="移出观察池（软删：记录保留，可原样放回）"
+        onClick={async () => {
+          if (!armed) {
+            setArmed(true);
+            return;
+          }
+          if (await send("/api/signal/watchpool", "DELETE", { code })) setArmed(false);
+        }}
+      >
+        {armed ? "确认移出？" : "移出"}
+      </button>
+      {armed ? (
+        <button
+          type="button"
+          className="text-ink-3 hover:text-ink"
+          disabled={busy}
+          onClick={() => setArmed(false)}
+        >
+          取消
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * 把移出的条目放回观察池。
+ *
+ * 这条路的必要性来自软删本身：数据留着却没有回来的路，移错一只就要把
+ * 触发价、止损、买入逻辑重新手填一遍 —— 而那些值本来就在库里没丢。
+ */
+export function WatchpoolRestoreButton({ code }: { code: string }) {
   const { busy, send } = useSubmit();
   return (
     <button
-      className="text-ink-3 hover:text-danger"
+      type="button"
+      className={btnCls + " py-0.5 hover:text-ink"}
       disabled={busy}
-      onClick={() => send("/api/signal/watchpool", "DELETE", { code })}
-      title="移出观察池（软删，历史保留供复盘）"
+      onClick={() => send("/api/signal/watchpool", "PATCH", { code })}
+      title="放回观察池。触发价、止损、买入逻辑都还是原来那套，不重置"
     >
-      移出
+      放回
     </button>
   );
 }

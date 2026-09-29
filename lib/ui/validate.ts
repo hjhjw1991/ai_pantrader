@@ -42,6 +42,9 @@ export const WatchpoolUpsertSchema = z.object({
 
 export const WatchpoolDeleteSchema = z.object({ code: CodeSchema });
 
+/** 恢复已移出的条目，入参与移出一致 —— 都只需要一个代码 */
+export const WatchpoolRestoreSchema = WatchpoolDeleteSchema;
+
 /**
  * 手工成交回填。**这不是下单**：它记录的是"我已经在券商 App 里成交了"这件事
  * （spec §12 ManualBroker）。所以必须带真实成交价与时间，不接受"按市价"。

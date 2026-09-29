@@ -34,7 +34,10 @@ import {
 import { refreshTableCounts, readTableCountsSnapshot, TABLE_COUNTS_KEY } from "@/lib/data/table-counts";
 import { setMeta } from "@/lib/data/meta";
 import { winRateStats } from "@/lib/ui/adapters/ledger";
-import { recordManualFill, upsertAccount, upsertWatch, deactivateWatch } from "@/lib/ui/mutations";
+import { watchpoolView } from "@/lib/ui/views";
+import {
+  recordManualFill, upsertAccount, upsertWatch, deactivateWatch, reactivateWatch,
+} from "@/lib/ui/mutations";
 
 /**
  * 读层与写层的测试。**跑在临时库上** —— 绝不碰 ~/PanTraderData/pantrader.db：
@@ -292,10 +295,55 @@ describe("写路径：观察池 / 账户 / 手工成交回填", () => {
     expect(rows[0].account).toBe("核心");
     expect(rows[0].triggerPx).toBe(5.6);
 
-    deactivateWatch(db, "600468");
+    expect(deactivateWatch(db, "600468")).toBe(true);
     expect(watchpool(db)).toHaveLength(0);
     // 软删：历史仍在，供复盘
     expect(watchpool(db, true)).toHaveLength(1);
+    // 已经移出的再移一次、或移一个池里压根没有的代码：changes 都是 0。
+    // 不明说"没变化"的话，点了没反应和"删了但页面没刷新"看起来一模一样
+    expect(deactivateWatch(db, "600468")).toBe(false);
+    expect(deactivateWatch(db, "999999")).toBe(false);
+  });
+
+  /**
+   * archived 是"移出"这条路的另一半：只删不能回的操作，误点一次的代价是
+   * 把触发价、止损、买入逻辑全部重新手填一遍。
+   */
+  it("移出的条目进 archived，放回后回到 rows", () => {
+    upsertWatch(db, { code: "600468", account: "核心", triggerPx: 5.8 });
+    upsertWatch(db, { code: "000001", account: "核心", triggerPx: 10 });
+    expect(watchpoolView(db).archived).toHaveLength(0);
+
+    deactivateWatch(db, "600468");
+    const v = watchpoolView(db);
+    expect(v.rows.map((r) => r.row.code)).toEqual(["000001"]);
+    expect(v.archived.map((r) => r.code)).toEqual(["600468"]);
+    // 归档条目要带上原值：放回之前得看清自己放回去的是什么
+    expect(v.archived[0]).toMatchObject({ triggerPx: 5.8, account: "核心" });
+
+    reactivateWatch(db, "600468");
+    const v2 = watchpoolView(db);
+    expect(v2.rows.map((r) => r.row.code).sort()).toEqual(["000001", "600468"]);
+    expect(v2.archived).toHaveLength(0);
+  });
+
+  it("移出的条目能原样放回：软删留了数据就该留回来的路", () => {
+    upsertWatch(db, { code: "600468", account: "核心", triggerPx: 5.8, stopPx: 5.51, thesis: "回踩平台"});
+    // 按代码取而不是取第 0 行：added_at 是秒级时间戳，同一秒内 upsert 多行时顺序不定
+    const pick = () => watchpool(db).find((r) => r.code === "600468")!;
+    const before = pick();
+    deactivateWatch(db, "600468");
+
+    expect(reactivateWatch(db, "600468")).toBe(true);
+    const after = pick();
+    // 触发价/止损/买入逻辑都没被重置 —— 放回不是重新登记
+    expect(after).toMatchObject({ triggerPx: 5.8, stopPx: 5.51, thesis: "回踩平台" });
+    // added_at 也不动：它是"我什么时候开始盯这只"的记忆，放回不该抹掉
+    expect(after.addedAt).toBe(before.addedAt);
+
+    // 已经在池里的重复放回：changes=0，UI 不该弹一次假的"已放回"
+    expect(reactivateWatch(db, "600468")).toBe(false);
+    expect(reactivateWatch(db, "999999")).toBe(false);
   });
 
   it("买入按加权平均摊成本，且把费用摊进去", () => {

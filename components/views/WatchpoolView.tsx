@@ -1,7 +1,7 @@
 import { NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
 import { Panel, Tag } from "@/components/Panel";
-import { WatchpoolForm, WatchpoolRemoveButton } from "@/components/forms";
+import { WatchpoolForm, WatchpoolRemoveButton, WatchpoolRestoreButton } from "@/components/forms";
 import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtTs, ageMinutes } from "@/lib/ui/format";
 import { latestQuoteTs, accounts } from "@/lib/ui/queries";
@@ -54,6 +54,13 @@ export default function WatchpoolPage() {
               <thead>
                 <tr>
                   <th>代码</th>
+                  {/*
+                    操作列放在代码正后方，不在最后。
+                    这个视图是装在 `/positions` 抽屉里的，抽屉比主区窄得多，
+                    14 列的表要做横向滚���才能看到最后一列 ——
+                    而"移出"就在那一列，等于这个功能看不见。
+                  */}
+                  <th>移出</th>
                   <th>名称</th>
                   <th>账户</th>
                   <th className="text-right">现价</th>
@@ -66,7 +73,6 @@ export default function WatchpoolPage() {
                   <th className="text-right">触发→止损</th>
                   <th>买入逻辑</th>
                   <th className="text-right">加入时间</th>
-                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -78,6 +84,9 @@ export default function WatchpoolPage() {
                   return (
                     <tr key={r.row.code}>
                       <td className="num text-ink">{r.row.code}</td>
+                      <td>
+                        <WatchpoolRemoveButton code={r.row.code} />
+                      </td>
                       <td>{r.name ?? "—"}</td>
                       <td className="text-ink-2">{r.row.account ?? "—"}</td>
                       <td className="num">
@@ -122,9 +131,6 @@ export default function WatchpoolPage() {
                         {r.row.thesis || "—"}
                       </td>
                       <td className="num text-ink-3">{fmtTs(r.row.addedAt, true)}</td>
-                      <td>
-                        <WatchpoolRemoveButton code={r.row.code} />
-                      </td>
                     </tr>
                   );
                 })}
@@ -154,12 +160,55 @@ export default function WatchpoolPage() {
         ) : null}
       </Panel>
 
+      {view.archived.length > 0 ? (
+        <Panel
+          title="最近移出"
+          hint="移出是软删，条目还在库里。放回去时触发价、止损、买入逻辑都还是原来那套"
+        >
+          <table className="dense">
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th>账户</th>
+                <th className="text-right">触发价</th>
+                <th className="text-right">止损价</th>
+                <th>买入逻辑</th>
+                <th>放回</th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.archived.map((r) => (
+                <tr key={r.code}>
+                  <td className="num text-ink-2">{r.code}</td>
+                  <td className="text-ink-2">{r.name ?? "—"}</td>
+                  <td className="text-ink-3">{r.account ?? "—"}</td>
+                  <td className="num text-ink-2">
+                    <Num v={r.triggerPx} />
+                  </td>
+                  <td className="num text-ink-2">
+                    <Num v={r.stopPx} />
+                  </td>
+                  <td className="text-ink-3 max-w-[24rem] truncate" title={r.thesis ?? ""}>
+                    {r.thesis || "—"}
+                  </td>
+                  <td>
+                    <WatchpoolRestoreButton code={r.code} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      ) : null}
+
       <Panel title="加入观察池" hint="买入条件想清楚了再记，触发价与止损同时写">
         <WatchpoolForm accountIds={accounts(db).filter((a) => a.active).map((a) => a.id)} />
       </Panel>
 
       <p className="text-ink-3 text-[11px]">
         本页不产生信号，只登记人的判断。策略引擎就绪后候选池会出现在作战台，与本页并存。
+        移出不是删除，条目仍在库里。
       </p>
     </div>
   );

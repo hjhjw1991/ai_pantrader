@@ -47,9 +47,35 @@ export function upsertWatch(db: Db, w: WatchpoolInput): void {
   );
 }
 
-/** 移出观察池用软删：active=0。历史上盯过什么是复盘素材，不该物理删掉 */
-export function deactivateWatch(db: Db, code: string): void {
-  db.prepare("UPDATE watchpool SET active = 0 WHERE code = ?").run(code);
+/**
+ * 移出观察池用软删：active=0。历史上盯过什么是复盘素材，不该物理删掉。
+ *
+ * 返回**有没有真的移出一只**：对不存在的代码 UPDATE 的 changes 是 0，
+ * 但 API 层面看起来完全一样。不区分的话，点了"移出"而列表纹丝不动时，
+ * 人不知道是该再点一次还是这次压根没生效。
+ *
+ * 注意 `AND active = 1`：SQLite 的 changes 数的是**匹配并被写入**的行，
+ * 哪怕写进去的值和原来一样也算一笔。不带这个条件的话，重复移出同一只票
+ * 每次都返回 true，等于对"压根没这回事"报成功。
+ */
+export function deactivateWatch(db: Db, code: string): boolean {
+  return db
+    .prepare("UPDATE watchpool SET active = 0 WHERE code = ? AND active = 1")
+    .run(code).changes > 0;
+}
+
+/**
+ * 把移出的条目放回观察池。
+ *
+ * 存在的原因是软删留了数据却没留回来的路：移错一只之后只能把触发价、
+ * 止损、买入逻辑重新手填一遍 —— 而那些值本来就在库里。
+ * 只翻 active 这一个字段，其余原样保留（连 added_at 都不动：
+ * 它是"我什么时候开始盯这只"的时间，重新放回不该把这个记忆抹掉）。
+ */
+export function reactivateWatch(db: Db, code: string): boolean {
+  return db
+    .prepare("UPDATE watchpool SET active = 1 WHERE code = ? AND active = 0")
+    .run(code).changes > 0;
 }
 
 export interface AccountInput {
