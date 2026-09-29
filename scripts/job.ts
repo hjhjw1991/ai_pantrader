@@ -11,6 +11,7 @@
  *   pnpm job <selfcheck|preopen|intraday|close|post|night>
  *   pnpm job night --force    不认领、也不受已认领影响，强制跑一次（人工补数据用）
  *   pnpm job sector           只刷 代码→行业 映射（不计入调度时点，也不看 7 天过期）
+ *   pnpm job adjfix            把写坏的复权因子按「顺延上一根」纠正（纯本地，幂等）
  *
  * sector 是单独开的口子：映射表默认 7 天一刷，而它一旦是空的/缺一大半，
  * 「量价」候选来源会整路关掉（engine 查不到行业就不出候选）。补数据的时候
@@ -21,6 +22,7 @@ import { runMigrations } from "@/lib/db/migrate";
 import { createClient } from "@/lib/data/client";
 import { runJob, type JobName } from "@/lib/data/jobs";
 import { refreshSectorMembers } from "@/lib/data/collectors/cross-section";
+import { repairTrailingAdjFactors } from "@/lib/data/collectors/daily";
 import { claimSlot, finishSlot, type Runner } from "@/lib/data/scheduler";
 import { slotForNow } from "@/lib/data/schedule";
 import { shanghaiTs } from "@/lib/data/clock";
@@ -91,6 +93,18 @@ if (argvName === "sector") {
     db.close();
     process.exit(1);
   }
+}
+
+/**
+ * adjfix：只把写坏的复权因子按"顺延上一根"纠正回来。纯本地 SQL、不发网络请求、
+ * 幂等 —— 怀疑 K 线跳了一个数量级的时候先跑它，比重新拉一遍日线便宜三个数量级。
+ * 与 sector 一样不占调度时点。
+ */
+if (argvName === "adjfix") {
+  const n = repairTrailingAdjFactors(db);
+  console.log(JSON.stringify({ name: "adjfix", fixedRows: n }));
+  db.close();
+  process.exit(0);
 }
 
 try {

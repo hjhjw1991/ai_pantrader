@@ -482,6 +482,13 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.dailyFailed = daily.failed.length;
       // 源上无 K 线序列的代码（新股/定向转让），不是缺口但要能看见数量变化
       stats.dailyNoData = daily.noData.length;
+      /**
+       * 顺延纠偏的行数。**正常是 0** —— 非 0 说明有人在写坏最新一根的因子，
+       * 而写成 0 之外的任何数字都意味着这一夜之前图是错的
+       * （最新一根的因子是前复权的基准，它错了整张图错，不是一根偏一点）。
+       * 把它挂在 stats 上是为了让"哦又是这个问题"能自己冒出来，不靠某次偶然发现。
+       */
+      stats.dailyAdjRepaired = daily.adjFixed;
 
       /**
        * 复权因子，按周刷。放在全量日线**之后**：

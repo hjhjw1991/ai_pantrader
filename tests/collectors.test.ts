@@ -10,7 +10,7 @@ import {
 } from "@/lib/data/collectors/cross-section";
 import { parseMarketIndustryPage } from "@/lib/data/sources/eastmoney";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
-import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
+import { collectDaily, collectIndexDaily, repairTrailingAdjFactors } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
 
 let dir: string, db: any;
@@ -180,6 +180,57 @@ describe("collectDaily", () => {
     await collectDaily(db, clientReturning(bars) as any, ["601012"], 10);
     const row = db.prepare("SELECT adj_factor FROM kline_daily").get() as any;
     expect(row.adj_factor).toBe(1.0);
+  });
+});
+
+/**
+ * repairTrailingAdjFactors 是插入时那条顺延 SQL 的**兜底**，不是重复实现。
+ *
+ * 插入时的 COALESCE 是"先保住既有值"——那保护了回填任务算出的正确因子，
+ * 但它同时也意味着：某行一旦被写成 1.0，之后每次重采都把这个错值保住。
+ * 写坏的那一刻起，错值自我延续，再跑多少次采集都不会好。
+ * 实测 2026-09-28：负责采集的 daemon 是常驻进程、代码冻结在修复前那一刻，
+ * 于是最新一根又是 1.0，全市场 5,534 行无一幸免。
+ */
+describe("repairTrailingAdjFactors", () => {
+  const put = (code: string, date: string, c: number, adj: number) =>
+    db.prepare("INSERT INTO kline_daily (code,date,o,h,l,c,vol,amount,adj_factor) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(code, date, c, c, c, c, 100, null, adj);
+
+  it("把前一交易日因子非 1、自己却是 1 的行顺延回来", () => {
+    put("600667", "2026-09-24", 19.41, 5.8038154471747);
+    put("600667", "2026-09-28", 17.81, 1.0);   // 写坏的最新一根
+
+    expect(repairTrailingAdjFactors(db)).toBe(1);
+    const row = db.prepare("SELECT adj_factor FROM kline_daily WHERE code='600667' AND date='2026-09-28'").get() as any;
+    // 顺延后该序列因子一致，图上就不再出现 112.65 → 17.81 的断崖
+    expect(row.adj_factor).toBeCloseTo(5.8038154471747, 10);
+  });
+
+  it("幂等：已修好的不会被重复改写", () => {
+    put("600667", "2026-09-24", 19.41, 5.8038154471747);
+    put("600667", "2026-09-28", 17.81, 1.0);
+    expect(repairTrailingAdjFactors(db)).toBe(1);
+    expect(repairTrailingAdjFactors(db)).toBe(0);
+  });
+
+  /** 这 123 只票整段都是 1.0 —— 它们没有"非 1 的前一根"，不该被碰到 */
+  it("真没有除权记录的票整段 1.0，不被误伤", () => {
+    put("601398", "2026-09-24", 5.0, 1.0);
+    put("601398", "2026-09-28", 5.1, 1.0);
+    expect(repairTrailingAdjFactors(db)).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) c FROM kline_daily WHERE code='601398' AND adj_factor=1.0").get())
+      .toMatchObject({ c: 2 });
+  });
+
+  /** 指数代码形如 sh000001，不是 6 位纯数字；它的 1.0 是正确答案 */
+  it("指数行情不带 6 位数字代码，不会被顺延成个股的因子", () => {
+    put("sh000001", "2026-09-24", 3000, 1.0);
+    put("600667", "2026-09-24", 19.41, 5.8038154471747);
+    put("600667", "2026-09-28", 17.81, 1.0);
+    expect(repairTrailingAdjFactors(db)).toBe(1);
+    const idx = db.prepare("SELECT adj_factor FROM kline_daily WHERE code='sh000001'").get() as any;
+    expect(idx.adj_factor).toBe(1.0);
   });
 });
 

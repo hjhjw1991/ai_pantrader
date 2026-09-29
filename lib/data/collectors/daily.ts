@@ -39,7 +39,7 @@ const NO_DATA_ALERT_MIN_BATCH = 100;
  */
 export async function collectDaily(
   db: Db, client: SourceClient, codes: string[], datalen: number
-): Promise<{ written: number; failed: string[]; noData: string[] }> {
+): Promise<{ written: number; failed: string[]; noData: string[]; adjFixed: number }> {
   const stmt = db.prepare(
     `INSERT OR REPLACE INTO kline_daily (code, date, o, h, l, c, vol, amount, adj_factor)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(
@@ -84,6 +84,8 @@ export async function collectDaily(
     }
   }
 
+  const adjFixed = repairTrailingAdjFactors(db, codes);
+
   if (codes.length >= NO_DATA_ALERT_MIN_BATCH &&
       noData.length / codes.length > NO_DATA_ALERT_RATIO) {
     recordGap(
@@ -94,7 +96,67 @@ export async function collectDaily(
     );
   }
 
-  return { written, failed, noData };
+  return { written, failed, noData, adjFixed };
+}
+
+/**
+ * 把因子为 1.0、但前一交易日不为 1.0 的行，顺延成前一交易日的因子。
+ *
+ * ── 为什么需要它，而不是只靠插入时那条 COALESCE ──
+ *
+ * 插入时的顺延只能管**新行**。而同一套 SQL 里排在最前面的是
+ * "先取既有值、保住它"——那是为了不让日线采集覆盖掉回填任务算出来的正确值，
+ * 但它同时也意味着：**一旦某行被写成了 1.0，此后每次重采都会把这个错值保住**。
+ * 写坏的那一刻起，错值是自我延续的，再跑多少次采集都不会好。
+ *
+ * 实测就是这么发生的（2026-09-29）：9-27 夜里修好了插入时的顺延，但负责采集的
+ * daemon 是 22:21 随 dev server 拉起的常驻进程，代码冻结在那一刻 —— 它没看到修复。
+ * 9-28 收盘采集写入的最新一根又是 1.0，**全市场 5,534 行无一幸免**，
+ * 于是 600667 图上出现 9-24 收 112.65（19.41 × 5.80）、9-28 收 17.81 的断崖。
+ *
+ * 所以顺延这件事不能只押在"这次运行的代码是对的"上。这一步**幂等**，
+ * 挂在每次采集末尾，写坏了下次自动爬起来。
+ *
+ * ── 为什么不误伤 ──
+ *
+ * 复权因子是单调递增的台阶：两次除权之间恒定，除权后变大，**不会从非 1 变回 1**。
+ * 所以"前一根 ≠ 1 而这一根 = 1"几乎只能是写坏了。
+ * 真没有除权记录的票整段都是 1.0（前一根也是 1.0），北交所那些源不支持的票同理 ——
+ * 两者都找不到"≠ 1.0 的前一根"，不会被这条规则碰到。
+ * 指数 code 形如 sh000001，不是 6 位纯数字，也天然排除（指数本来就固定 1.0）。
+ *
+ * @param codes 只修这些票。不传则全表（CLI 手动兜底用）
+ * @returns 实际修正的行数
+ */
+export function repairTrailingAdjFactors(db: Db, codes?: string[]): number {
+  const targets = codes ?? (
+    db.prepare(
+      "SELECT DISTINCT code FROM kline_daily WHERE code GLOB '[0-9][0-9][0-9][0-9][0-9][0-9]'"
+    ).all() as Array<{ code: string }>
+  ).map(r => r.code);
+
+  const fix = db.prepare(
+    `UPDATE kline_daily AS k
+       SET adj_factor = (
+         SELECT p.adj_factor FROM kline_daily p
+          WHERE p.code = k.code AND p.date < k.date AND p.adj_factor != 1.0
+          ORDER BY p.date DESC LIMIT 1
+       )
+     WHERE k.code = ?
+       AND k.adj_factor = 1.0
+       AND EXISTS (
+         SELECT 1 FROM kline_daily p
+          WHERE p.code = k.code AND p.date < k.date AND p.adj_factor != 1.0
+       )`
+  );
+
+  // 每票一条 UPDATE，走 (code, date) 主键 —— 5888 次点查，全表扫不起
+  const run = db.transaction((list: string[]) => {
+    let n = 0;
+    for (const c of list) n += fix.run(c).changes;
+    return n;
+  });
+  return run(targets);
 }
 
 /**
