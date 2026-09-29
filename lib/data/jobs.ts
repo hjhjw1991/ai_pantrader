@@ -5,7 +5,8 @@ import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
 import {
   collectZtPool, collectSectorRank, collectDtPool, collectMacro,
-  collectSectorMembers, sectorMembersUpdatedAt, collectSectorRankList,
+  refreshSectorMembers, sectorMembersUpdatedAt, sectorMembersMissingRatio,
+  SECTOR_MISSING_REFRESH_RATIO,
 } from "@/lib/data/collectors/cross-section";
 import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { INDICES } from "@/lib/data/indices";
@@ -126,6 +127,12 @@ export interface JobProgress {
 export interface JobResult {
   name: string; skipped: boolean; reason?: string;
   stats: Record<string, number>;
+  /**
+   * 少量字符串标签（例如行业映射这次走的是哪条采集路）。
+   * 单独放而不塞进 stats：stats 是 `Record<string, number>`，
+   * 为它放宽类型会把 `string | number` 一路传染到调度器和 API 的判据里。
+   */
+  labels?: Record<string, string>;
   /** 缺口统计的起算日（系统起始日） */
   since?: string;
 }
@@ -232,6 +239,7 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
   const date = shanghaiDate(now);
   const compact = date.replace(/-/g, "");
   const stats: Record<string, number> = {};
+  const labels: Record<string, string> = {};
 
   // 缺口一律从系统起始日算起，不把上线前的历史算成缺口
   const since = systemStartDate(db, date);
@@ -256,7 +264,7 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
     stats.missingDailyDays = gaps.missingDaily.length;
     stats.missingZtPoolDays = gaps.missingZtPool.length;
     stats.missingLhbDays = gaps.missingLhb.length;
-    return { name, skipped: false, stats, since };
+    return { name, skipped: false, stats, labels, since };
   }
 
   // preopen 只同步交易日历，休市日跑一次也无害。
@@ -274,25 +282,25 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.macroWritten = m.written;
       stats.macroFailed = m.failed.length;
     }
-    return { name, skipped: false, stats };
+    return { name, skipped: false, stats, labels };
   }
 
   // 日历缺当日记录时用实时行情兜底（当日日线收盘后才有）
   const isToday = date === shanghaiDate(new Date());
   if (!await ensureTradingDay(db, clients.tencent, date, isToday, now)) {
-    return { name, skipped: true, reason: `${date} is not a trading day`, stats };
+    return { name, skipped: true, reason: `${date} is not a trading day`, stats, labels };
   }
 
   switch (name) {
     case "plan": {
       if (planPreopen === undefined) {
         return { name, skipped: true,
-          reason: "未注入盘前计划实现（组装根没接上 lib/plan/preopen）", stats };
+          reason: "未注入盘前计划实现（组装根没接上 lib/plan/preopen）", stats, labels };
       }
       const r = await planPreopen(db);
       stats.candidates = r.candidates.length;
       stats.planOk = r.ok ? 1 : 0;
-      if (!r.ok) return { name, skipped: true, reason: r.reason ?? "计划未生成", stats };
+      if (!r.ok) return { name, skipped: true, reason: r.reason ?? "计划未生成", stats, labels };
       break;
     }
     case "intraday": {
@@ -360,26 +368,41 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
     }
     case "night": {
       /**
-       * 代码→行业 映射：空表或过期才刷。放在夜间 job 的最前面 ——
+       * 代码→行业 映射：**过期 或 仍有缺口**才刷。放在夜间 job 的最前面 ——
        * 它请求重，跑在全量日线之前可以和后面那 5,888 次新浪请求错开源。
+       *
+       * 加了"仍有缺口"这一条是因为：MAX(ts) 每次跑都更新，而某次被东财限流
+       * 砍掉一半时 ts 照样是今天的 —— 只按过期判，剩下那批会安静地缺失整整一周。
+       * 现在按"还有多少没查到"补，列表路一趟才 60 次请求，补得起。
        */
       {
         const last = sectorMembersUpdatedAt(db);
         const lastMs = last === null ? NaN : Date.parse(`${last.slice(0, 10)}T00:00:00Z`);
         // 空表或时间戳解析不出来（脏数据）都当成"该刷了"：宁可多刷一次，
         // 也不要因为一个解析不了的时间戳让映射永远不更新
-        const stale = !Number.isFinite(lastMs)
+        const aged = !Number.isFinite(lastMs)
           || (now.getTime() - lastMs) / 86_400_000 >= SECTOR_MEMBERS_MAX_AGE_DAYS;
-        if (stale) {
+        if (aged) {
+          labels.sectorMembersWhy = "aged";
+        } else {
+          const missing = sectorMembersMissingRatio(db);
+          if (missing > SECTOR_MISSING_REFRESH_RATIO) {
+            labels.sectorMembersWhy = "gaps";
+            stats.sectorMembersMissing = Number(missing.toFixed(4));
+          }
+        }
+        if (labels.sectorMembersWhy !== undefined) {
           try {
-            const ranks = await collectSectorRankList(db, clients.eastmoney);
-            const r = await collectSectorMembers(db, clients.eastmoney, ranks);
+            const r = await refreshSectorMembers(db, clients.eastmoney);
             stats.sectorMembersSectors = r.sectors;
             stats.sectorMembersCodes = r.codes;
             stats.sectorMembersFailed = r.failed.length;
             // 用了几轮也记下来：一轮就干净说明源很稳，三轮还剩一堆说明源在恶化，
             // 这两种情况看到的 failed 数可能一样，但处置完全不同
             stats.sectorMembersPasses = r.passes;
+            // 走的是哪条路要看得见：boards 说明列表路完全拿不到（源那侧出问题了），
+            // listing-partial 说明通了但被限流砍掉一部分 —— 处置完全不同
+            labels.sectorMembersRoute = r.route;
           } catch (e) {
             /**
              * 原来这里是 `catch { stats.sectorMembersFailed = -1; }` —— 只留一个哨兵数字。
@@ -699,5 +722,5 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       break;
     }
   }
-  return { name, skipped: false, stats };
+  return { name, skipped: false, stats, labels };
 }

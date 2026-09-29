@@ -174,9 +174,10 @@ export default function PositionsPage() {
                 用持仓市值当分母会恒等于 100%，那是个假指标。
               </li>
               <li>
-                <span className="text-ink-2">单行业最大占比</span>：库里没有行业分类。
-                security.board 是上市板（主板/创业板/科创板/北交所）不是行业；
-                zt_pool.sector 只覆盖当日涨停票。不拿上市板冒充行业。
+                <span className="text-ink-2">单行业最大占比</span>：分母（账户总资产）没记，
+                占比无从算起。行业分类本身是有的（security_sector 全市场映射），
+                但它并非 100% 覆盖 —— 没查到行业的那部分若静默归入"其他"，
+                读起来像分散、其实是未知。
               </li>
               <li>
                 <span className="text-ink-2">核心卫星比例</span>：持仓表没有核心/卫星标记字段。

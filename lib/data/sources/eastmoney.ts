@@ -316,7 +316,8 @@ export interface SectorRankEntry {
  * 查不到，再被主线筛当成"不在主线上"挡掉：一个看起来完全正常、
  * 其实少了三分之二市场的候选池。
  */
-const CLIST_PAGE_MAX = 100;
+/** 东财 clist 单页硬顶：pz 写多大都只回这么多行 */
+export const CLIST_PAGE_MAX = 100;
 
 export async function fetchSectorRank(
   client: SourceClient,
@@ -527,6 +528,72 @@ export async function fetchSectorMembers(
 
 /** 单个行业最多翻几页。541 只（最大行业）÷ 100 = 6 页，10 页很充裕 */
 const SECTOR_MEMBERS_MAX_PAGES = 10;
+
+/* ─────────────────── 全市场 代码→行业（一次性） ─────────────────── */
+
+export interface MarketIndustry { code: string; name: string; sector: string }
+
+/** 全市场列表取行业用的字段：f100 = 所属行业板块名（东财 BK 板块口径） */
+const EM_INDUSTRY_FIELDS = "f12,f14,f100";
+
+/**
+ * 解析一页「全市场 + 行业」（纯函数）。
+ *
+ * 与成分股那一路同构：diff 可能是数组也可能是以序号为键的对象。
+ *
+ * ── 为什么单独留一个 '-' 的过滤 ──
+ * 退市的老代码（PT金田A 之类）仍然出现在这个列表里，东财给它们 f100 = '-'。
+ * 不过滤的话，'-' 会作为一个"行业名"写进映射表，后面主线筛一匹配就命中，
+ * 等于给一批僵尸票发了一张通行证。宁可查不到（未判定 ≠ 通过）。
+ */
+export function parseMarketIndustryPage(text: string): { rows: MarketIndustry[]; total: number | null } {
+  const j = JSON.parse(text);
+  const diff = j?.data?.diff;
+  if (diff === undefined || diff === null) return { rows: [], total: null };
+  const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
+
+  const rows = list
+    .filter(x => x !== null && typeof x === "object" && typeof x.f12 === "string")
+    .filter(x => /^\d{6}$/.test(x.f12))
+    .map(x => ({
+      code: String(x.f12),
+      name: String(x.f14 ?? ""),
+      sector: String(x.f100 ?? ""),
+    }))
+    .filter(x => x.sector !== "" && x.sector !== "-");
+
+  const t = Number(j?.data?.total);
+  return { rows, total: Number.isFinite(t) ? t : null };
+}
+
+/**
+ * 全市场第 pn 页（代码升序）的 代码/名称/行业。
+ *
+ * ── 为什么用这一路，而不是继续「逐个行业拉成分」──
+ *
+ * 逐个行业要拉 496 个板块、翻页后约 800 次请求，而这个接口单次失败率 30~50%：
+ * 实测 496 个行业只成功 146 个，库里 5,888 只票只有 3,248 只有行业。
+ * 用户的观感就是「这只有 K 线、有量价，就是查不到行业」（600667 太极实业、
+ * 603155 新亚强 都在这批里 —— 它们所属的行业板块恰好落在失败的那一半）。
+ *
+ * 而全市场列表本身就带行业字段，一次遍历约 60 页就把同一份映射拿全：
+ * 请求数少一个数量级，失败面也小一个数量级。
+ *
+ * 排序必须按代码（f12）升序，不能按涨幅 —— 盘中价格在变，按涨幅排会让行在
+ * 翻页之间漂移（实测 36 页里重复 229 条、少 333 只）。
+ */
+export async function fetchMarketIndustryPage(
+  client: SourceClient, pn: number, o: RotationOpts = {}
+): Promise<{ rows: MarketIndustry[]; total: number | null }> {
+  const r = await getWithHostRotation(
+    client,
+    host => `https://${host}.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${CLIST_PAGE_MAX}` +
+      `&po=0&np=1&fltt=2&invt=2&fid=f12&fs=${EM_MARKET_FILTER}` +
+      `&fields=${EM_INDUSTRY_FIELDS}&ut=${UT}`,
+    `market industry p${pn}`, o
+  );
+  return parseMarketIndustryPage(r.text);
+}
 
 /* -------------------------------- 估值 -------------------------------- */
 

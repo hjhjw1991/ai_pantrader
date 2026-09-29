@@ -187,10 +187,14 @@ export interface PortfolioRisk {
   maxSingleMarketValue: number | null;
   maxSingleCode: string | null;
   /**
-   * 单行业最大占比。**恒为 null**：库里没有行业分类字段
-   * （security 只有 board = 主板/创业板/科创板/北交所，那是上市板不是行业；
-   * sector 只在 zt_pool 里、且只覆盖当日涨停票）。
-   * 不拿上市板冒充行业 —— 冒充出来的数字会被当成真实的行业集中度读。
+   * 单行业最大占比。**恒为 null**，原因是分母：账户总资产没记，占比无从算起
+   * （与 maxSingleRatio 同一个原因）。
+   *
+   * 分子（行业分类）倒是有了：security_sector 是全市场 代码→行业 映射。
+   * 但它的覆盖不是 100%（退市老代码东财不给行业名，行业归属也可能漏采），
+   * 拿它算出来的集中度会把"没查到行业"那部分静默归到一个隐藏的"其他"里，
+   * 读起来像是分散、其实是未知。等哪天要补这个指标，得先把覆盖缺口显式暴露出来，
+   * 不能只给一个数。
    */
   maxIndustryRatio: null;
   /** 报价缺失的票，界面必须点名，不能静默从合计里漏掉 */

@@ -5,7 +5,10 @@ import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { collectMarketSnapshot } from "@/lib/data/collectors/market-snapshot";
-import { collectZtPool, collectSectorMembers } from "@/lib/data/collectors/cross-section";
+import {
+  collectZtPool, collectSectorMembers, collectSectorMembersFromListing, refreshSectorMembers,
+} from "@/lib/data/collectors/cross-section";
+import { parseMarketIndustryPage } from "@/lib/data/sources/eastmoney";
 import { collectWatchMinute } from "@/lib/data/collectors/watch-minute";
 import { collectDaily, collectIndexDaily } from "@/lib/data/collectors/daily";
 import { collectLhb } from "@/lib/data/collectors/lhb";
@@ -689,5 +692,261 @@ describe("collectSectorMembers 多轮重试", () => {
     expect(r.passes).toBe(1);
     expect(slept).toBe(0);
     expect(r.failed).toHaveLength(1);
+  });
+});
+
+/* ───────────── 代码→行业：全市场列表路 ───────────── */
+
+/**
+ * 换这条路的动因是实测数据：逐个板块拉成分要 496 个板块 × 翻页 ≈ 800 次请求，
+ * 而这个接口单次失败率 30~50%，实测只成功 146 个行业 —— 5,888 只票里只有
+ * 3,248 只有行业。用户看到的就是「这只有 K 线、有量价，就是查不到行业」
+ * （600667 太极实业、603155 新亚强 所属板块都在失败的那 350 个里）。
+ * 全市场列表自带行业字段（f100），一次遍历约 60 页拿全，请求数少一个数量级。
+ */
+describe("collectSectorMembersFromListing", () => {
+  const BOARDS = [{ bk: "BK1", sector: "半导体" }, { bk: "BK2", sector: "化学制品" }];
+  const PZ = 100;                       // 与源层 CLIST_PAGE_MAX 一致
+
+  /** 造 n 行「全市场 + 行业」 */
+  const mkRows = (n: number, sector = "银行Ⅱ", start = 1) =>
+    Array.from({ length: n }, (_, i) => ({
+      f12: String(start + i).padStart(6, "0"), f14: `票${i}`, f100: sector,
+    }));
+
+  const onePage = (rows: any[], total: number) =>
+    JSON.stringify({ data: { total, diff: rows } });
+
+  /**
+   * 按 pn 分页真实切片的客户端。
+   *
+   * failUntil 用来模拟"抖动但会好"：某个页前 k 次请求失败，之后恢复。
+   * 这里的 k 要大于 10（主机轮换一轮 10 次），否则会在同一轮内就碰上成功。
+   */
+  function listingClient(rows: any[] | null, failPn: Record<number, number> = {}) {
+    const tries: Record<number, number> = {};
+    const seen: number[] = [];
+    const client = {
+      source: "eastmoney",
+      breakers: { reset() {}, allOpen: () => false } as any,
+      async get(url: string) {
+        const pn = Number(new URL(url).searchParams.get("pn") ?? "1");
+        seen.push(pn);
+        tries[pn] = (tries[pn] ?? 0) + 1;
+        if ((failPn[pn] ?? 0) >= tries[pn]) {
+          return { ok: false as const, error: "other side closed", latencyMs: 1 };
+        }
+        // rows 为 null 表示"接口回了没有 total 也没有数据的空报文"
+        if (rows === null) {
+          return { ok: true as const, status: 200, latencyMs: 1,
+            text: JSON.stringify({ data: { diff: null } }) };
+        }
+        const slice = rows.slice((pn - 1) * PZ, pn * PZ);
+        return { ok: true as const, status: 200, latencyMs: 1,
+          text: onePage(slice, rows.length) };
+      },
+    };
+    return { client, seen, tries };
+  }
+
+  const noSleep = async () => {};
+
+  it("解析：diff 数组/对象都认，且不给没有行业名的行发通行证", () => {
+    const asArray = JSON.stringify({ data: { total: 3, diff: [
+      { f12: "600667", f14: "太极实业", f100: "工程咨询服务Ⅱ" },
+      { f12: "000003", f14: "PT金田A", f100: "-" },
+      { f12: "BK1234", f14: "某板块", f100: "半导体" },
+    ] } });
+    // 退市老代码东财给 '-'，不过滤的话 '-' 会变成一个"行业名"进映射表，
+    // 主线筛一匹配就命中，等于给僵尸票发了通行证
+    expect(parseMarketIndustryPage(asArray)).toEqual({
+      rows: [{ code: "600667", name: "太极实业", sector: "工程咨询服务Ⅱ" }],
+      total: 3,
+    });
+  });
+
+  it("按 total 翻页取全，行业名翻成板块代码", async () => {
+    const rows = [
+      ...mkRows(100, "半导体"),
+      { f12: "600667", f14: "太极实业", f100: "工程咨询服务Ⅱ" },
+      { f12: "603155", f14: "新亚强", f100: "化学制品" },
+    ];
+    const { client, seen } = listingClient(rows);
+    const r = await collectSectorMembersFromListing(db, client as any, BOARDS, {
+      passes: 2, sleep: noSleep,
+    });
+    expect(seen).toEqual([1, 2]);
+    expect(r.codes).toBe(102);
+    // 化学制品在板块清单里 → 带上 bk；工程咨询服务Ⅱ 不在清单里 → 留空串，
+    // 而不是因为拿不到板块代码就把这一行的行业归属一起丢掉
+    expect(db.prepare("SELECT sector, bk FROM security_sector WHERE code='603155'").get())
+      .toMatchObject({ sector: "化学制品", bk: "BK2" });
+    expect(db.prepare("SELECT sector, bk FROM security_sector WHERE code='600667'").get())
+      .toMatchObject({ sector: "工程咨询服务Ⅱ", bk: "" });
+  });
+
+  /**
+   * 按代码升序翻页时，中途失败一页意味着**后面所有页都拿不到** ——
+   * 实测第 21 页失败时只拿到 2000/5920 行，全是 000/002 开头，
+   * 600/300/920 一只没有。那不是"部分成功"，是系统性偏到半个市场。
+   */
+  it("中途失败的页会重来一轮，不是就此收尾", async () => {
+    const rows = mkRows(150);
+    const { client } = listingClient(rows, { 2: 11 });   // 第 2 页前十次都失败
+    const r = await collectSectorMembersFromListing(db, client as any, BOARDS, {
+      passes: 3, sleep: noSleep,
+    });
+    expect(r.failed).toEqual([]);
+    expect(r.codes).toBe(150);
+    expect(r.passes).toBe(2);
+  });
+
+  it("第一页既没 total 也没数据就直接抛，不按未知页数瞎翻", async () => {
+    const { client } = listingClient(null);   // null = 回一个没有 total 也没有数据的空报文
+    await expect(
+      collectSectorMembersFromListing(db, client as any, BOARDS, { passes: 1, sleep: noSleep })
+    ).rejects.toThrow(/拒绝按未知页数翻页/);
+  });
+
+  it("页面拿不到时如实记缺口，拿到的那部分照样入库", async () => {
+    const rows = mkRows(150);
+    const { client } = listingClient(rows, { 2: 999 });  // 第 2 页永远失败
+    const r = await collectSectorMembersFromListing(db, client as any, BOARDS, {
+      passes: 1, sleep: noSleep,
+    });
+    expect(r.failed).toEqual(["第2页"]);
+    expect(r.codes).toBe(100);
+    const gap = db.prepare(
+      "SELECT reason FROM data_gap WHERE kind='security_sector' ORDER BY rowid DESC LIMIT 1"
+    ).get() as any;
+    expect(gap.reason).toContain("1/2");
+  });
+});
+
+/**
+ * 两条路的编排：主路拿够就不跑那 800 次请求的兜底路。
+ * 判比例而不是判条数 —— 市场在扩容，写死一个数字会慢慢失效。
+ */
+describe("refreshSectorMembers 选路", () => {
+  const noSleep = async () => {};
+
+  /**
+   * 一个客户端同时伺候两路：带 f100 的是全市场列表，其余是板块那一路
+   * （板块清单 fs=m%3A90%2Bt%3A2、板块成分 fs=b%3ABK…）。
+   * marketRows 为空数组表示"列表路回了空报文"。
+   */
+  function dualClient(marketRows: any[], boardBks: string[], declaredTotal?: number) {
+    const calls = { market: 0, boardList: 0, boardMember: 0 };
+    const client = {
+      source: "eastmoney",
+      breakers: { reset() {}, allOpen: () => false } as any,
+      async get(url: string) {
+        const pn = Number(new URL(url).searchParams.get("pn") ?? "1");
+        if (!/f100/.test(url)) {
+          // fs=b%3ABK… 是逐板块拉成分（兜底路），其余是板块清单
+          if (/b%3ABK/.test(url)) {
+            calls.boardMember++;
+            // 成分必须是 6 位 A 股代码，否则解析阶段全被过滤掉
+            return { ok: true as const, status: 200, latencyMs: 1,
+              text: JSON.stringify({ data: { total: boardBks.length,
+                diff: boardBks.map((_, i) => ({ f12: `60000${i}`, f14: "票" })) } }) };
+          }
+          calls.boardList++;
+          return { ok: true as const, status: 200, latencyMs: 1,
+            text: JSON.stringify({ data: { total: boardBks.length,
+              // f3 必须给数字：解析阶段会把缺 f3 的行整条丢掉
+              diff: boardBks.map((c, i) => ({ f12: c, f14: `行业${i}`, f3: 1.5 })) } }) };
+        }
+        calls.market++;
+        const slice = marketRows.slice((pn - 1) * 100, pn * 100);
+        return { ok: true as const, status: 200, latencyMs: 1,
+          text: JSON.stringify({
+            data: { total: declaredTotal ?? marketRows.length, diff: slice } }) };
+      },
+    };
+    return { client, calls };
+  }
+
+  it("列表路拿够 80% 就收工，不白烧那 800 次请求", async () => {
+    const rows = Array.from({ length: 150 }, (_, i) => ({
+      f12: String(i + 1).padStart(6, "0"), f14: "票", f100: "半导体",
+    }));
+    const { client, calls } = dualClient(rows, ["BK1"]);
+    const r = await refreshSectorMembers(db, client as any, { passes: 1, sleep: noSleep });
+    expect(r.route).toBe("listing");
+    expect(r.codes).toBe(150);
+    // 板块清单照拉（拿行业名→bk 的对照表），但逐板块拉成分一次都没跑
+    expect(calls.boardList).toBeGreaterThan(0);
+    expect(calls.boardMember).toBe(0);
+  });
+
+  it("列表路拿不到东西时退回逐板块路，并把路线标出来", async () => {
+    // 用"回空报文"而不是网络失败：网络失败要先走 getWithHostRotation 的三轮退避（45s），
+    // 这里要测的是选路，不是退避
+    const { client } = dualClient([], ["BK1", "BK2"]);
+    const r = await refreshSectorMembers(db, client as any, { passes: 1, sleep: noSleep });
+    expect(r.route).toBe("boards");
+    expect(r.codes).toBeGreaterThan(0);
+  });
+
+  /**
+   * 这条是刻意的取舍：列表路成功一半（盘中常被限流砍掉一部分）时**不去**跑
+   * 800 次请求的逐板块路，而是标成 listing-partial，让下一次夜里的低价重试去补。
+   * 实测退回去跑 20 分钟都没完，还去和 5 分钟一轮的盘中快照抢限流额度。
+   */
+  it("列表路只拿到了一部分：标记出来，但不退回去烧那 800 次请求", async () => {
+    // 第一页给 100 行、总数是 1000 —— 覆盖 10%，远低于 80% 那条线
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      f12: String(i + 1).padStart(6, "0"), f14: "票", f100: "半导体",
+    }));
+    const { client, calls } = dualClient(rows, ["BK1"], 1000);
+    const r = await refreshSectorMembers(db, client as any, { passes: 1, sleep: noSleep });
+    expect(r.route).toBe("listing-partial");
+    expect(r.codes).toBe(100);
+    expect(calls.boardMember).toBe(0);
+  });
+});
+
+/**
+ * 熔断是进程内的（3 次失败即开）。一次刷新要连着跑好几段，
+ * 上一段把 10 台主机试炸之后，下一段会以一个请求都发不出去的方式失败 ——
+ * 实测第二次跑就是这样：清单段 fetch 全挂 → 列表段全线 circuit open → 整次零产出。
+ */
+describe("refreshSectorMembers 段间重置熔断", () => {
+  const noSleep = async () => {};
+
+  it("每段开始前都重置，不让上一段的熔断闷死下一段", async () => {
+    let resets = 0;
+    let trip = false;                       // 模拟"这一段结束时把熔断打到了开"
+    const client = {
+      source: "eastmoney",
+      breakers: {
+        reset: () => { resets++; trip = false; },
+        allOpen: () => trip,
+      } as any,
+      async get(url: string) {
+        const pn = Number(new URL(url).searchParams.get("pn") ?? "1");
+        if (!/f100/.test(url)) {
+          // 板块清单：给数据的同时把熔断打到开（模拟上一段结束时的状态）
+          trip = true;
+          return { ok: true as const, status: 200, latencyMs: 1,
+            text: JSON.stringify({ data: { total: 1,
+              diff: [{ f12: "BK1", f14: "半导体", f3: 1.2 }] } }) };
+        }
+        // 列表段：熔断还开着的话一页也拿不到
+        if (trip) return { ok: false as const, error: "circuit open", latencyMs: 1 };
+        const diff: Record<string, any> = {};
+        for (let i = 0; i < 100; i++) {
+          diff[String(i)] = { f12: String(600000 + i + (pn - 1) * 100), f14: "票", f100: "半导体" };
+        }
+        return { ok: true as const, status: 200, latencyMs: 1,
+          text: JSON.stringify({ data: { total: 100, diff } }) };
+      },
+    };
+    const r = await refreshSectorMembers(db, client as any, { passes: 1, sleep: noSleep });
+    // 每段开始前各重置一次（清单段 + 列表段）
+    expect(resets).toBe(2);
+    expect(r.route).toBe("listing");
+    expect(r.codes).toBe(100);
   });
 });

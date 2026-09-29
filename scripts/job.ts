@@ -10,11 +10,17 @@
  * 用法：
  *   pnpm job <selfcheck|preopen|intraday|close|post|night>
  *   pnpm job night --force    不认领、也不受已认领影响，强制跑一次（人工补数据用）
+ *   pnpm job sector           只刷 代码→行业 映射（不计入调度时点，也不看 7 天过期）
+ *
+ * sector 是单独开的口子：映射表默认 7 天一刷，而它一旦是空的/缺一大半，
+ * 「量价」候选来源会整路关掉（engine 查不到行业就不出候选）。补数据的时候
+ * 不可能等下一次 night，所以要有即跑即生效的入口。
  */
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { createClient } from "@/lib/data/client";
 import { runJob, type JobName } from "@/lib/data/jobs";
+import { refreshSectorMembers } from "@/lib/data/collectors/cross-section";
 import { claimSlot, finishSlot, type Runner } from "@/lib/data/scheduler";
 import { slotForNow } from "@/lib/data/schedule";
 import { shanghaiTs } from "@/lib/data/clock";
@@ -24,10 +30,12 @@ import { runWeeklyReview } from "@/lib/plan/review";
 import { runNightlyDerived } from "@/lib/plan/derived";
 
 const argv = process.argv.slice(2);
-const name = argv[0] as JobName;
+/** 原始参数名。sector 不是 JobName（它不落在调度时点上），所以比类型宽一档 */
+const argvName = argv[0] ?? "";
+const name = argvName as JobName;
 const force = argv.includes("--force");
-if (!name || name.startsWith("--")) {
-  console.error("usage: pnpm job <selfcheck|preopen|intraday|close|post|night> [--force]");
+if (!argvName || argvName.startsWith("--")) {
+  console.error("usage: pnpm job <selfcheck|preopen|intraday|close|post|night|sector> [--force]");
   process.exit(2);
 }
 
@@ -49,6 +57,7 @@ runMigrations(db);
 
 const now = new Date();
 const date = shanghaiTs(now).slice(0, 10);
+
 const slot = force ? null : slotForNow(name, now);
 
 // 落在某个时点上就去抢；抢不到说明别人已经在跑或跑完了，本次直接放手。
@@ -66,6 +75,23 @@ const clients = {
   sw: createClient("sw", { minIntervalMs: 800, db }),
   ths: createClient("ths", { minIntervalMs: 800, db }),
 };
+
+/**
+ * sector：只刷 代码→行业 映射。不认领调度时点、不看 7 天过期 ——
+ * 它是人工补数据的口子，不该去占调度器的坑（占了会让进程内调度以为已经跑过）。
+ */
+if (argvName === "sector") {
+  try {
+    const r = await refreshSectorMembers(db, clients.eastmoney);
+    console.log(JSON.stringify(r));
+    db.close();
+    process.exit(0);
+  } catch (e: any) {
+    console.error(JSON.stringify({ name, error: e?.message ?? String(e) }));
+    db.close();
+    process.exit(1);
+  }
+}
 
 try {
   // 同 daemon：组装根负责把上层实现注进来
