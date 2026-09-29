@@ -8,8 +8,9 @@ import { fmtAmount, fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
 import { latestQuoteTs, trades } from "@/lib/ui/queries";
-import { positionsView, type PositionView } from "@/lib/ui/views";
-import { MoodBar, VsMarketTag } from "@/components/MoodBar";
+import { positionsView } from "@/lib/ui/views";
+import { PositionTable } from "@/components/views/PositionTable";
+import { MoodBar } from "@/components/MoodBar";
 export const dynamic = "force-dynamic";
 
 /**
@@ -136,7 +137,11 @@ export default function PositionsPage() {
                 hint="手工成交回填后出现在这里；position 表不由行情 job 写"
               />
             ) : (
-              <PositionTable rows={rows} weak={moodWeak} />
+              <PositionTable
+                rows={rows}
+                weak={moodWeak}
+                snapNote={`快照 ${fmtTs(snapTs, true)}`}
+              />
             )}
           </Panel>
         );
@@ -270,71 +275,6 @@ export default function PositionsPage() {
           </Link>
         </p>
       </Panel>
-    </div>
-  );
-}
-
-function PositionTable({ rows, weak }: { rows: PositionView[]; weak: boolean }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="dense">
-        <thead>
-          <tr>
-            <th>代码</th>
-            <th>名称</th>
-            <th className="text-right">数量</th>
-            <th className="text-right">成本</th>
-            <th className="text-right">现价</th>
-            <th className="text-right">市值</th>
-            <th className="text-right">浮动盈亏</th>
-            <th className="text-right">浮动%</th>
-            <th className="text-right">止损价</th>
-            <th className="text-right">距止损</th>
-            <th className="text-right">vs市场</th>
-            <th className="text-right">建仓日</th>
-            <th>逻辑</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={`${r.position.accountId}-${r.position.code}`}>
-              <td className="num text-ink">{r.position.code}</td>
-              <td>{r.name ?? "—"}</td>
-              <td className="num">
-                <Num v={r.position.qty} kind="qty" />
-              </td>
-              <td className="num">
-                <Num v={r.position.cost} />
-              </td>
-              <td className="num">
-                <Num v={r.quote?.price ?? null} />
-              </td>
-              <td className="num">
-                <Num v={r.pnl.marketValue} kind="amount" />
-              </td>
-              <td className="num">
-                <Num v={r.pnl.pnl} kind="amount" dir />
-              </td>
-              <td className="num">
-                <Num v={r.pnl.pnlRatio} kind="ratio" dir />
-              </td>
-              <td className="num">
-                <Num v={r.position.stopPx} />
-              </td>
-              <td className="num">
-                <Num v={r.stopGapRatio} kind="ratio" dir />
-              </td>
-              <td className="num">
-                <VsMarketTag vs={r.vsMarket} weak={weak} />
-              </td>
-              <td className="num text-ink-3">{r.position.openDate}</td>
-              <td className="text-ink-3 max-w-[20rem] truncate" title={r.position.thesis}>
-                {r.position.thesis || "—"}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }

@@ -1,11 +1,12 @@
 import { NoDatabase, NoRows } from "@/components/EmptyState";
 import { Num } from "@/components/Num";
-import { Panel, Tag } from "@/components/Panel";
-import { WatchpoolForm, WatchpoolRemoveButton, WatchpoolRestoreButton } from "@/components/forms";
+import { Panel } from "@/components/Panel";
+import { WatchpoolForm, WatchpoolRestoreButton } from "@/components/forms";
 import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtAge, fmtTs, ageMinutes } from "@/lib/ui/format";
 import { latestQuoteTs, accounts } from "@/lib/ui/queries";
 import { watchpoolView } from "@/lib/ui/views";
+import { WatchpoolTable } from "@/components/views/WatchpoolTable";
 import { MoodBar, VsMarketTag } from "@/components/MoodBar";
 
 export const dynamic = "force-dynamic";
@@ -49,94 +50,11 @@ export default function WatchpoolPage() {
             hint="用下面的表单加入。这是人工录入的清单，不由策略生成"
           />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="dense">
-              <thead>
-                <tr>
-                  <th>代码</th>
-                  {/*
-                    操作列放在代码正后方，不在最后。
-                    这个视图是装在 `/positions` 抽屉里的，抽屉比主区窄得多，
-                    14 列的表要做横向滚���才能看到最后一列 ——
-                    而"移出"就在那一列，等于这个功能看不见。
-                  */}
-                  <th>移出</th>
-                  <th>名称</th>
-                  <th>账户</th>
-                  <th className="text-right">现价</th>
-                  <th className="text-right">触发价</th>
-                  <th className="text-right">距触发</th>
-                  <th className="text-right">距触发%</th>
-                  <th>状态</th>
-                  <th className="text-right">vs市场</th>
-                  <th className="text-right">止损价</th>
-                  <th className="text-right">触发→止损</th>
-                  <th>买入逻辑</th>
-                  <th className="text-right">加入时间</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const riskRatio =
-                    r.row.triggerPx !== null && r.row.stopPx !== null && r.row.triggerPx > 0
-                      ? (r.row.stopPx - r.row.triggerPx) / r.row.triggerPx
-                      : null;
-                  return (
-                    <tr key={r.row.code}>
-                      <td className="num text-ink">{r.row.code}</td>
-                      <td>
-                        <WatchpoolRemoveButton code={r.row.code} />
-                      </td>
-                      <td>{r.name ?? "—"}</td>
-                      <td className="text-ink-2">{r.row.account ?? "—"}</td>
-                      <td className="num">
-                        <Num v={r.quote?.price ?? null} />
-                      </td>
-                      <td className="num">
-                        <Num v={r.row.triggerPx} />
-                      </td>
-                      <td className="num">
-                        <Num v={r.dist.delta} />
-                      </td>
-                      <td className="num">
-                        <Num v={r.dist.deltaRatio} kind="ratio" />
-                      </td>
-                      <td>
-                        {r.quote === null ? (
-                          <Tag>无快照</Tag>
-                        ) : r.row.triggerPx === null ? (
-                          <Tag>未设触发价</Tag>
-                        ) : r.dist.reached ? (
-                          <Tag tone="up">已到买点</Tag>
-                        ) : (
-                          <Tag>等回踩</Tag>
-                        )}
-                        {r.inconsistent ? (
-                          <span className="ml-1">
-                            <Tag tone="danger">止损≥触发</Tag>
-                          </span>
-                        ) : null}
-                      </td>
-                      <td className="num">
-                        <VsMarketTag vs={r.vsMarket} weak={moodWeak} />
-                      </td>
-                      <td className="num">
-                        <Num v={r.row.stopPx} />
-                      </td>
-                      <td className="num">
-                        {/* 触发价买入到止损的距离 = 这一单的最大计划亏损 */}
-                        <Num v={riskRatio} kind="ratio" dir />
-                      </td>
-                      <td className="text-ink-3 max-w-[24rem] truncate" title={r.row.thesis ?? ""}>
-                        {r.row.thesis || "—"}
-                      </td>
-                      <td className="num text-ink-3">{fmtTs(r.row.addedAt, true)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <WatchpoolTable
+            rows={rows}
+            moodWeak={moodWeak}
+            snapNote={`快照 ${fmtTs(snapTs, true)}（${fmtAge(snapAge)}）`}
+          />
         )}
 
         {reached.length > 0 ? (
