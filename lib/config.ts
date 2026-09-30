@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -43,4 +44,36 @@ export function getConfig(env: Partial<NodeJS.ProcessEnv> = process.env): PanCon
     dbPath: path.join(dataDir, "pantrader.db"),
     snapshotDir: path.join(dataDir, "snapshots"),
   };
+}
+
+/**
+ * CLI 补读 .env.local（Next 会自动读，裸 tsx 不会）。
+ *
+ * 为什么必须做：本机 `.env.local` 里 PANTRADER_DATA_DIR 指向 E:\project\PanTraderData\data，
+ * 而 `pnpm job adjfix` 走的是默认路径 —— 于是它在另一个目录上**新建了一个空库**，
+ * 回一句 `{"fixedRows":0}`，看上去像"数据本来就是好的"，真正的库里 5,411 行坏数据一行没动。
+ * 命令成功但什么都没发生，是最难发现的一类错。
+ *
+ * 只补**没有设置过**的变量：命令行显式传的、CI 里的、以及 Next 传下来的，一律不覆盖。
+ * 用 `process.loadEnvFile` 达不到这个要求（它会无条件覆盖），所以这里自己解析。
+ */
+export function loadCliEnv(file = ".env.local"): void {
+  try {
+    const p = path.resolve(process.cwd(), file);
+    if (!fsSync.existsSync(p)) return;
+    for (const line of fsSync.readFileSync(p, "utf8").split(/\r?\n/)) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+      if (!m || m[1] === "") continue;
+      let v = m[2].trim();
+      // 去掉成对引号；# 行内注释只在值没被引号包起来时才认
+      if (/^".*"$/.test(v) || /^'.*'$/.test(v)) v = v.slice(1, -1);
+      else {
+        const hash = v.indexOf(" #");
+        if (hash >= 0) v = v.slice(0, hash).trim();
+      }
+      if (process.env[m[1]] === undefined && v !== "") process.env[m[1]] = v;
+    }
+  } catch {
+    // 读不到就当没有：网页那边本来也不靠这一步，CLI 顶多退回默认路径
+  }
 }

@@ -16,6 +16,12 @@ import type {
   PointInTimeView, Quote, SectorProxyRow, SectorRankRow, SecurityRow, SentimentRow, ZtProxyRow, ZtRow,
 } from "@/lib/contracts";
 import type { Db } from "@/lib/db";
+/**
+ * 唯一从 lib/factors 反向引入的东西，且是**纯函数**（只读 lib/contracts，不碰存储、
+ * 不引入任何因子实现）。读库的时候顺手把写坏的复权台阶修一遍 —— 理由见它的注释：
+ * 常驻采集进程的代码会冻结在它启动那一刻，读侧不能假设库是干净的。
+ */
+import { repairAdjFactorSeries } from "@/lib/factors/util";
 
 /* ------------------------------ 时间戳归一化 ------------------------------ */
 
@@ -253,7 +259,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
           ORDER BY date DESC LIMIT ?`,
         code, asOfDate, n
       );
-      return rs.reverse().map(r => ({
+      return repairAdjFactorSeries(rs.reverse().map(r => ({
         code: String(r["code"]), date: String(r["date"]),
         o: num(r["o"], 0), h: num(r["h"], 0), l: num(r["l"], 0), c: num(r["c"], 0),
         vol: num(r["vol"], 0),
@@ -261,7 +267,7 @@ export function createSqliteView(db: Db, asOf: string): PointInTimeView {
         amount: num(r["amount"], 0),
         // NULL 复权因子按 1（spec R1：2022-05~2023-12 无复权参照），读的人靠 adjFactor===1 判断
         adjFactor: num(r["adj_factor"], 1),
-      }));
+      })));
       });
     },
 

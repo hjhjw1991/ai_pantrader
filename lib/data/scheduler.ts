@@ -163,6 +163,8 @@ export interface Scheduler {
   start(): void;
   stop(): void;
   readonly running: boolean;
+  /** 当前是否有 job 正在跑。要重启进程的人必须等这一轮跑完 —— 半路杀掉会留下 running 残行 */
+  readonly busy: boolean;
 }
 
 export function createScheduler(o: SchedulerOpts): Scheduler {
@@ -310,6 +312,7 @@ export function createScheduler(o: SchedulerOpts): Scheduler {
       timer = null;
     },
     get running() { return timer !== null; },
+    get busy() { return busy; },
   };
 }
 

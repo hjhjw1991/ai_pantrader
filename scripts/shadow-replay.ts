@@ -13,6 +13,9 @@ import { loadStrategyFile } from "@/lib/strategy/loader";
 import { activeStrategyPath } from "@/lib/strategy/registry";
 import { replayShadow } from "@/lib/shadow/replay";
 import { variantReports } from "@/lib/shadow/report";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const db = openDb();
 runMigrations(db);

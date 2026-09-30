@@ -3,6 +3,9 @@ import { runMigrations } from "@/lib/db/migrate";
 import { createClient } from "@/lib/data/client";
 import { fetchAllSecurities } from "@/lib/data/sources/eastmoney";
 import { syncCalendar } from "@/lib/data/calendar";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const PAGE_SIZE = 100;
 

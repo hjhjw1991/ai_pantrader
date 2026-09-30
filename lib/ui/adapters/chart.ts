@@ -5,6 +5,7 @@ import { createSqliteView } from "@/lib/pit/sqlite-view";
 import { defaultRegistry } from "@/lib/factors";
 import { makeRunner, resolveDate } from "@/lib/strategy/engine";
 import { macd, crosses } from "@/lib/factors/structure";
+import { baseAdjFactor } from "@/lib/factors/util";
 
 /**
  * K 线图的数据：前复权 K 线、日线 MACD、日 / 周线金叉死叉、结构位、M 顶 W 底。
@@ -43,8 +44,10 @@ export function chartData(db: Db, code: string, n: number, asOf: string, config:
     const view = createSqliteView(db, asOf);
     const hfq = view.adjBars(code, n + WARMUP);
     if (hfq.length === 0) return { available: true, ...empty(code, "kline_daily 里没有这只票的日线") };
-    const f = hfq[hfq.length - 1].adjFactor;
-    if (!(f > 0)) return unavailable(`${code} 最新一根日线没有复权因子，无法换算前复权价`);
+    // 基准取序列里的最大值而不是最后一根：最后一根是最容易被写坏的一根，
+    // 它被写成 1.0 时整段历史会按真实价的若干倍显示（见 lib/factors/util.ts 的 baseAdjFactor）
+    const f = baseAdjFactor(hfq);
+    if (!(f > 0)) return unavailable(`${code} 这段日线没有可用的复权因子，无法换算前复权价`);
 
     const m = macd(hfq.map(b => b.c));
     const start = Math.max(0, hfq.length - n);
@@ -84,7 +87,7 @@ export function chartData(db: Db, code: string, n: number, asOf: string, config:
             points: (pi["形态点"] ?? []).map((x: any) => ({ role: x.角色, date: x.日期, price: x.价格 })) }
         : null,
       atr: num((at?.inputs ?? {})["ATR"]),
-      note: "前复权（以最新一根为基准）；MACD 在后复权价上算，除权缺口不会造出假交叉",
+      note: "前复权（以最新有效因子为基准）；MACD 在后复权价上算，除权缺口不会造出假交叉",
     };
   } catch (e) {
     return unavailable(`K 线数据读取失败：${(e as Error).message}`);

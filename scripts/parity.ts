@@ -25,6 +25,9 @@ import { createV2Engine, createSlotRegistry, BASELINE_SLOTS } from "@/lib/strate
 import { loadStrategyFile } from "@/lib/strategy/loader";
 import { activeStrategyPath } from "@/lib/strategy/registry";
 import { positions as loadPositions, sectorMap } from "@/lib/ui/queries";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const N = Number(process.argv[2] ?? 40);
 

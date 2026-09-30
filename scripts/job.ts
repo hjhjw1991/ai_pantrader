@@ -30,6 +30,9 @@ import { runPreopenPlan } from "@/lib/plan/preopen";
 import { runSignalWatch } from "@/lib/plan/watch";
 import { runWeeklyReview } from "@/lib/plan/review";
 import { runNightlyDerived } from "@/lib/plan/derived";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const argv = process.argv.slice(2);
 /** 原始参数名。sector 不是 JobName（它不落在调度时点上），所以比类型宽一档 */

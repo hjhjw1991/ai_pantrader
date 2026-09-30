@@ -7,6 +7,9 @@
 import path from "node:path";
 import { getConfig } from "@/lib/config";
 import { stopDaemon } from "@/lib/platform/stop";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const r = await stopDaemon({ lockPath: path.join(getConfig().dataDir, "scheduler.pid") });
 console.log(`[候潮] ${r.detail}`);

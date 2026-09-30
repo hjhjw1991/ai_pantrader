@@ -12,7 +12,7 @@
  * 判了就是在用明天的 K 线。代价是结构位与形态识别天然滞后 k 根，这是正确的滞后。
  */
 import type { DailyBar, FactorResult, FactorSpec, PointInTimeView } from "@/lib/contracts";
-import { mean, pnum, requireCode, round6, evalDate } from "@/lib/factors/util";
+import { mean, pnum, requireCode, round6, evalDate, baseAdjFactor } from "@/lib/factors/util";
 
 const V = "1.0.0";
 
@@ -219,7 +219,8 @@ function macdFactor(name: string, which: "D" | "W"): FactorSpec<number | null> {
       const bars = which === "D" ? daily
         : ctx.view.periodBars(code, "W", 150).filter(b => b.date <= date);
       const need = pnum(ctx.params, "最少根数", which === "D" ? 60 : 35);
-      const scale = daily.length > 0 ? daily[daily.length - 1].adjFactor : 1;
+      // 同样取最大值而不是最后一根：最后一根被写成 1.0 时，M顶W底的价位会按几倍显示
+      const scale = baseAdjFactor(daily);
       const base = { 代码: code, 日期: date, 根数: bars.length, 周期: which === "D" ? "日线" : "周线（已完成的周）" };
       // 周线有、日线却为空（数据源错位）也按样本不足处理：下面的停牌判断要读最后一根日线
       if (bars.length < need || daily.length === 0 || !(scale > 0)) {
@@ -264,12 +265,13 @@ const ATR: FactorSpec<number | null> = {
     const lag = staleness(ctx.view, last.date, date);
     if (lag > MAX_STALE) return staleResult("ATR", null, code, date, last.date, lag);
     const ratio = a / last.c;
+    // ATR 换回原始价口径：止损距离要挂进券商，必须是市场上的真实价位尺度
+    const f = baseAdjFactor(bars);   // 不拿最后一根当基准：它是最容易写坏的一根
     return {
       name: "ATR", version: V, value: round6(ratio),
       label: `日均波动 ${(ratio * 100).toFixed(1)}%`,
       provenance: "real", confidence: 1,
-      // ATR 换回原始价口径：止损距离要挂进券商，必须是市场上的真实价位尺度
-      inputs: { 代码: code, 日期: date, 周期: n, ATR: round6(a / last.adjFactor), 收盘: round6(last.c / last.adjFactor) },
+      inputs: { 代码: code, 日期: date, 周期: n, ATR: round6(a / f), 收盘: round6(last.c / f) },
     };
   },
 };
@@ -288,13 +290,14 @@ const 结构位: FactorSpec<number | null> = {
     const bars = adjUpTo(ctx.view, code, date, Math.max(10, Math.floor(pnum(ctx.params, "回看根数", 120))));
     const k = Math.max(1, Math.floor(pnum(ctx.params, "拐点宽度", 3)));
     const last = bars.length > 0 ? bars[bars.length - 1] : null;
-    if (last === null || bars.length < 2 * k + 3 || !(last.adjFactor > 0)) {
+    const bf = baseAdjFactor(bars);
+    if (last === null || bars.length < 2 * k + 3 || !(bf > 0)) {
       return { name: "结构位", version: V, value: null, label: "样本不足", provenance: "real", confidence: 0,
         inputs: { 代码: code, 日期: date, 根数: bars.length } };
     }
     const lag = staleness(ctx.view, last.date, date);
     if (lag > MAX_STALE) return staleResult("结构位", null, code, date, last.date, lag);
-    const f = last.adjFactor;
+    const f = bf;
     const px = last.c / f;
     const a = atr(bars, Math.max(1, Math.floor(pnum(ctx.params, "ATR周期", 14))));
     const minDist = (a ?? 0) * pnum(ctx.params, "最小距离ATR", 0.5);
@@ -347,7 +350,7 @@ const M顶W底: FactorSpec<number> = {
     if (p === null) {
       return { name: "M顶W底", version: V, value: 0, label: "无", provenance: "real", confidence: 1, inputs: base };
     }
-    const f = last.adjFactor;
+    const f = baseAdjFactor(bars);   // 同上：不拿最后一根当基准
     const sign = p.kind === "M顶" ? -1 : 1;
     const out: FactorResult<number> = {
       name: "M顶W底", version: V, value: sign * (p.state === "确认" ? 1 : 0.5),

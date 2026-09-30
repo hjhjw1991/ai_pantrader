@@ -3,6 +3,9 @@ import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { getConfig } from "@/lib/config";
 import { exportBak } from "@/lib/backup/export";
+// CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
+import { loadCliEnv } from "@/lib/config";
+loadCliEnv();
 
 const cfg = getConfig();
 const stamp = new Date().toISOString().slice(0, 10);
