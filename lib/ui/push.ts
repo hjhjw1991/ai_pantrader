@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import tls from "node:tls";
+import { createHmac } from "node:crypto";
 import type { Duplex } from "node:stream";
 
 /**
@@ -30,6 +31,14 @@ export interface PushMessage {
 export interface PushConfig {
   /** 企业微信群机器人 webhook，多个用逗号分隔 */
   wecomUrls: string[];
+  /** 飞书群「自定义机器人」webhook，多个用逗号分隔 */
+  feishuUrls: string[];
+  /** 飞书机器人的签名密钥（可选）。与 feishuUrls 按序配对；只给一个则应用到全部 */
+  feishuSecrets: string[];
+  /** 飞书机器人若开了「自定义关键词」校验，消息正文必须含它，否则会被拒 */
+  feishuKeyword: string | null;
+  /** card = 消息卡片（带级别配色）；text = 纯文本，最稳但朴素 */
+  feishuStyle: "card" | "text";
   /** Bark key（走官方服务器）或完整推送 URL */
   barkUrl: string | null;
   /** 通用 webhook：POST application/json */
@@ -52,8 +61,13 @@ function splitList(v: string | undefined): string[] {
 export function readPushConfig(env: Partial<NodeJS.ProcessEnv> = process.env): PushConfig {
   const rawBark = env.PANTRADER_PUSH_BARK?.trim();
   const min = (env.PANTRADER_PUSH_MIN_SEVERITY ?? "warn").trim() as PushSeverity;
+  const style = (env.PANTRADER_PUSH_FEISHU_STYLE ?? "card").trim().toLowerCase();
   return {
     wecomUrls: splitList(env.PANTRADER_PUSH_WECOM),
+    feishuUrls: splitList(env.PANTRADER_PUSH_FEISHU),
+    feishuSecrets: splitList(env.PANTRADER_PUSH_FEISHU_SECRET),
+    feishuKeyword: env.PANTRADER_PUSH_FEISHU_KEYWORD?.trim() || null,
+    feishuStyle: style === "text" ? "text" as const : "card" as const,
     barkUrl: rawBark
       ? (/^https?:\/\//.test(rawBark) ? rawBark : `https://api.day.app/${rawBark}`)
       : null,
@@ -66,7 +80,7 @@ export function readPushConfig(env: Partial<NodeJS.ProcessEnv> = process.env): P
 }
 
 export function isEnabled(cfg: PushConfig): boolean {
-  return cfg.wecomUrls.length > 0 || !!cfg.barkUrl || cfg.genericUrls.length > 0;
+  return cfg.wecomUrls.length > 0 || cfg.feishuUrls.length > 0 || !!cfg.barkUrl || cfg.genericUrls.length > 0;
 }
 
 export function shouldPush(cfg: PushConfig, m: PushMessage): boolean {
@@ -88,6 +102,99 @@ export interface SendResult {
   ok: boolean;
   status?: number;
   error?: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 飞书：群里的「自定义机器人」。
+ *
+ * 为什么它值得单独支持，而不是继续用通用 webhook：
+ *   - 零门槛：不用实名、不用营业执照、不用注册开放平台应用，
+ *     普通飞书账号在桌面客户端里建个群就能拿到 webhook（见 push-test.ts 的提示）。
+ *   - 网络最省心：open.feishu.cn 本机**直连可达**，
+ *     不像 PushPlus / Bark / Server酱 必须绕本机代理（代理一挂推送就断）。
+ *   - 落点是真正的 IM 原生推送：手机飞书 App 秒到、锁屏可见。
+ *     这点是微信公众号类方案给不了的 —— 服务号消息在 iOS 上通常不弹通知。
+ *
+ * 三个坑：
+ *   1. 成功与否同样写在 body 里（"code":0），只看 HTTP 状态码会误判。
+ *   2. 若机器人开了「自定义关键词」，正文不含关键词会被拒且原因难懂，
+ *      所以支持 PANTRADER_PUSH_FEISHU_KEYWORD，把它固定拼进页脚。
+ *   3. 开了「签名校验」则要按 HMAC-SHA256 签名，**密钥是 `${ts}\n${secret}`、
+ *      被签内容为空串** —— 两边搞反的话签名永远不匹配。
+ * ------------------------------------------------------------------ */
+
+/** 飞书加签：HMAC-SHA256(key = `${秒级时间戳}\n${密钥}`, msg = "")，结果 base64。 */
+export function feishuSign(secret: string, tsSec: number): string {
+  return createHmac("sha256", `${tsSec}\n${secret}`).update("").digest("base64");
+}
+
+const FEISHU_LEVEL_TAG: Record<PushSeverity, string> = {
+  critical: "**紧急**", warn: "提示", info: "信息",
+};
+/** 消息卡片表头配色：critical 红、warn 橙、info 蓝。 */
+const FEISHU_TEMPLATE: Record<PushSeverity, string> = {
+  critical: "red", warn: "orange", info: "blue",
+};
+
+/** 纯文本形态的正文。 */
+export function feishuText(m: PushMessage, keyword?: string | null): string {
+  const head = `${m.title}\n${FEISHU_LEVEL_TAG[m.severity]}｜${m.kind}｜${m.ts}`;
+  const tail = keyword ? `候潮 · ${keyword}` : "候潮";
+  return `${head}${m.body ? `\n\n${m.body}` : ""}\n\n${tail}`;
+}
+
+/** 卡片正文（lark_md）：级别标签 + 类型 + 时间，再接一条分割线。 */
+export function feishuCardContent(m: PushMessage): string {
+  return `${FEISHU_LEVEL_TAG[m.severity]}｜${m.kind}｜${m.ts}${m.body ? `\n\n${m.body}` : ""}`;
+}
+
+export interface FeishuPayloadOpts {
+  keyword?: string | null;
+  style?: "card" | "text";
+  /** 秒级时间戳，用于加签。不传表示不加签 */
+  tsSec?: number;
+  secret?: string | null;
+}
+
+/**
+ * 组装飞书请求体。导出是为了能在测试里直接断言结构 ——
+ * 卡片的 schema 一旦写错，线上表现是"HTTP 200 但手机没反应"，很难查。
+ */
+export function feishuPayload(m: PushMessage, opts: FeishuPayloadOpts = {}): Record<string, unknown> {
+  const kw = opts.keyword ?? null;
+  const tail = kw ? `候潮 · ${kw}` : "候潮";
+
+  const payload: Record<string, unknown> = (opts.style ?? "card") === "text"
+    ? { msg_type: "text", content: { text: feishuText(m, kw) } }
+    : {
+      msg_type: "interactive",
+      card: {
+        config: { wide_screen_mode: true },
+        // header.content 不接受换行，标题里的回车会直接让整条被拒
+        header: {
+          template: FEISHU_TEMPLATE[m.severity],
+          title: { tag: "plain_text", content: m.title.replace(/\s*\n\s*/g, " ").trim() },
+        },
+        elements: [
+          { tag: "div", text: { tag: "lark_md", content: feishuCardContent(m) } },
+          { tag: "hr" },
+          { tag: "note", elements: [{ tag: "plain_text", content: tail }] },
+        ],
+      },
+    };
+
+  if (opts.secret && opts.tsSec !== undefined) {
+    payload.timestamp = String(opts.tsSec);
+    payload.sign = feishuSign(opts.secret, opts.tsSec);
+  }
+  return payload;
+}
+
+/** secrets 与 urls 的配对：不配 -> 全不加签；配一个 -> 应用到全部；多个 -> 按顺序。 */
+export function secretFor(index: number, urls: string[], secrets: string[]): string | null {
+  if (secrets.length === 0) return null;
+  if (secrets.length === 1) return secrets[0];
+  return secrets[index] ?? secrets[secrets.length - 1] ?? null;
 }
 
 interface ReqOpts { method: string; headers: Record<string, string>; body?: string }
@@ -211,6 +318,34 @@ async function sendWecom(url: string, m: PushMessage, cfg: PushConfig, io: Trans
   }
 }
 
+/**
+ * 飞书的业务错误也是 HTTP 200，必须读 body 里的 code。
+ * 老版本返回的是 StatusCode，两个都认；取不到 code 时退回按状态码判。
+ */
+async function sendFeishu(url: string, m: PushMessage, cfg: PushConfig, io: Transport, secret?: string | null): Promise<SendResult> {
+  try {
+    const tsSec = secret ? Math.floor(Date.now() / 1000) : undefined;
+    const res = await io(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(feishuPayload(m, {
+        keyword: cfg.feishuKeyword, style: cfg.feishuStyle, tsSec, secret,
+      })),
+    }, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+
+    const code = /"(?:code|StatusCode)"\s*:\s*(-?\d+)/.exec(res.body)?.[1];
+    const httpOk = res.status >= 200 && res.status < 300;
+    const ok = httpOk && (code === undefined || code === "0");
+    return {
+      target: "feishu", ok, status: res.status,
+      ...(ok || code === undefined ? {} : { error: `code=${code} ${res.body.slice(0, 120)}` }),
+      ...(!httpOk ? { error: res.body.slice(0, 120) } : {}),
+    };
+  } catch (e) {
+    return { target: "feishu", ok: false, error: String((e as Error)?.message ?? e) };
+  }
+}
+
 async function sendBark(base: string, m: PushMessage, cfg: PushConfig, io: Transport): Promise<SendResult> {
   try {
     // Bark 的 REST 形态：/<key>/<标题>/<正文>；路径段要编码，正文里的换行会截断 URL
@@ -278,6 +413,7 @@ export async function dispatchPush(
 
   const jobs: Promise<SendResult>[] = [];
   for (const u of cfg.wecomUrls) jobs.push(sendWecom(u, m, cfg, io));
+  cfg.feishuUrls.forEach((u, i) => jobs.push(sendFeishu(u, m, cfg, io, secretFor(i, cfg.feishuUrls, cfg.feishuSecrets))));
   if (cfg.barkUrl) jobs.push(sendBark(cfg.barkUrl, m, cfg, io));
   for (const u of cfg.genericUrls) jobs.push(sendGeneric(u, m, cfg, io));
 

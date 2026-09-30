@@ -1,6 +1,8 @@
+import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  dispatchPush, isEnabled, pushOutbound, readPushConfig, requestHttps, resetThrottle,
+  dispatchPush, feishuCardContent, feishuPayload, feishuSign, feishuText, isEnabled,
+  pushOutbound, readPushConfig, requestHttps, resetThrottle, secretFor,
   shouldPush, throttled, wecomContent,
 } from "@/lib/ui/push";
 import type { PushConfig, PushMessage, Transport } from "@/lib/ui/push";
@@ -17,7 +19,8 @@ import type { PushConfig, PushMessage, Transport } from "@/lib/ui/push";
 
 function cfg(patch: Partial<PushConfig> = {}): PushConfig {
   return {
-    wecomUrls: [], barkUrl: null, genericUrls: [],
+    wecomUrls: [], feishuUrls: [], feishuSecrets: [], feishuKeyword: null, feishuStyle: "card",
+    barkUrl: null, genericUrls: [],
     minSeverity: "warn", throttleSec: 300, proxy: null, timeoutMs: 8000,
     ...patch,
   };
@@ -109,6 +112,119 @@ describe("wecomContent", () => {
   it("没有正文时不留空行尾巴", () => {
     expect(wecomContent(msg({ body: null })).trimEnd().endsWith("]")).toBe(false);
     expect(wecomContent(msg({ body: null }))).not.toMatch(/\n\n$/);
+  });
+});
+
+/**
+ * 飞书通道。
+ *
+ * 盯的是"配错之后 HTTP 依然 200"这类会让故障隐形的点：成功看 code、
+ * 标题不能带换行（会被整条拒）、关键词校验的关键词得真的出现在正文里。
+ */
+describe("飞书消息体", () => {
+  const FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/token-1";
+
+  it("默认发消息卡片，表头按级别配色", () => {
+    const p = feishuPayload(msg({ severity: "critical" })) as any;
+    expect(p.msg_type).toBe("interactive");
+    expect(p.card.header.template).toBe("red");
+    expect(p.card.header.title.content).toBe("硬线告警 2 条");
+    expect(feishuPayload(msg({ severity: "warn" })).card).toBeTruthy();
+    expect((feishuPayload(msg({ severity: "warn" })) as any).card.header.template).toBe("orange");
+  });
+
+  it("标题里的换行会被压平——卡片表头不接受回车，否则整条被拒", () => {
+    const p = feishuPayload(msg({ title: "硬线告警\n第二行" })) as any;
+    expect(p.card.header.title.content).toBe("硬线告警 第二行");
+  });
+
+  it("正文带上级别、类型、时间", () => {
+    const s = feishuCardContent(msg());
+    expect(s).toContain("hard_line");
+    expect(s).toContain("2026-09-30 14:55:00");
+    expect(s).toContain("持仓触及止损");
+  });
+
+  it("style=text 时降级成纯文本，且同样带齐要素", () => {
+    const p = feishuPayload(msg(), { style: "text" }) as any;
+    expect(p.msg_type).toBe("text");
+    expect(p.content.text).toContain("硬线告警 2 条");
+    expect(p.content.text).toContain("hard_line");
+  });
+
+  it("开了自定义关键词时，关键字真的出现在正文里（否则被静默拒）", () => {
+    const card = feishuPayload(msg(), { keyword: "候潮" }) as any;
+    expect(JSON.stringify(card)).toContain("候潮");
+    expect(feishuText(msg(), "候潮")).toContain("候潮");
+  });
+
+  it("加签：同一时间戳+密钥可复现，且与官方文档口径一致", () => {
+    // HMAC-SHA256(key = "1690000000\nsecret", msg = "")
+    expect(feishuSign("secret", 1_690_000_000)).toBe(
+      createHmac("sha256", "1690000000\nsecret").update("").digest("base64"));
+    expect(feishuSign("secret", 1_690_000_000)).not.toBe(feishuSign("secret", 1_690_000_001));
+  });
+
+  it("配了密钥才加签，没配就不带签名字段", () => {
+    expect(feishuPayload(msg(), { tsSec: 1 })).not.toHaveProperty("sign");
+    const signed = feishuPayload(msg(), { tsSec: 1, secret: "s" }) as any;
+    expect(signed.timestamp).toBe("1");
+    expect(signed.sign).toBe(feishuSign("s", 1));
+  });
+
+  it("密钥配对：不配→无；一个→全用；多个→按序", () => {
+    const urls = ["a", "b"];
+    expect(secretFor(0, urls, [])).toBeNull();
+    expect(secretFor(1, urls, ["only"])).toBe("only");
+    expect(secretFor(1, urls, ["x", "y"])).toBe("y");
+  });
+});
+
+describe("飞书发送", () => {
+  const FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/token-1";
+
+  it("code=0 才算成功", async () => {
+    const { calls, io } = recorder(200, '{"code":0,"msg":"success"}');
+    const out = await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU] }), io });
+    expect(out[0].ok).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("HTTP 200 但 code 非 0 必须判失败（token 写错不能被当成成功）", async () => {
+    const { io } = recorder(200, '{"code":19001,"msg":"param invalid"}');
+    const out = await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU] }), io });
+    expect(out[0].ok).toBe(false);
+    expect(out[0].error).toContain("19001");
+  });
+
+  it("老版本返回的 StatusCode 也认", async () => {
+    const { io } = recorder(200, '{"StatusCode":0,"StatusMessage":"success"}');
+    const out = await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU] }), io });
+    expect(out[0].ok).toBe(true);
+  });
+
+  it("加签时请求体里带上 timestamp 与 sign", async () => {
+    const { calls, io } = recorder();
+    await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU], feishuSecrets: ["sec"] }), io });
+    const p = JSON.parse(calls[0].payload);
+    expect(p.timestamp).toMatch(/^\d{10}$/);
+    expect(p.sign).toBe(feishuSign("sec", Number(p.timestamp)));
+  });
+
+  it("多个机器人各用自己的密钥", async () => {
+    const { calls, io } = recorder();
+    await dispatchPush(msg(), {
+      config: cfg({ feishuUrls: [FEISHU, `${FEISHU}-2`], feishuSecrets: ["s1", "s2"] }), io,
+    });
+    const signs = calls.map(c => JSON.parse(c.payload).sign);
+    expect(signs[0]).not.toBe(signs[1]);
+  });
+
+  it("网络错误不向上抛", async () => {
+    const io: Transport = async () => { throw new Error("ETIMEDOUT"); };
+    const out = await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU] }), io });
+    expect(out[0].ok).toBe(false);
+    expect(out[0].error).toContain("ETIMEDOUT");
   });
 });
 
@@ -209,7 +325,8 @@ describe("dispatchPush", () => {
 describe("pushOutbound", () => {
   it("没配通道时不抛异常、不发网络", () => {
     const saved = { ...process.env };
-    for (const k of ["PANTRADER_PUSH_WECOM", "PANTRADER_PUSH_BARK", "PANTRADER_PUSH_URL"]) {
+    for (const k of ["PANTRADER_PUSH_WECOM", "PANTRADER_PUSH_BARK", "PANTRADER_PUSH_URL",
+      "PANTRADER_PUSH_FEISHU"]) {
       delete process.env[k];
     }
     expect(() => pushOutbound(msg())).not.toThrow();

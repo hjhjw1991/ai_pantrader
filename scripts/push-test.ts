@@ -22,16 +22,24 @@ async function main(): Promise<void> {
   if (!isEnabled(cfg)) {
     console.log("[候潮] 未配置任何推送通道。");
     console.log("  在 .env.local 里至少填一项：");
-    console.log("    PANTRADER_PUSH_WECOM   = 企业微信群机器人 webhook（多个用逗号分隔）");
-    console.log("    PANTRADER_PUSH_BARK    = Bark key 或完整推送 URL");
-    console.log("    PANTRADER_PUSH_URL     = 通用 webhook，POST JSON");
+    console.log("    PANTRADER_PUSH_FEISHU   = 飞书群机器人 webhook（推荐，多个用逗号分隔）");
+    console.log("    PANTRADER_PUSH_WECOM    = 企业微信群机器人 webhook（多个用逗号分隔）");
+    console.log("    PANTRADER_PUSH_BARK     = Bark key 或完整推送 URL");
+    console.log("    PANTRADER_PUSH_URL      = 通用 webhook，POST JSON");
+    console.log("");
+    console.log("  飞书 webhook 怎么拿（约 1 分钟，全程在电脑上）：");
+    console.log("    1. 桌面版飞书 → 通讯录 → 创建群组，只拉自己一个人就行");
+    console.log("    2. 进群 → 右上角群设置 → 群机器人 → 添加机器人 →「自定义机器人」");
+    console.log("    3. 复制弹出的 https://open.feishu.cn/open-apis/bot/v2/hook/... 粘到上面");
+    console.log("    注意：网页版和手机端飞书都没有「群机器人」入口，必须在电脑客户端里配。");
     process.exitCode = 1;
     return;
   }
 
-  console.log(`[候潮] 已配置：企业微信 ${cfg.wecomUrls.length} 个 / Bark ${cfg.barkUrl ? 1 : 0} 个 /`
-    + ` 通用 ${cfg.genericUrls.length} 个｜门槛 ${cfg.minSeverity}｜节流 ${cfg.throttleSec}s`
-    + `｜代理 ${cfg.proxy ?? "（无）"}`);
+  console.log(`[候潮] 已配置：飞书 ${cfg.feishuUrls.length} 个 / 企业微信 ${cfg.wecomUrls.length} 个 /`
+    + ` Bark ${cfg.barkUrl ? 1 : 0} 个 / 通用 ${cfg.genericUrls.length} 个`);
+  console.log(`  门槛 ${cfg.minSeverity}｜节流 ${cfg.throttleSec}s｜代理 ${cfg.proxy ?? "（无）"}`
+    + `｜加签 ${cfg.feishuSecrets.length > 0 ? "开" : "关"}｜关键词 ${cfg.feishuKeyword ?? "无"}`);
 
   const results = await dispatchPush({
     kind: "push_selfcheck",
