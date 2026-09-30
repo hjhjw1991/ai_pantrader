@@ -1,6 +1,7 @@
 import type { Db } from "@/lib/db";
 import { shanghaiTs } from "@/lib/data/clock";
 import type { SignalCard } from "@/lib/contracts";
+import { pushOutbound } from "@/lib/ui/push";
 
 /**
  * 通知的产生与读取。spec §13：只有关键信号才响。
@@ -28,10 +29,14 @@ export function pushNotification(
   n: { kind: string; severity: Severity; title: string; body?: string; dedupeKey?: string }
 ): boolean {
   try {
+    const ts = shanghaiTs();
     db.prepare(
       `INSERT INTO notification (ts, kind, severity, title, body, dedupe_key)
        VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(shanghaiTs(), n.kind, n.severity, n.title, n.body ?? null, n.dedupeKey ?? null);
+    ).run(ts, n.kind, n.severity, n.title, n.body ?? null, n.dedupeKey ?? null);
+    // 外发到手机。写库成功才推，避免 dedupe 冲突时把同一件事重复炸到手机上。
+    // pushOutbound 内部：没配就零开销返回，失败静默，不等网络。
+    pushOutbound({ kind: n.kind, severity: n.severity, title: n.title, body: n.body ?? null, ts });
     return true;
   } catch {
     return false;    // dedupe_key 冲突 = 这件事已经通知过
