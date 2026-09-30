@@ -1,6 +1,6 @@
 import { err, ok, parseBody } from "@/lib/ui/api";
 import { BacktestRunSchema } from "@/lib/ui/validate";
-import { runBacktestAsync, ReplayAborted } from "@/lib/ui/adapters/engines";
+import { runBacktestAsync, resolveBacktestTarget, ReplayAborted } from "@/lib/ui/adapters/engines";
 import { readStrategyConfig } from "@/lib/ui/adapters/strategy";
 import { openRead, writeDb } from "@/lib/ui/db";
 import { saveBacktestReport } from "@/lib/ui/mutations";
@@ -46,6 +46,18 @@ export async function POST(req: Request) {
   }
   const db = r.db;
 
+  /**
+   * 跑哪套东西，在这里定下来 —— 以前这一段是缺的：schema 收了 strategyId / strategyVersion，
+   * 下面却一律用 cfg.config（当前 YAML）。于是下拉里选哪个版本都一样，
+   * 而组合（影子盘的槽位搭配）更是根本没有入口。
+   */
+  const target = resolveBacktestTarget(db, {
+    ...(b.value.strategyId ? { strategyId: b.value.strategyId } : {}),
+    ...(b.value.strategyVersion ? { strategyVersion: b.value.strategyVersion } : {}),
+    ...(b.value.variantId ? { variantId: b.value.variantId } : {}),
+  });
+  if (!target.ok) return err(400, target.reason);
+
   // 与参数扫描共用同一把锁：它们抢的是同一个 CPU，分成两把只会让
   // "回测跑着的时候还能开扫描"这种最坏组合合法化
   const lock = tryAcquire("backtest", `${b.value.from} → ${b.value.to}`);
@@ -79,13 +91,13 @@ export async function POST(req: Request) {
       try {
         // 兜住"注册监听之前请求就已经断了"的竞态
         if (req.signal.aborted) abort.aborted = true;
-        line({ phase: "start", from: b.value.from, to: b.value.to });
+        line({ phase: "start", from: b.value.from, to: b.value.to, label: target.target.label });
         // generatedAt 由这里注入：重放路径内不许出现 Date.now()，否则同份输入两次跑出
         // 的报告哈希不一致（spec §17 断言 4）
         const out = await runBacktestAsync(db, {
           from: b.value.from,
           to: b.value.to,
-          config: cfg.config,
+          config: target.target.config,
           initialCash: b.value.initialCash,
           generatedAt: shanghaiTs(),
         }, {
@@ -113,7 +125,7 @@ export async function POST(req: Request) {
             // 存档失败不该把跑成功的回测变成失败：结果照给，只是没存住
             line({ phase: "archive_failed", reason: (e as Error).message });
           }
-          line({ phase: "done", ok: true, report: out.report, archivedId });
+          line({ phase: "done", ok: true, report: out.report, archivedId, label: target.target.label });
         }
       } catch (e) {
         // 取消不是错误：报成失败会让用户以为是自己的策略配置有问题

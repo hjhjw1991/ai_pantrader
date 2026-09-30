@@ -9,7 +9,9 @@ import { runBacktest as replay } from "@/lib/backtest";
 import { runBacktestAsync as replayAsync, ReplayAborted, type ReplayProgress } from "@/lib/backtest/replay";
 import { gridPoints, heatmap, optimize, type ParamGrid } from "@/lib/backtest/optimizer";
 import { canonicalJson } from "@/lib/backtest/hash";
-import { overrideConfigParams } from "@/lib/ui/adapters/strategy";
+import { overrideConfigParams, readStrategyConfig } from "@/lib/ui/adapters/strategy";
+import { parseStrategy, StrategyConfigError } from "@/lib/strategy/loader";
+import type { SlotConfig } from "@/lib/contracts/slots";
 import { positions as loadPositions, sectorMap, watchpool } from "@/lib/ui/queries";
 
 /**
@@ -138,6 +140,93 @@ export interface BacktestRunInput {
   constraints?: Constraints;
   /** 报告信封时间戳，必须外部注入：重放路径内不许出现 Date.now()（spec §17 断言 4） */
   generatedAt: string;
+}
+
+/**
+ * 一次回测"跑哪套东西"。三者都不给 = 跑当前生效的 YAML。
+ *
+ * strategyId + strategyVersion → 跑 strategy 表里那份**历史快照**（比"参数改了之后好不好"）
+ * variantId                    → 在当前 YAML 上盖一层影子盘组合的槽位（比"换套打法好不好"）
+ *
+ * 两个可以同时给：先落到指定的历史快照，再盖槽位。
+ */
+export interface BacktestTarget {
+  strategyId?: string;
+  strategyVersion?: string;
+  variantId?: string;
+}
+
+export interface ResolvedTarget {
+  config: StrategyConfig;
+  /** 这次跑的是谁，归档与显示都用它 —— 光看 strategyId 分不出变体 */
+  label: string;
+}
+
+/**
+ * 把一套槽位搭配盖到配置上，返回**新**配置。
+ *
+ * 整槽替换，不是逐键合并：变体给的是每个槽的完整选择（`用` + `参数`），
+ * 逐键合并会产出"新识别器 + 旧参数"这种没人定义过的第三种打法，
+ * 而它跑出来的成绩会被当成那个变体的成绩记下来。
+ */
+export function applyVariantSlots(config: StrategyConfig, slots: SlotConfig): StrategyConfig {
+  const next = JSON.parse(JSON.stringify(config)) as StrategyConfig;
+  next.槽位 = { ...(config.槽位 ?? {}), ...slots };
+  return next;
+}
+
+/**
+ * 把上面那三个可选参数变成一份能交给回测层的 config。
+ *
+ * 这条支路以前是断的：API 收了 strategyId 却从不读它，一律跑当前 YAML ——
+ * 下拉里选 1.0.0 和选 1.4.0 出来的报告一模一样。既然收了就得认，
+ * 不然那个下拉就是在骗人：它让人以为自己在比较，其实一直在跑同一份配置。
+ */
+export function resolveBacktestTarget(
+  db: Db,
+  t: BacktestTarget
+): { ok: true; target: ResolvedTarget } | { ok: false; reason: string } {
+  const cur = readStrategyConfig();
+  if (!cur.available) return { ok: false, reason: cur.reason };
+
+  let config = cur.config;
+  let label = `${config.id}@${config.version}`;
+
+  const wantVer = t.strategyVersion;
+  if (wantVer && wantVer !== config.version) {
+    const id = t.strategyId ?? config.id;
+    const row = db
+      .prepare("SELECT yaml FROM strategy WHERE id = ? AND version = ?")
+      .get(id, wantVer) as { yaml: string } | undefined;
+    if (!row) return { ok: false, reason: `策略表里没有 ${id}@${wantVer} 的快照（快照在产生第一条预测时落库）` };
+    try {
+      config = parseStrategy(row.yaml, null).config;
+    } catch (e) {
+      // 旧快照过不了现在的 schema 是正常的事（schema 会往前走）。说清楚是哪一份、为什么
+      const detail = e instanceof StrategyConfigError
+        ? e.issues.map(i => i.message).join("；")
+        : (e as Error).message;
+      return { ok: false, reason: `${id}@${wantVer} 的快照过不了现在的校验：${detail}` };
+    }
+    label = `${id}@${wantVer}`;
+  }
+
+  if (t.variantId) {
+    const row = db
+      .prepare("SELECT name, slot_config FROM shadow_variant WHERE id = ?")
+      .get(t.variantId) as { name: string; slot_config: string } | undefined;
+    if (!row) return { ok: false, reason: `影子盘里没有组合 ${t.variantId}` };
+    let slots: SlotConfig;
+    try {
+      slots = JSON.parse(row.slot_config) as SlotConfig;
+    } catch {
+      return { ok: false, reason: `组合 ${t.variantId} 的槽位配置不是合法 JSON` };
+    }
+    config = applyVariantSlots(config, slots);
+    label = `${label} · ${row.name}`;
+  }
+
+  return { ok: true, target: { config, label } };
 }
 
 /**

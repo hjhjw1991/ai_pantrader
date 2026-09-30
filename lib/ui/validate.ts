@@ -115,6 +115,8 @@ export const StrategyParamWriteSchema = z.object({
 export const BacktestRunSchema = z.object({
   strategyId: z.string().min(1).max(64).optional(),
   strategyVersion: z.string().min(1).max(32).optional(),
+  /** 影子盘里的组合 id：给了就在所选策略上盖一层它的槽位 */
+  variantId: z.string().min(1).max(64).optional(),
   from: DateSchema,
   to: DateSchema,
   /**

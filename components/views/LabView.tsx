@@ -9,7 +9,7 @@ import { dbUnavailable, readDb } from "@/lib/ui/db";
 import { fmtTs } from "@/lib/ui/format";
 import { unavailable } from "@/lib/ui/derive";
 import { flattenConfig, readStrategyConfig, strategyYamlRel } from "@/lib/ui/adapters/strategy";
-import { calendarRange, strategies, tableCountsCached, backtestReports } from "@/lib/ui/queries";
+import { calendarRange, strategies, shadowVariants, tableCountsCached, backtestReports } from "@/lib/ui/queries";
 import { REPORT_KEEP } from "@/lib/ui/mutations";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { SWEEP_MAX_POINTS } from "@/lib/ui/adapters/engines";
@@ -41,7 +41,10 @@ export default function LabPage() {
   return (
     <div className="flex flex-col gap-3">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <Panel title="选策略" hint="多策略并存，每个策略有 id + 语义化版本">
+        <Panel
+          title="选策略"
+          hint="多策略并存，每个策略有 id + 语义化版本。这张表是 YAML 的历史快照；五槽的搭配（影子盘组合）不在这里，见下面「跑哪一套」与影子盘抽屉"
+        >
           {strats.length === 0 ? (
             <NoRows
               what="strategy 表无记录"
@@ -120,6 +123,7 @@ export default function LabPage() {
                 ? strats.map((s) => ({ id: s.id, version: s.version }))
                 : [{ id: cfg.config.id, version: cfg.config.version }]
             }
+            variants={shadowVariants(db).map(v => ({ id: v.id, name: v.name, status: v.status }))}
             defaultRange={{ from: cal.from ?? "", to: cal.to ?? "" }}
           />
         ) : (

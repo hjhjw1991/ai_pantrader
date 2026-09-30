@@ -587,6 +587,29 @@ export function strategies(db: Db): StrategyRow[] {
   });
 }
 
+export interface ShadowVariantRow {
+  id: string;
+  name: string;
+  status: string;
+}
+
+/**
+ * 影子盘里的组合（变体）清单。
+ *
+ * 与 strategy 表是两回事，别混读：
+ *   strategy       = YAML 原文的**历史快照**，一个 id 有多个版本（改一次存一份）
+ *   shadow_variant = 五个槽位的**组合**，每套是一套打法（主线识别器 / 择时器 / 评估器…）
+ * 回测面板两张表都要列 —— 前者用来比"参数改了之后好不好"，后者用来比"换套打法好不好"。
+ */
+export function shadowVariants(db: Db): ShadowVariantRow[] {
+  return db
+    .prepare(
+      `SELECT id, name, status FROM shadow_variant
+        ORDER BY (status = 'active') DESC, id`
+    )
+    .all() as ShadowVariantRow[];
+}
+
 export interface WatchpoolRow {
   code: string;
   name: string | null;

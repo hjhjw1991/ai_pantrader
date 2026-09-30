@@ -12,14 +12,28 @@ import { DateInput } from "@/components/DateInput";
  * 失败时把后端原因原样显示，不退化成"暂无数据" —— 回测跑失败和回测跑出空结果
  * 是两件事，后者才可能意味着策略在该区间没交易。
  */
+/**
+ * 下拉里两类东西并排，用前缀区分：
+ *   s:<id>@<版本>  策略快照（strategy 表，YAML 的历史原文）
+ *   v:<变体 id>    影子盘的组合（shadow_variant 表，五个槽位的一套搭配）
+ * 合成一个下拉而不是两个框：两者互斥（一次回测跑一套东西），两个框会让人以为能各选一个。
+ */
+const SNAP = "s:";
+const VARIANT = "v:";
+
 export function LabRunner({
   strategies,
+  variants,
   defaultRange,
 }: {
   strategies: Array<{ id: string; version: string }>;
+  variants: Array<{ id: string; name: string; status: string }>;
   defaultRange: { from: string; to: string };
 }) {
-  const [strategyId, setStrategyId] = useState(strategies[0]?.id ?? "");
+  const [sel, setSel] = useState(() => {
+    const s = strategies[0];
+    return s ? `${SNAP}${s.id}@${s.version}` : "";
+  });
   const [from, setFrom] = useState(defaultRange.from);
   const [to, setTo] = useState(defaultRange.to);
   // 初始资金没有默认值：它决定手数取整能不能成交、单票占比是多少。
@@ -28,6 +42,8 @@ export function LabRunner({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [report, setReport] = useState<BacktestReport | null>(null);
+  /** 服务端回执的"这次跑的是谁"。报告信封里只有 strategyId，分不出组合 */
+  const [label, setLabel] = useState<string | null>(null);
   /** 回放进度。total=0 表示还没收到第一天 */
   const [prog, setProg] = useState<{ done: number; total: number; date: string }>(
     { done: 0, total: 0, date: "" }
@@ -52,16 +68,27 @@ export function LabRunner({
           setBusy(true);
           setErr(null);
           setReport(null);
+          setLabel(null);
           setProg({ done: 0, total: 0, date: "" });
           try {
+            // 先说清楚跑的是哪一套，再发请求：服务端是按这两个字段挑配置的
+            const raw = sel.slice(2);
+            const body: Record<string, unknown> = { from, to, initialCash: Number(cash) };
+            if (sel.startsWith(VARIANT)) body.variantId = raw;
+            else {
+              const at = raw.lastIndexOf("@");
+              body.strategyId = raw.slice(0, at);
+              body.strategyVersion = raw.slice(at + 1);
+            }
             const r = await fetch("/api/backtest", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ strategyId, from, to, initialCash: Number(cash) }),
+              body: JSON.stringify(body),
               signal: ac.signal,
             });
 
             const outcome = await readNdjson(r, ev => {
+              if (ev.phase === "start") setLabel(typeof ev.label === "string" ? ev.label : null);
               if (ev.phase === "day") {
                 setProg({
                   done: Number(ev.done ?? 0),
@@ -89,18 +116,30 @@ export function LabRunner({
         }}
       >
         <label className="flex flex-col gap-0.5">
-          <span className="text-ink-3 text-[11px]">策略</span>
+          <span className="text-ink-3 text-[11px]">跑哪一套</span>
           <select
-            className={`${inputCls} w-40`}
-            value={strategyId}
-            onChange={(e) => setStrategyId(e.target.value)}
+            className={`${inputCls} w-60`}
+            value={sel}
+            onChange={(e) => setSel(e.target.value)}
             required
           >
-            {strategies.map((s) => (
-              <option key={`${s.id}-${s.version}`} value={s.id}>
-                {s.id} @ {s.version}
-              </option>
-            ))}
+            <optgroup label="策略快照">
+              {strategies.map((s) => (
+                <option key={`${SNAP}${s.id}@${s.version}`} value={`${SNAP}${s.id}@${s.version}`}>
+                  {s.id} @ {s.version}
+                </option>
+              ))}
+            </optgroup>
+            {variants.length > 0 ? (
+              <optgroup label="影子盘组合（槽位搭配）">
+                {variants.map((v) => (
+                  <option key={`${VARIANT}${v.id}`} value={`${VARIANT}${v.id}`}>
+                    {v.name}
+                    {v.status !== "active" ? "（已退役）" : ""}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </select>
         </label>
         <label className="flex flex-col gap-0.5">
@@ -140,7 +179,7 @@ export function LabRunner({
         <button
           type="submit"
           className="border border-line-2 rounded-sm px-3 py-1 text-ink-2 hover:text-ink disabled:opacity-40"
-          disabled={busy || !strategyId || !(Number(cash) > 0)}
+          disabled={busy || !sel || !(Number(cash) > 0)}
         >
           {busy ? "回放中…" : "开始回测"}
         </button>
@@ -158,7 +197,24 @@ export function LabRunner({
 
       <BacktestProgress busy={busy} prog={prog} startedAt={startedAt.current} />
 
-      {report ? <BacktestReportView report={report} /> : null}
+      {sel.startsWith(VARIANT) ? (
+        <p className="text-ink-3 text-[11px]">
+          选的是影子盘组合：回测会把这套槽位搭配盖在当前策略上跑一遍历史，
+          <span className="text-warn">成绩只作参考，不算毕业依据</span> ——
+          毕业看的是影子盘的实盘样本（同一段行情上真出过的信号），座次表在影子盘抽屉。
+        </p>
+      ) : null}
+
+      {report ? (
+        <div className="flex flex-col gap-2">
+          {label ? (
+            <p className="text-ink-2 text-[11px]">
+              本次跑的是 <span className="text-ink">{label}</span>
+            </p>
+          ) : null}
+          <BacktestReportView report={report} />
+        </div>
+      ) : null}
     </div>
   );
 }
