@@ -95,6 +95,8 @@ describe("shadowVariants", () => {
  * 别让"环境里缺一份个人配置"变成一条红测试。
  */
 const cfg = readStrategyConfig();
+/** 在闭包里用要提前收窄好：条件表达式不会把收窄带进回调作用域 */
+const cur = cfg.available ? cfg.config : null;
 const maybe = cfg.available ? describe : describe.skip;
 
 maybe("resolveBacktestTarget", () => {
@@ -104,7 +106,7 @@ maybe("resolveBacktestTarget", () => {
     const r = resolveBacktestTarget(db, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.target.label).toBe(`${cfg.config!.id}@${cfg.config!.version}`);
+    expect(r.target.label).toBe(`${cur!.id}@${cur!.version}`);
   });
 
   it("给变体 → 槽位盖上去，label 带上组合名（光看 strategyId 分不出变体）", () => {

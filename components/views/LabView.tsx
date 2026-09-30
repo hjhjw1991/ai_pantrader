@@ -124,6 +124,7 @@ export default function LabPage() {
                 : [{ id: cfg.config.id, version: cfg.config.version }]
             }
             variants={shadowVariants(db).map(v => ({ id: v.id, name: v.name, status: v.status }))}
+            current={{ id: cfg.config.id, version: cfg.config.version }}
             defaultRange={{ from: cal.from ?? "", to: cal.to ?? "" }}
           />
         ) : (

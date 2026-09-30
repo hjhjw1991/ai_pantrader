@@ -24,16 +24,26 @@ const VARIANT = "v:";
 export function LabRunner({
   strategies,
   variants,
+  current,
   defaultRange,
 }: {
   strategies: Array<{ id: string; version: string }>;
   variants: Array<{ id: string; name: string; status: string }>;
+  /** 当前 YAML 在用的 id@版本 —— 默认选中它，而不是列表里最老的那份快照 */
+  current: { id: string; version: string };
   defaultRange: { from: string; to: string };
 }) {
-  const [sel, setSel] = useState(() => {
-    const s = strategies[0];
-    return s ? `${SNAP}${s.id}@${s.version}` : "";
-  });
+  // 快照列表并入「当前在用」的一份（可能还没落库 —— 快照在产生第一条预测时才存，
+  // 但跑 s:<id>@<当前版本> 与不带参数等价，resolveBacktestTarget 对相等版本直接用当前配置）
+  const snaps = (() => {
+    const list = strategies.map((s) => ({ ...s, isCurrent: false }));
+    const i = list.findIndex((s) => s.id === current.id && s.version === current.version);
+    if (i >= 0) list[i] = { ...list[i], isCurrent: true };
+    else list.unshift({ ...current, isCurrent: true });
+    // 当前在用的排最前，它同时也是默认选中 —— 打开卡片直接点开始，跑的就是现在这套
+    return [list.splice(i >= 0 ? i : 0, 1)[0], ...list];
+  })();
+  const [sel, setSel] = useState(() => `${SNAP}${snaps[0].id}@${snaps[0].version}`);
   const [from, setFrom] = useState(defaultRange.from);
   const [to, setTo] = useState(defaultRange.to);
   // 初始资金没有默认值：它决定手数取整能不能成交、单票占比是多少。
@@ -53,6 +63,15 @@ export function LabRunner({
   const abortRef = useRef<AbortController | null>(null);
 
   const inputCls = "num bg-panel-2 border border-line-2 rounded-sm px-2 py-1 text-ink";
+
+  /** 下拉框太窄时文字会被原生控件裁掉，所以"到底跑哪套"在下拉之外再看一眼 */
+  const selSnap = snaps.find((s) => `${SNAP}${s.id}@${s.version}` === sel);
+  const selVariant = sel.startsWith(VARIANT) ? variants.find((v) => `${VARIANT}${v.id}` === sel) : undefined;
+  const willRun = selSnap
+    ? `${selSnap.id} @ ${selSnap.version}${selSnap.isCurrent ? "（当前 YAML 在用）" : "（历史快照）"}`
+    : selVariant
+      ? `当前 YAML + ${selVariant.name}（影子盘槽位组合）`
+      : sel;
 
   return (
     <div className="flex flex-col gap-3">
@@ -117,16 +136,19 @@ export function LabRunner({
       >
         <label className="flex flex-col gap-0.5">
           <span className="text-ink-3 text-[11px]">跑哪一套</span>
+          {/* 不用 .num：那是给数字列的（右对齐），名字被推到右边看着像被裁掉了 */}
           <select
-            className={`${inputCls} w-60`}
+            className={`${inputCls.replace("num ", "")} font-mono text-left w-80 max-w-full`}
             value={sel}
             onChange={(e) => setSel(e.target.value)}
+            title={willRun}
             required
           >
             <optgroup label="策略快照">
-              {strategies.map((s) => (
+              {snaps.map((s) => (
                 <option key={`${SNAP}${s.id}@${s.version}`} value={`${SNAP}${s.id}@${s.version}`}>
                   {s.id} @ {s.version}
+                  {s.isCurrent ? "（当前）" : ""}
                 </option>
               ))}
             </optgroup>
@@ -196,6 +218,13 @@ export function LabRunner({
       </form>
 
       <BacktestProgress busy={busy} prog={prog} startedAt={startedAt.current} />
+
+      {/* 下拉框再宽也可能被抽屉挤窄；跑哪套在这里用完整句子说一遍，不依赖框内文字 */}
+      {sel ? (
+        <p className="text-ink-3 text-[11px]">
+          将跑：<span className="text-ink">{willRun}</span>
+        </p>
+      ) : null}
 
       {sel.startsWith(VARIANT) ? (
         <p className="text-ink-3 text-[11px]">
