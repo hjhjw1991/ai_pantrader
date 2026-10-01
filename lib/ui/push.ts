@@ -302,13 +302,34 @@ export type Transport = (
   deps: { proxy?: string | null; timeoutMs?: number }
 ) => Promise<{ status: number; body: string }>;
 
+/**
+ * 走代理发一次；**网络层**失败就直连重试一次。
+ *
+ * 为什么需要它：本机的代理端口会漂移（实测一周内 63722 → 52420），
+ * 而飞书和企业微信本来就是**直连可达**的。代理一挂，推送就静默失效——
+ * 这恰恰是最坏的结果，因为"没收到"本身不产生任何信号。
+ *
+ * 只在拿到响应之前失败才重试：一旦收到响应（哪怕是 200 但业务错误码），
+ * 说明链路是通的，重发只会让用户收到两条一样的消息。
+ */
+async function requestWithFallback(
+  url: string, opts: ReqOpts, cfg: PushConfig, io: Transport
+): Promise<{ status: number; body: string }> {
+  try {
+    return await io(url, opts, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+  } catch (e) {
+    if (!cfg.proxy) throw e;
+    return await io(url, opts, { proxy: null, timeoutMs: cfg.timeoutMs });
+  }
+}
+
 async function sendWecom(url: string, m: PushMessage, cfg: PushConfig, io: Transport): Promise<SendResult> {
   try {
-    const res = await io(url, {
+    const res = await requestWithFallback(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ msgtype: "markdown", markdown: { content: wecomContent(m) } }),
-    }, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+    }, cfg, io);
     // 企业微信的业务错误也返回 200，必须看 body 里的 errcode
     const errcode = /"errcode"\s*:\s*(\d+)/.exec(res.body)?.[1];
     return { target: "wecom", ok: res.status === 200 && errcode === "0", status: res.status,
@@ -325,13 +346,13 @@ async function sendWecom(url: string, m: PushMessage, cfg: PushConfig, io: Trans
 async function sendFeishu(url: string, m: PushMessage, cfg: PushConfig, io: Transport, secret?: string | null): Promise<SendResult> {
   try {
     const tsSec = secret ? Math.floor(Date.now() / 1000) : undefined;
-    const res = await io(url, {
+    const res = await requestWithFallback(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(feishuPayload(m, {
         keyword: cfg.feishuKeyword, style: cfg.feishuStyle, tsSec, secret,
       })),
-    }, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+    }, cfg, io);
 
     const code = /"(?:code|StatusCode)"\s*:\s*(-?\d+)/.exec(res.body)?.[1];
     const httpOk = res.status >= 200 && res.status < 300;
@@ -353,8 +374,7 @@ async function sendBark(base: string, m: PushMessage, cfg: PushConfig, io: Trans
     const body = encodeURIComponent((m.body ?? "").replace(/\n/g, " "));
     const level = m.severity === "critical" ? "critical" : m.severity === "warn" ? "active" : "active";
     const url = `${base}/${title}/${body}?level=${level}&group=候潮`;
-    const res = await io(url, { method: "GET", headers: {} },
-      { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+    const res = await requestWithFallback(url, { method: "GET", headers: {} }, cfg, io);
     return { target: "bark", ok: res.status === 200, status: res.status,
       ...(res.status === 200 ? {} : { error: res.body.slice(0, 120) }) };
   } catch (e) {
@@ -364,11 +384,11 @@ async function sendBark(base: string, m: PushMessage, cfg: PushConfig, io: Trans
 
 async function sendGeneric(url: string, m: PushMessage, cfg: PushConfig, io: Transport): Promise<SendResult> {
   try {
-    const res = await io(url, {
+    const res = await requestWithFallback(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: m.title, body: m.body ?? "", severity: m.severity, kind: m.kind, ts: m.ts }),
-    }, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
+    }, cfg, io);
     return { target: "webhook", ok: res.status >= 200 && res.status < 300, status: res.status };
   } catch (e) {
     return { target: "webhook", ok: false, error: String((e as Error)?.message ?? e) };

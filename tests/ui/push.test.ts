@@ -322,6 +322,53 @@ describe("dispatchPush", () => {
   });
 });
 
+/**
+ * 代理失败回退直连。
+ *
+ * 起因是本机实测：代理端口会漂移（63722 → 52420），而飞书/企业微信直连就可达。
+ * 代理失效时推送会静默断掉，且"没收到"本身不产生任何信号。
+ */
+describe("代理回退", () => {
+  const FEISHU = "https://open.feishu.cn/open-apis/bot/v2/hook/token-1";
+
+  it("代理发不出去时，自动直连重试一次并成功", async () => {
+    const calls: Array<string | null> = [];
+    const io: Transport = async (_url, _opts, deps) => {
+      calls.push(deps.proxy ?? null);
+      if (deps.proxy) throw new Error("代理超时");
+      return { status: 200, body: '{"code":0}' };
+    };
+    const out = await dispatchPush(msg(), {
+      config: cfg({ feishuUrls: [FEISHU], proxy: "http://127.0.0.1:63722" }), io,
+    });
+    expect(out[0].ok).toBe(true);
+    expect(calls).toEqual(["http://127.0.0.1:63722", null]);
+  });
+
+  it("没配代理时失败就失败，不多试（没有可退的路）", async () => {
+    const calls: Array<string | null> = [];
+    const io: Transport = async (_u, _o, deps) => {
+      calls.push(deps.proxy ?? null);
+      throw new Error("ENOTFOUND");
+    };
+    const out = await dispatchPush(msg(), { config: cfg({ feishuUrls: [FEISHU] }), io });
+    expect(out[0].ok).toBe(false);
+    expect(calls).toEqual([null]);
+  });
+
+  it("收到响应就不重试——哪怕业务码是错的，否则用户会收到两条", async () => {
+    const calls: Array<string | null> = [];
+    const io: Transport = async (_u, _o, deps) => {
+      calls.push(deps.proxy ?? null);
+      return { status: 200, body: '{"code":19001}' };
+    };
+    await dispatchPush(msg(), {
+      config: cfg({ feishuUrls: [FEISHU], proxy: "http://127.0.0.1:63722" }), io,
+    });
+    expect(calls).toEqual(["http://127.0.0.1:63722"]);
+  });
+});
+
 describe("pushOutbound", () => {
   it("没配通道时不抛异常、不发网络", () => {
     const saved = { ...process.env };
