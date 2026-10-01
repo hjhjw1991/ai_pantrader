@@ -453,7 +453,12 @@ export function pushOutbound(m: PushMessage): void {
   try {
     const cfg = readPushConfig();
     if (!isEnabled(cfg)) return;   // 没配 = 没启用，连一次网络都不发
-    void dispatchPush(m, { config: cfg }).catch(() => {});
+    /**
+     * 带上日志。dispatchPush 默认的 log 是空函数，那样一旦推送失败，
+     * 守护进程日志里**什么都不留**——手机一直收不到时没有任何线索可查。
+     * 走 stderr，采集守护进程的日志会一并收走。
+     */
+    void dispatchPush(m, { config: cfg, log: (line) => console.warn(line) }).catch(() => {});
   } catch {
     // 推送是增强：这里的任何异常都不该冒到调用方的采集/交易流程上
   }
