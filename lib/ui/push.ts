@@ -37,6 +37,10 @@ export interface PushConfig {
   feishuSecrets: string[];
   /** 飞书机器人若开了「自定义关键词」校验，消息正文必须含它，否则会被拒 */
   feishuKeyword: string | null;
+  /** 发消息时 @ 谁：`all` = @所有人（群里只有自己时等于 @自己），或 open_id */
+  feishuAt: string | null;
+  /** @指定人时的显示名 */
+  feishuAtName: string | null;
   /** card = 消息卡片（带级别配色）；text = 纯文本，最稳但朴素 */
   feishuStyle: "card" | "text";
   /** Bark key（走官方服务器）或完整推送 URL */
@@ -67,6 +71,8 @@ export function readPushConfig(env: Partial<NodeJS.ProcessEnv> = process.env): P
     feishuUrls: splitList(env.PANTRADER_PUSH_FEISHU),
     feishuSecrets: splitList(env.PANTRADER_PUSH_FEISHU_SECRET),
     feishuKeyword: env.PANTRADER_PUSH_FEISHU_KEYWORD?.trim() || null,
+    feishuAt: env.PANTRADER_PUSH_FEISHU_AT?.trim() || null,
+    feishuAtName: env.PANTRADER_PUSH_FEISHU_AT_NAME?.trim() || null,
     feishuStyle: style === "text" ? "text" as const : "card" as const,
     barkUrl: rawBark
       ? (/^https?:\/\//.test(rawBark) ? rawBark : `https://api.day.app/${rawBark}`)
@@ -136,16 +142,44 @@ const FEISHU_TEMPLATE: Record<PushSeverity, string> = {
   critical: "red", warn: "orange", info: "blue",
 };
 
+/**
+ * @ 人的标签。
+ *
+ * 两种消息类型的语法**不能混用**，混用整条消息会被拒：
+ *   text  → `<at user_id="all">所有人</at>`
+ *   card  → `<at id=all></at>`（id 不带引号）
+ *
+ * @指定人只能用 open_id（ou_ 开头），而群自定义机器人**没有通讯录权限**，
+ * 拿不到任何人的 open_id。所以实际能用的只有 `all`。
+ * 好在通知群通常只有自己一个人，@all 就等于 @自己，且会触发红点强提醒。
+ */
+export function feishuAtTag(at: string | null | undefined, style: "card" | "text", name?: string | null): string {
+  if (!at) return "";
+  if (style === "text") {
+    return at === "all"
+      ? `<at user_id="all">所有人</at>`
+      : `<at user_id="${at}">${name?.trim() || ""}</at>`;
+  }
+  return at === "all" ? "<at id=all></at>" : `<at id=${at}></at>`;
+}
+
+/** @ 标签拼在正文最前面：用户第一眼看到的是"有人在群里叫你"。 */
+function withAt(body: string, at: string): string {
+  return at ? `${at}\n${body}` : body;
+}
+
 /** 纯文本形态的正文。 */
-export function feishuText(m: PushMessage, keyword?: string | null): string {
+export function feishuText(m: PushMessage, keyword?: string | null, at?: string | null, atName?: string | null): string {
   const head = `${m.title}\n${FEISHU_LEVEL_TAG[m.severity]}｜${m.kind}｜${m.ts}`;
   const tail = keyword ? `候潮 · ${keyword}` : "候潮";
-  return `${head}${m.body ? `\n\n${m.body}` : ""}\n\n${tail}`;
+  return withAt(`${head}${m.body ? `\n\n${m.body}` : ""}\n\n${tail}`,
+    feishuAtTag(at, "text", atName));
 }
 
 /** 卡片正文（lark_md）：级别标签 + 类型 + 时间，再接一条分割线。 */
-export function feishuCardContent(m: PushMessage): string {
-  return `${FEISHU_LEVEL_TAG[m.severity]}｜${m.kind}｜${m.ts}${m.body ? `\n\n${m.body}` : ""}`;
+export function feishuCardContent(m: PushMessage, at?: string | null, atName?: string | null): string {
+  return withAt(`${FEISHU_LEVEL_TAG[m.severity]}｜${m.kind}｜${m.ts}${m.body ? `\n\n${m.body}` : ""}`,
+    feishuAtTag(at, "card", atName));
 }
 
 export interface FeishuPayloadOpts {
@@ -154,6 +188,10 @@ export interface FeishuPayloadOpts {
   /** 秒级时间戳，用于加签。不传表示不加签 */
   tsSec?: number;
   secret?: string | null;
+  /** @ 谁：填 all 表示所有人，或 open_id（ou_ 开头）。不填则不 @ */
+  at?: string | null;
+  /** @指定人时的显示名（可选） */
+  atName?: string | null;
 }
 
 /**
@@ -165,7 +203,7 @@ export function feishuPayload(m: PushMessage, opts: FeishuPayloadOpts = {}): Rec
   const tail = kw ? `候潮 · ${kw}` : "候潮";
 
   const payload: Record<string, unknown> = (opts.style ?? "card") === "text"
-    ? { msg_type: "text", content: { text: feishuText(m, kw) } }
+    ? { msg_type: "text", content: { text: feishuText(m, kw, opts.at, opts.atName) } }
     : {
       msg_type: "interactive",
       card: {
@@ -176,7 +214,7 @@ export function feishuPayload(m: PushMessage, opts: FeishuPayloadOpts = {}): Rec
           title: { tag: "plain_text", content: m.title.replace(/\s*\n\s*/g, " ").trim() },
         },
         elements: [
-          { tag: "div", text: { tag: "lark_md", content: feishuCardContent(m) } },
+          { tag: "div", text: { tag: "lark_md", content: feishuCardContent(m, opts.at, opts.atName) } },
           { tag: "hr" },
           { tag: "note", elements: [{ tag: "plain_text", content: tail }] },
         ],
@@ -351,6 +389,7 @@ async function sendFeishu(url: string, m: PushMessage, cfg: PushConfig, io: Tran
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(feishuPayload(m, {
         keyword: cfg.feishuKeyword, style: cfg.feishuStyle, tsSec, secret,
+        at: cfg.feishuAt, atName: cfg.feishuAtName,
       })),
     }, cfg, io);
 

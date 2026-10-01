@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  dispatchPush, feishuCardContent, feishuPayload, feishuSign, feishuText, isEnabled,
+  dispatchPush, feishuAtTag, feishuCardContent, feishuPayload, feishuSign, feishuText, isEnabled,
   pushOutbound, readPushConfig, requestHttps, resetThrottle, secretFor,
   shouldPush, throttled, wecomContent,
 } from "@/lib/ui/push";
@@ -20,6 +20,7 @@ import type { PushConfig, PushMessage, Transport } from "@/lib/ui/push";
 function cfg(patch: Partial<PushConfig> = {}): PushConfig {
   return {
     wecomUrls: [], feishuUrls: [], feishuSecrets: [], feishuKeyword: null, feishuStyle: "card",
+    feishuAt: null, feishuAtName: null,
     barkUrl: null, genericUrls: [],
     minSeverity: "warn", throttleSec: 300, proxy: null, timeoutMs: 8000,
     ...patch,
@@ -170,6 +171,23 @@ describe("飞书消息体", () => {
     const signed = feishuPayload(msg(), { tsSec: 1, secret: "s" }) as any;
     expect(signed.timestamp).toBe("1");
     expect(signed.sign).toBe(feishuSign("s", 1));
+  });
+
+  it("@ 标签：卡片与纯文本是两套语法，不能混用", () => {
+    expect(feishuAtTag("all", "card")).toBe("<at id=all></at>");
+    // 混用会让整条消息被拒：纯文本里必须是 user_id="all" 带引号
+    expect(feishuAtTag("all", "text")).toBe(`<at user_id="all">所有人</at>`);
+    expect(feishuAtTag("ou_abc", "card")).toBe("<at id=ou_abc></at>");
+  });
+
+  it("不 @ 时正文里不留任何残留标签", () => {
+    expect(feishuAtTag(null, "card")).toBe("");
+    expect(feishuCardContent(msg(), null)).not.toContain("<at");
+    expect(feishuText(msg(), null, null)).not.toContain("<at");
+  });
+
+  it("@ 标签放在正文最前面（第一眼看到的是有人在叫你）", () => {
+    expect(feishuCardContent(msg(), "all").startsWith("<at id=all></at>\n")).toBe(true);
   });
 
   it("密钥配对：不配→无；一个→全用；多个→按序", () => {

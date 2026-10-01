@@ -39,7 +39,8 @@ async function main(): Promise<void> {
   console.log(`[候潮] 已配置：飞书 ${cfg.feishuUrls.length} 个 / 企业微信 ${cfg.wecomUrls.length} 个 /`
     + ` Bark ${cfg.barkUrl ? 1 : 0} 个 / 通用 ${cfg.genericUrls.length} 个`);
   console.log(`  门槛 ${cfg.minSeverity}｜节流 ${cfg.throttleSec}s｜代理 ${cfg.proxy ?? "（无）"}`
-    + `｜加签 ${cfg.feishuSecrets.length > 0 ? "开" : "关"}｜关键词 ${cfg.feishuKeyword ?? "无"}`);
+    + `｜加签 ${cfg.feishuSecrets.length > 0 ? "开" : "关"}｜关键词 ${cfg.feishuKeyword ?? "无"}`
+    + `｜@ ${cfg.feishuAt ?? "不@"}｜形态 ${cfg.feishuStyle}`);
 
   const results = await dispatchPush({
     kind: "push_selfcheck",
