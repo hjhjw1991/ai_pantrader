@@ -204,7 +204,16 @@ export const 评估器_游资手法: EvaluatorSlot = {
     // 贴着 MA5 接。首阴手法强制开（龙头首次分歧的支撑就在那儿），
     // 其余手法按需开 —— "回踩 5/10 日线缩量企稳低吸"与"首阴低吸"是同一条纪律的松紧两档
     const 贴MA5 = params["不高于MA5"] === true || 手法_ === "首阴";
-    const 放宽 = { ...放宽默认[手法_], ...(对象参数(params["放宽"])) };
+
+    /**
+     * `沿用默认筛` 是专门为**单因子对照**留的开关。
+     *
+     * 默认不放宽（放宽默认）时，换上本槽等于同时换了两样东西：进场手法 + 宽松筛。
+     * 那样赢了也分不清是哪一样起的作用 —— 这恰恰是"整套照搬"的老毛病。
+     * 要测"贴着 MA5 接到底好不好"这种单一问题时，必须让筛子保持原样。
+     */
+    const 沿用默认筛 = params["沿用默认筛"] === true;
+    const 放宽 = 沿用默认筛 ? {} : { ...放宽默认[手法_], ...(对象参数(params["放宽"])) };
     const 阈值: Record<string, number> = { ...ctx.config.选股.过滤器阈值, ...放宽 };
 
     /**
@@ -267,7 +276,8 @@ export const 评估器_游资手法: EvaluatorSlot = {
       triggerPx: raw.triggerPx, stopPx, targetPx, rrRatio,
       thesis: `${raw.thesis}；${手法说明}，${定价说明}`
         + `${rrRatio === null ? "" : `，盈亏比 ${rrRatio.toFixed(2)}`}`
-        + `${止损 === null ? "" : `，硬止损 ${pct(止损)}`}；放宽筛（${Object.keys(放宽).length} 项）`,
+        + `${止损 === null ? "" : `，硬止损 ${pct(止损)}`}`
+        + (沿用默认筛 ? "" : `；放宽筛（${Object.keys(放宽).length} 项）`),
       passedFilters: raw.passedFilters,
       factors: [...raw.factors, ...extra],
       score: raw.score,

@@ -181,6 +181,15 @@ describe("评估器·游资手法", () => {
     expect(c!.thesis).toContain("不高于 MA5");
   });
 
+  it("沿用默认筛：不放宽且在 thesis 上没有放宽痕迹（单变量对照的前提）", () => {
+    const clean = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 沿用默认筛: true } } });
+    const loose = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸" } } });
+    expect(clean!.thesis).not.toContain("放宽筛");
+    expect(loose!.thesis).toContain("放宽筛");
+    // 筛口不同，但触发价算法相同 —— 差别必须只落在"哪些票有资格进池"
+    expect(clean!.triggerPx).toBe(loose!.triggerPx);
+  });
+
   it("止损按参数覆写，不再沿用账户的 −10%", () => {
     const c = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 止损: -0.08 } } });
     expect(c!.stopPx).toBe(9.82);   // 10.67 × 0.92
