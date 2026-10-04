@@ -181,6 +181,42 @@ describe("评估器·游资手法", () => {
     expect(c!.thesis).toContain("不高于 MA5");
   });
 
+  /**
+   * 容差这一档是回放逼出来的：严格版 min(昨收, MA5) 触发率只剩 7.8%，
+   * 单笔质量确实升了但一年攒不出 43 笔。所以要有"贴着即可、不必跌破"。
+   * 这里的断言重点是**三档必须严格递增** —— 若哪天写反了（比如把容差乘到
+   * 昨收上而不是 MA5 上），数字照样出得来，但方向就错了。
+   */
+  it("MA5 容差：true 压到 MA5，数字压到 MA5×倍数，放开即不压（严格递增）", () => {
+    // 强趋势：昨收 11 → base = 11×0.97 = 10.67；MA5 = (8+8.5+9+9.5+11)/5 = 9.2
+    const fix: Fix = { bars: { "600183": withOHLC("600183", [8, 8.5, 9, 9.5, 11]) } };
+    const px = (不高于MA5: unknown) => cand(
+      { 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 沿用默认筛: true, 不高于MA5 } } }, fix)?.triggerPx;
+
+    const strict = px(true);
+    const l103 = px(1.03);
+    const l106 = px(1.06);
+    const free = px(false);
+
+    expect(strict).toBe(9.2);      // min(10.67, 9.2)
+    expect(l103).toBe(9.48);       // min(10.67, 9.2×1.03)
+    expect(l106).toBe(9.75);       // min(10.67, 9.2×1.06)
+    expect(free).toBe(10.67);      // 完全不压
+    expect(strict!).toBeLessThan(l103!);
+    expect(l103!).toBeLessThan(l106!);
+    expect(l106!).toBeLessThan(free!);
+  });
+
+  it("容差档在 thesis 上留痕：一看就知道这张卡是按 MA5×1.03 出的", () => {
+    const fix: Fix = { bars: { "600183": withOHLC("600183", [8, 8.5, 9, 9.5, 11]) } };
+    const c = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 沿用默认筛: true, 不高于MA5: 1.03 } } }, fix);
+    expect(c!.thesis).toContain("MA5×1.03");
+    // 严格档不能把自己说成带容差
+    const s = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 沿用默认筛: true, 不高于MA5: true } } }, fix);
+    expect(s!.thesis).toContain("不高于 MA5");
+    expect(s!.thesis).not.toContain("×1.03");
+  });
+
   it("沿用默认筛：不放宽且在 thesis 上没有放宽痕迹（单变量对照的前提）", () => {
     const clean = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸", 沿用默认筛: true } } });
     const loose = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸" } } });

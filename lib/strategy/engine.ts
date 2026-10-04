@@ -680,7 +680,14 @@ export function evaluateRow(
     // 默认值与"为什么不再压 MA5"见 买点默认。
     const bp = { ...买点默认, ...(config.选股.买点 ?? {}) };
     const base = lastClose * (1 + bp.相对昨收);
-    const triggerPx = round2(bp.不高于MA5 ? Math.min(base, ma5) : base);
+    // true = 压到 MA5；数字 = 压到 MA5×该倍数（贴近即可，不必真的跌破）。
+    // 加这一档是有实测代价的：严格版 min(昨收, MA5) 在 694 天回放里触发率只剩 7.8%，
+    // 单笔期望确实从 −0.43% 升到 +0.28%，但一年只攒得出约 43 笔 ——
+    // 够不到 120 笔的毕业线。于是要有"贴近但不必跌破"这一档来找质量与样本量的平衡点。
+    const cap = bp.不高于MA5 === true ? ma5
+      : typeof bp.不高于MA5 === "number" ? ma5 * bp.不高于MA5
+        : null;
+    const triggerPx = round2(cap === null ? base : Math.min(base, cap));
     if (!(triggerPx > 0)) {
       warn(`${row.code} 算不出正的触发价，跳过`);
       return null;

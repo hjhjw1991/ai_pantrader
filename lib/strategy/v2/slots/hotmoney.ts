@@ -202,8 +202,14 @@ export const 评估器_游资手法: EvaluatorSlot = {
 
     const 折让 = 折让of(手法_, params, sec.board);
     // 贴着 MA5 接。首阴手法强制开（龙头首次分歧的支撑就在那儿），
-    // 其余手法按需开 —— "回踩 5/10 日线缩量企稳低吸"与"首阴低吸"是同一条纪律的松紧两档
-    const 贴MA5 = params["不高于MA5"] === true || 手法_ === "首阴";
+    // 其余手法按需开 —— "回踩 5/10 日线缩量企稳低吸"与"首阴低吸"是同一条纪律的松紧两档。
+    // true = 必须跌破 MA5；数字 = 贴到 MA5×倍数即可。后者是给"严格版触发率只剩 7.8%"
+    // 留的活口：质量与样本量的平衡点要靠这一档找，见 lib/strategy/engine.ts 同段注释。
+    const 容差 = params["不高于MA5"];
+    const 贴MA5 = 容差 === true || 手法_ === "首阴" ? true
+      : typeof 容差 === "number" ? 容差
+        : false;
+    const 容差说明 = typeof 贴MA5 === "number" ? `MA5×${贴MA5}` : "MA5";
 
     /**
      * `沿用默认筛` 是专门为**单因子对照**留的开关。
@@ -268,7 +274,7 @@ export const 评估器_游资手法: EvaluatorSlot = {
 
     const 手法说明 = 手法_ === "打板"
       ? `打板（涨停价 ${raw.triggerPx}，${sec.board} 限幅 ${pct(limitPct(sec.board))}）`
-      : `${手法_}（相对昨收 ${pct(折让)}${贴MA5 ? "，且不高于 MA5" : ""}）`;
+      : `${手法_}（相对昨收 ${pct(折让)}${贴MA5 === false ? "" : `，且不高于 ${容差说明}`}）`;
 
     return {
       code: raw.code, name: raw.name, account: raw.account,

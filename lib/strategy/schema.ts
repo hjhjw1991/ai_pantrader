@@ -92,7 +92,19 @@ export const StrategyConfigSchema = z.looseObject({
      */
     买点: z.looseObject({
       相对昨收: z.number().finite().min(-0.2).max(0.2),
-      不高于MA5: z.boolean().optional(),
+      /**
+       * true：触发价再压一道 MA5（取 min）。数字：压到 MA5 × 该倍数。
+       *
+       * 数字这一档是 2026-10-03 回放逼出来的：严格版 min(昨收, MA5) 单笔期望
+       * 从 −0.43% 升到 +0.28%、胜率 39.2% → 48.4%（694 天回放，122 笔），
+       * 但触发率被压到 7.8% —— 一年约 43 笔，攒够 120 笔毕业线要 2.8 年。
+       * 质量是真的，跑不完也是真的。所以要有"贴近 MA5 即可，不必真的跌破"这一档
+       * 来找质量与样本量的平衡点。
+       *
+       * 上界 1.2：超过这个倍数，"贴 MA5"这条约束就已经失去意义了，
+       * 那不是放宽，是取消。要取消就用 false / 不写，别用一个假装还开着的数。
+       */
+      不高于MA5: z.union([z.boolean(), z.number().finite().min(1).max(1.2)]).optional(),
     }).optional(),
     主线识别: z.looseObject({
       板块涨幅榜TopN: z.number().int().min(1).max(50),

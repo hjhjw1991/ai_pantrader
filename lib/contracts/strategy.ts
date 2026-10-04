@@ -176,12 +176,15 @@ export interface StrategyConfig {
       多头排列?: boolean;
     };
     /**
-     * 买点。触发价 = 昨收 × (1 + 相对昨收)，不高于MA5=true 时再与 MA5 取低。
+     * 买点。触发价 = 昨收 × (1 + 相对昨收)，不高于MA5 时再与 MA5 取低。
+     *   - true：严格压到 MA5
+     *   - 数字：压到 MA5 × 该倍数（贴近即可，不必真的跌破）
+     * 数字这一档是回放逼出来的：严格版触发率只剩 7.8%，质量升了但攒不出样本。
      * 不配就用引擎默认值（见 lib/strategy/engine 的 买点默认）。
      */
     买点?: {
       相对昨收: number;
-      不高于MA5?: boolean;
+      不高于MA5?: boolean | number;
     };
     主线识别: {
       板块涨幅榜TopN: number;
