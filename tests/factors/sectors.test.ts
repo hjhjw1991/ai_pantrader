@@ -45,6 +45,9 @@ describe("identifyMainlines —— 2026-07-27 主线级漏扫的根因回归测�
       [D]: [
         ztRow(D, "600183", { sector: "覆铜板", lbc: 3, sealAmt: 5e8 }),
         ztRow(D, "600519", { sector: "白酒", lbc: 1 }),
+        // 银行 / 房地产 也要真有涨停才配当主线（新判据：0 涨停不进主线）
+        ztRow(D, "601398", { sector: "银行", lbc: 1 }),
+        ztRow(D, "600048", { sector: "房地产", lbc: 1 }),
       ],
     },
   });
@@ -96,10 +99,54 @@ describe("identifyMainlines —— 2026-07-27 主线级漏扫的根因回归测�
           rank("银行", 2),
         ],
       },
+      zt: { [D]: [ztRow(D, "600519", { sector: "白酒", lbc: 1 })] },
     });
     const r = identifyMainlines(v, D, { 板块涨幅榜TopN: 2 });
     expect(r.mainlines[0].name).toBe("白酒");
     expect(r.mainlines[0].pct).toBe(4);
+  });
+
+  /* ---------------- 2026-10-06 九月主线核查的回归测试 ---------------- */
+
+  /**
+   * 背景：只看板块均值涨幅时，9 月 21 个交易日里有 **11 天**板块榜给出的三条主线
+   * 一只涨停都没有。最刺眼的是 09-21：医药生物当天 21 家涨停全场第一，
+   * 板块榜给的却是"其他医疗服务"（0 家），而真正的最大一块化学制药 9 家没进名单。
+   * 这类伪主线的危害是静默的 —— 按主线选票时这些板块里根本没有票可挑。
+   */
+  it("0 涨停的板块不算主线：涨幅第一但没有一只封板要被筛掉", () => {
+    const v = makeView({
+      asOf: D,
+      sectors: { [D]: [rank("白酒", 4.2), rank("化工", 3.9), rank("房地产", 2.8)] },
+      zt: { [D]: [] },
+    });
+    const r = identifyMainlines(v, D, { 板块涨幅榜TopN: 3 });
+    expect(r.mainlines.filter(m => m.source === "板块榜")).toEqual([]);
+    expect(r.板块榜候选).toBe(3);
+    expect(r.板块榜筛掉).toBe(3);
+  });
+
+  it("筛掉的名额要给真有涨停的板块：涨幅略低但有 9 家封板的应该补上来", () => {
+    const v = makeView({
+      asOf: D,
+      sectors: { [D]: [rank("医疗服务", 5.0), rank("化学制药", 3.1), rank("房产服务", 2.9)] },
+      zt: {
+        [D]: [
+          ztRow(D, "600276", { sector: "化学制药", lbc: 1 }),
+          ztRow(D, "600196", { sector: "化学制药", lbc: 2 }),
+        ],
+      },
+    });
+    const names = identifyMainlines(v, D, { 板块涨幅榜TopN: 3 }).mainlines
+      .filter(m => m.source === "板块榜").map(m => m.name);
+    // 医疗服务均值涨幅第一但 0 涨停 → 出局；化学制药 2 家涨停顶上来
+    expect(names).toEqual(["化学制药"]);
+  });
+
+  it("板块涨停下限=0 可恢复旧行为（涨幅榜照进，不做家数过滤）", () => {
+    const names = identifyMainlines(view, D, { 板块涨幅榜TopN: 2, 板块涨停下限: 0 })
+      .mainlines.filter(m => m.source === "板块榜").map(m => m.name);
+    expect(names).toEqual(["白酒", "银行"]);
   });
 });
 
@@ -110,7 +157,7 @@ describe("主线识别因子", () => {
     const view = makeView({
       asOf: D,
       sectors: { [D]: [rank("白酒", 4.2)] },
-      zt: { [D]: [ztRow(D, "600183", { sector: "PCB", lbc: 2 })] },
+      zt: { [D]: [ztRow(D, "600183", { sector: "PCB", lbc: 2 }), ztRow(D, "600519", { sector: "白酒", lbc: 1 })] },
     });
     const r = spec.fn({ view, params: { ...spec.defaults } }) as { value: string[] };
     expect(r.value).toContain("白酒");

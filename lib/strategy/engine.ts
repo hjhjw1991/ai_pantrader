@@ -245,6 +245,7 @@ export function detectMainlines(
   const 主线 = need("主线识别", {
     板块涨幅榜TopN: config.选股.主线识别.板块涨幅榜TopN,
     必查链: config.选股.主线识别.必查链,
+    板块涨停下限: config.选股.主线识别.板块涨停下限,
   });
   /**
    * 主线名单。

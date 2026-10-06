@@ -20,6 +20,31 @@ import { settleShadow } from "@/lib/shadow/settle";
 /** 持有期。与正式台账的 PLAN_EVAL_HORIZON 一致，两本账的"5 天"是同一个 5 天 */
 export const SHADOW_HORIZON = 5;
 
+/**
+ * 瞬时故障判定。判据见 function isTransientError 处的注释。
+ *
+ * 放在这里而不是 replay.ts：book 需要它做**逐变体**重试，而 replay 本来就 import book，
+ * 反过来 import 会成环。
+ */
+const TRANSIENT = /SQLITE_IOERR|disk I\/O error|SQLITE_BUSY|SQLITE_LOCKED|SQLITE_CANTOPEN/i;
+
+/**
+ * 单次读写出错的故障，不是逻辑错误。
+ *
+ * 实测形态：回放跑着跑着某个变体突然报 `disk I/O error` / `database is locked`，
+ * **同一个日子单独重跑又完全正常** —— 这是长事务扫 3.7 GB 库时，与 daemon 并发
+ * 读写 WAL 撞上的瞬时冲突。这类失败必须重试；但要跟"槽位抛错"区分开，
+ * 真 bug 不能靠重试掩盖过去。
+ */
+export function isTransientError(e: unknown): boolean {
+  return TRANSIENT.test((e as Error)?.message ?? "");
+}
+
+/** 同步睡：better-sqlite3 是同步 API，这里没有 await 可用，只能用 Atomics 让出 */
+export function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 export interface ActiveVariant { id: string; name: string; slots: SlotConfig }
 
 /** 首次运行时把默认变体登记进表。已有的不动 —— 变体一经产出样本，定义就不能被代码悄悄改掉 */
@@ -126,34 +151,57 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
   );
 
   const out: ShadowDayResult = { variants: variants.length, recorded: 0, skipped: [], failed: [] };
+
+  /** 单变体的"算 + 写"。抽成闭包是为了外面那层瞬时故障重试能重跑它 */
+  const recordOne = (v: ActiveVariant) => {
+    const card = make(v.slots)({
+      view, config: o.config, phase: o.phase, positions: [],
+      ...(o.sectorOf ? { sectorOf: o.sectorOf } : {}),
+      ...(o.sectorMapAt ? { sectorMapAt: o.sectorMapAt } : {}),
+    });
+    const buys = (card.candidates as any[]).filter(c => c.action === "买入" && typeof c.triggerPx === "number");
+    db.transaction(() => {
+      for (const c of buys) {
+        out.recorded += ins.run(
+          `${o.baseDate}:${v.id}:${o.source}:${c.code}`, v.id, o.source, o.baseDate, o.decidedOn,
+          c.code, c.name ?? null, c.account, c.triggerPx, c.stopPx ?? null,
+          typeof c.targetPx === "number" ? c.targetPx : null,
+          typeof c.rrRatio === "number" ? c.rrRatio : null,
+          c.size, typeof c.score === "number" ? c.score : null,
+          card.env.gear, card.stage ?? null, o.config.id, o.config.version ?? null, lock, shanghaiTs(),
+        ).changes;
+      }
+      // 当天一只都没有也要留痕：否则"这个变体那天判了防守、0 候选"和"那天没跑"分不开，
+      // 幂等检查也会让它每次重跑。用一条哨兵行（trigger_px = 0、size = 0，结算时跳过）
+      if (buys.length === 0) {
+        ins.run(`${o.baseDate}:${v.id}:${o.source}:-`, v.id, o.source, o.baseDate, o.decidedOn,
+          "-", null, "-", 0, null, null, null, 0, null, card.env.gear, card.stage ?? null,
+          o.config.id, o.config.version ?? null, lock, shanghaiTs());
+      }
+    })();
+  };
+
   for (const v of variants) {
     if (has.get(v.id, o.source, o.baseDate)) { out.skipped.push(v.id); continue; }
     try {
-      const card = make(v.slots)({
-        view, config: o.config, phase: o.phase, positions: [],
-        ...(o.sectorOf ? { sectorOf: o.sectorOf } : {}),
-        ...(o.sectorMapAt ? { sectorMapAt: o.sectorMapAt } : {}),
-      });
-      const buys = (card.candidates as any[]).filter(c => c.action === "买入" && typeof c.triggerPx === "number");
-      db.transaction(() => {
-        for (const c of buys) {
-          out.recorded += ins.run(
-            `${o.baseDate}:${v.id}:${o.source}:${c.code}`, v.id, o.source, o.baseDate, o.decidedOn,
-            c.code, c.name ?? null, c.account, c.triggerPx, c.stopPx ?? null,
-            typeof c.targetPx === "number" ? c.targetPx : null,
-            typeof c.rrRatio === "number" ? c.rrRatio : null,
-            c.size, typeof c.score === "number" ? c.score : null,
-            card.env.gear, card.stage ?? null, o.config.id, o.config.version ?? null, lock, shanghaiTs(),
-          ).changes;
+      /**
+       * 瞬时故障要重试，不只整天层面 —— 这里是**逐变体** catch 的那一层。
+       *
+       * 2026-10-06 踩到：一次从零重算里，6 天各有若干变体"失败"，日志看着像策略 bug，
+       * 单独重跑同一天却全部正常。真正的差别是这次 daemon 同时在写库。
+       * 只在整天层面重试（replay.ts 那边）兜不住这一层：某个变体在算到一半时
+       * 读失败，就会被当成永久失败记掉，而它本来重算一次就能好。
+       */
+      let lastErr: unknown = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try { recordOne(v); lastErr = null; break; }
+        catch (e) {
+          lastErr = e;
+          if (!isTransientError(e)) throw e;
+          sleepSync(1500 * attempt);
         }
-        // 当天一只都没有也要留痕：否则"这个变体那天判了防守、0 候选"和"那天没跑"分不开，
-        // 幂等检查也会让它每次重跑。用一条哨兵行（trigger_px = 0、size = 0，结算时跳过）
-        if (buys.length === 0) {
-          ins.run(`${o.baseDate}:${v.id}:${o.source}:-`, v.id, o.source, o.baseDate, o.decidedOn,
-            "-", null, "-", 0, null, null, null, 0, null, card.env.gear, card.stage ?? null,
-            o.config.id, o.config.version ?? null, lock, shanghaiTs());
-        }
-      })();
+      }
+      if (lastErr !== null) throw lastErr;
     } catch (e) {
       out.failed.push({ variant: v.id, error: (e as Error).message });
     }

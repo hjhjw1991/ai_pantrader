@@ -13,7 +13,10 @@
 import type { Db } from "@/lib/db";
 import type { StrategyConfig } from "@/lib/contracts";
 import { tradingDaysBetween } from "@/lib/data/calendar";
-import { runShadowDay, settleShadowPending, seedVariants, type ShadowDayOpts, type ShadowDayResult } from "@/lib/shadow/book";
+import {
+  runShadowDay, settleShadowPending, seedVariants, isTransientError, sleepSync,
+  type ShadowDayOpts, type ShadowDayResult,
+} from "@/lib/shadow/book";
 
 /**
  * 整趟回放最怕的不是某天算错，而是**跑一半崩掉**。
@@ -45,15 +48,7 @@ export interface ReplayResult {
   settle: { settled: number; untriggered: number; pending: number };
 }
 
-const TRANSIENT = /SQLITE_IOERR|disk I\/O error|SQLITE_BUSY|SQLITE_LOCKED|SQLITE_CANTOPEN/i;
-const isTransient = (e: unknown): boolean => TRANSIENT.test((e as Error)?.message ?? "");
-
-/** 同步睡：better-sqlite3 是同步 API，这里没有 await 可用，只能用 Atomics 让出 */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function runDayResilient(db: Db, d: string, o: ReplayOpts): ShadowDayResult {
+export function runDayResilient(db: Db, d: string, o: ReplayOpts): ShadowDayResult {
   const opts: ShadowDayOpts = {
     decidedOn: d, baseDate: d, asOf: `${d} 15:05:00`, phase: "盘后", config: o.config, source: "replay",
     ...(o.engineFor ? { engineFor: o.engineFor } : {}),
@@ -64,7 +59,7 @@ function runDayResilient(db: Db, d: string, o: ReplayOpts): ShadowDayResult {
       return runShadowDay(db, opts);
     } catch (e) {
       // 真 bug（槽位抛错、策略缺字段）必须响亮地炸，只兜瞬时故障
-      if (!isTransient(e)) throw e;
+      if (!isTransientError(e)) throw e;
       last = e;
       sleepSync(2000 * attempt);
     }

@@ -70,6 +70,11 @@ export interface MainlineResult {
   /** 板块榜 / 涨停池用的是日线重建的代理（那天没有真快照）。名字是申万三级行业名 */
   sectorProxy: boolean;
   ztProxy: boolean;
+  /** 板块榜里涨幅达标的板块数 */
+  板块榜候选: number;
+  /** 其中因涨停家数不够被筛掉的个数 */
+  板块榜筛掉: number;
+  板块涨停下限: number;
 }
 
 /** 同一天板块榜有多个时点快照，只取最后一个时点（盘中滚动写入，早盘那条是过程量） */
@@ -92,6 +97,19 @@ export interface MainlineOpts {
   必查链?: string[];
   /** 链内至少几只涨停才算主线 */
   链内涨停下限?: number;
+  /**
+   * 板块榜选出的板块，自身至少要有几只涨停才算主线。默认 1。
+   *
+   * 这一条是 2026-10-06 的九月核查逼出来的。原来的判据只看**板块均值涨幅**，
+   * 于是一个"大家都涨一点、但没有一只封板"的板块会被选成主线 ——
+   * 9 月 21 个交易日里有 **11 天**板块榜给出的三条主线**一只涨停都没有**。
+   * 最刺眼的是 09-21：医药生物当天 21 家涨停、全场压倒性第一，
+   * 板块榜给的却是"其他医疗服务"（0 家涨停），而真正的最大一块化学制药 9 家根本没进名单。
+   *
+   * 这类伪主线的危害是**静默的**：按主线去选票，这些板块里根本没有涨停股可挑，
+   * 主线名单等于空转，还不报错。
+   */
+  板块涨停下限?: number;
 }
 
 export function identifyMainlines(
@@ -107,19 +125,25 @@ export function identifyMainlines(
   const ranks = latestRankBySector(cr.sectors);
   const zt = cr.zt;
 
-  const byRank: MainlineHit[] = [...ranks.entries()]
+  const minSectorZt = Math.max(0, opts.板块涨停下限 ?? 1);
+  /**
+   * **先按涨停家数过滤，再取 TopN** —— 顺序很关键。
+   *
+   * 反过来（先取 TopN 再过滤）等于把被筛掉的名额白白丢掉：那些均值涨幅略低、
+   * 但当天真有几只封板的板块补不上来，而这恰恰是真主线的样子
+   * （09-21 的化学制药 9 家就是这么漏掉的）。
+   */
+  const withMembers = [...ranks.entries()]
     .sort((a, b) => (b[1].pct - a[1].pct) || (a[0] < b[0] ? -1 : 1))
-    .slice(0, topN)
-    .map(([sector, v]) => {
-      const members = zt.filter(z => z.sector === sector);
-      return {
-        name: sector, source: "板块榜" as const, pct: round6(v.pct),
-        leaderCode: v.leaderCode ?? leaderOf(members),
-        limitUpCount: members.length, maxLbc: maxLbcOf(members),
-        // 板块榜命中时 name 本身就是真实板块名
-        sectors: [sector],
-      };
-    });
+    .map(([sector, v]) => ({ sector, v, members: zt.filter(z => z.sector === sector) }));
+  const kept = withMembers.filter(x => x.members.length >= minSectorZt);
+  const byRank: MainlineHit[] = kept.slice(0, topN).map(({ sector, v, members }) => ({
+    name: sector, source: "板块榜" as const, pct: round6(v.pct),
+    leaderCode: v.leaderCode ?? leaderOf(members),
+    limitUpCount: members.length, maxLbc: maxLbcOf(members),
+    // 板块榜命中时 name 本身就是真实板块名
+    sectors: [sector],
+  }));
 
   const byChain: MainlineHit[] = [];
   for (const chain of chains) {
@@ -145,6 +169,10 @@ export function identifyMainlines(
     hasZtPool: zt.length > 0,
     sectorProxy: cr.sectorProxy,
     ztProxy: cr.ztProxy,
+    // 自检用：留痕"筛掉了几个、因为什么"，否则因子改动后无从确认它真的在判
+    板块榜候选: withMembers.length,
+    板块榜筛掉: withMembers.length - kept.length,
+    板块涨停下限: minSectorZt,
   };
 }
 
@@ -166,12 +194,13 @@ function leaderOf(rows: ZtRow[]): string | null {
 
 const 主线识别: FactorSpec<string[]> = {
   name: "主线识别", version: "1.0.0", group: "thermo",
-  defaults: { 板块涨幅榜TopN: 3, 链内涨停下限: 1 },
+  defaults: { 板块涨幅榜TopN: 3, 链内涨停下限: 1, 板块涨停下限: 1 },
   fn: ctx => {
     const date = evalDate(ctx.view, ctx.params);
     const r = identifyMainlines(ctx.view, date, {
       板块涨幅榜TopN: pnum(ctx.params, "板块涨幅榜TopN", 3),
       链内涨停下限: pnum(ctx.params, "链内涨停下限", 1),
+      板块涨停下限: pnum(ctx.params, "板块涨停下限", 1),
       必查链: parr(ctx.params, "必查链"),
     });
     // 板块榜与涨停池都不可回补，缺快照时这个因子只能算"猜"，置信度必须掉下来。
@@ -187,6 +216,7 @@ const 主线识别: FactorSpec<string[]> = {
         日期: date, 明细: r.mainlines, 扫描的链: r.扫描的链,
         有板块榜: r.hasSectorRank, 有涨停池: r.hasZtPool,
         板块榜为代理: r.sectorProxy, 涨停池为代理: r.ztProxy,
+        板块榜候选: r.板块榜候选, 板块榜筛掉: r.板块榜筛掉, 板块涨停下限: r.板块涨停下限,
       },
     };
   },
