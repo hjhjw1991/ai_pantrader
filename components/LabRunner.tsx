@@ -5,6 +5,7 @@ import type { BacktestReport } from "@/lib/contracts/backtest";
 import { BacktestReportView } from "@/components/BacktestReportView";
 import { readNdjson } from "@/components/ndjson";
 import { DateInput } from "@/components/DateInput";
+import { useArchiveRefresh } from "@/components/ArchiveSync";
 
 /**
  * 回测执行控件。只在回测层就绪时才被渲染（见 lab 页）。
@@ -54,6 +55,10 @@ export function LabRunner({
   const [report, setReport] = useState<BacktestReport | null>(null);
   /** 服务端回执的"这次跑的是谁"。报告信封里只有 strategyId，分不出组合 */
   const [label, setLabel] = useState<string | null>(null);
+  /** 报告存进存档之后，下面那张表要说的话（列表没取到时如实讲，不假装刷新过了） */
+  const [archNote, setArchNote] = useState<string | null>(null);
+  /** 跑完让存档列表立刻重画 —— 与删档、扫描共用同一段刷新逻辑 */
+  const { refresh: refreshArchive } = useArchiveRefresh();
   /** 回放进度。total=0 表示还没收到第一天 */
   const [prog, setProg] = useState<{ done: number; total: number; date: string }>(
     { done: 0, total: 0, date: "" }
@@ -88,6 +93,7 @@ export function LabRunner({
           setErr(null);
           setReport(null);
           setLabel(null);
+          setArchNote(null);
           setProg({ done: 0, total: 0, date: "" });
           try {
             // 先说清楚跑的是哪一套，再发请求：服务端是按这两个字段挑配置的
@@ -121,7 +127,16 @@ export function LabRunner({
             const last = outcome.last;
 
             // 结论只能从消息体里读：流式响应的状态码在第一个字节就定死了
-            if (last?.phase === "done") setReport(last.report as BacktestReport);
+            if (last?.phase === "done") {
+              setReport(last.report as BacktestReport);
+              // 服务端已经把这份报告存进存档了，而存档表还停在跑之前。
+              // 四年跑 6 分钟都等了，不该再让人切走再回来才看见它出现在列表里
+              setArchNote(
+                await refreshArchive()
+                  ? null
+                  : "报告已存进存档，但列表没取到 —— 刷新页面可见"
+              );
+            }
             else if (last?.phase === "aborted") setErr(String(last.reason ?? "已取消"));
             else throw new Error(String(last?.reason ?? "回测中断，未收到结束消息"));
           } catch (e2) {
@@ -233,6 +248,8 @@ export function LabRunner({
           毕业看的是影子盘的实盘样本（同一段行情上真出过的信号），座次表在影子盘抽屉。
         </p>
       ) : null}
+
+      {archNote !== null ? <span className="text-warn text-[11px]">{archNote}</span> : null}
 
       {report ? (
         <div className="flex flex-col gap-2">

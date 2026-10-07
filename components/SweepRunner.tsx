@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import type { SweepReport } from "@/lib/contracts/backtest";
 import { DateInput } from "@/components/DateInput";
 import { readNdjson } from "@/components/ndjson";
+import { useArchiveRefresh } from "@/components/ArchiveSync";
 
 /**
  * 参数扫描 + 热力图（spec §10.4）。
@@ -76,6 +77,8 @@ export function SweepRunner({
   const startedAt = useRef(0);
   // 取消靠中断请求：服务端在两个交易日之间停手，不会留下跑一半的热力图
   const abortRef = useRef<AbortController | null>(null);
+  /** 跑完让存档列表立刻重画 —— 与删档、单次回测共用同一段刷新逻辑 */
+  const { refresh: refreshArchive } = useArchiveRefresh();
 
   const parsed = useMemo(
     () => axes.map((a) => ({ path: a.path, r: parseValues(a.values) })),
@@ -124,7 +127,13 @@ export function SweepRunner({
         return;
       }
       setPerPointMs(ms);
-      setMsg({ kind: "ok", text: `单点实测 ${(ms / 1000).toFixed(1)} 秒（这一次也是一次真回测）` });
+      // 测速本身就是一次真回测，存档里也多了一份 —— 列表要跟着变
+      const listed = await refreshArchive();
+      setMsg({
+        kind: "ok",
+        text: `单点实测 ${(ms / 1000).toFixed(1)} 秒（这一次也是一次真回测）`
+          + (listed ? "" : "，但存档列表没取到 —— 刷新页面可见"),
+      });
     } catch (e) {
       setMsg({ kind: "err", text: (e as Error).message });
     } finally {
@@ -174,7 +183,14 @@ export function SweepRunner({
       if (last?.phase === "done") {
         const rep = last.report as SweepReport;
         setReport(rep);
-        setMsg({ kind: "ok", text: `扫完 ${rep.evaluated} 个点` });
+        // 扫描跑了几小时，结果必须立刻出现在存档表里 —— 等整页刷新才看见，
+        // 那份列表和"我这几小时白跑了"在界面上没有区别
+        const listed = await refreshArchive();
+        setMsg({
+          kind: "ok",
+          text: `扫完 ${rep.evaluated} 个点`
+            + (listed ? "" : "，但存档列表没取到 —— 刷新页面可见"),
+        });
       } else if (last?.phase === "aborted") {
         setMsg({ kind: "err", text: String(last.reason ?? "已取消") });
       } else {
