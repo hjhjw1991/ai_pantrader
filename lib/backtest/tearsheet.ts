@@ -1,5 +1,7 @@
 import type { BacktestReport, EquityPoint } from "@/lib/contracts/backtest";
 import { MIN_SAMPLE_DAYS, MIN_SAMPLE_TRADES, TRADING_DAYS_PER_YEAR } from "@/lib/backtest/metrics";
+import { annualiseOf, dailyReturns, stdev } from "@/lib/backtest/series";
+import type { BenchmarkSeries, BenchmarkStats } from "@/lib/backtest/benchmark";
 import { shanghaiTs } from "@/lib/data/clock";
 
 /**
@@ -55,6 +57,14 @@ export interface TearsheetOptions {
   generatedAt?: string;
   /** 页脚备注，例如从哪个存档导出的 */
   note?: string;
+  /**
+   * 基准对比。由调用方取好再喂进来，**不在本文件里查库**：
+   * BacktestReport 是带 resultHash 的不可变快照，基准是外部取数，
+   * 把取数塞进渲染层等于让同一份存档导出两个不同内容。
+   */
+  benchmark?: { series: BenchmarkSeries; stats: BenchmarkStats } | null;
+  /** 取了基准但没取成时的原因。有它就在报告上写明"为什么没有基准" */
+  benchmarkReason?: string;
 }
 
 /* ------------------------------- 小工具 ------------------------------- */
@@ -108,23 +118,6 @@ interface Derived {
   /** 正收益交易日占比 */
   positiveDays: number | null;
   monthly: Array<{ year: string; cells: Array<number | null>; yearRet: number | null }>;
-}
-
-function dailyReturns(equity: readonly EquityPoint[]): number[] {
-  const out: number[] = [];
-  for (let i = 1; i < equity.length; i++) {
-    const prev = equity[i - 1]!.equity;
-    if (prev <= 0) { out.push(0); continue; } // 净值归零后不再产生有意义的收益率
-    out.push(equity[i]!.equity / prev - 1);
-  }
-  return out;
-}
-
-function stdev(xs: readonly number[]): number | null {
-  if (xs.length < 2) return null;
-  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
-  const v = xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1);
-  return Math.sqrt(v);
 }
 
 /**
@@ -231,7 +224,7 @@ const BOTTOM = 316;
  * 回撤画在下面而不是叠在净值上：叠在一起时两条曲线共用一套刻度，
  * 净值的小波动会被压平，而回撤的深浅恰恰是这份报告最该看清的东西。
  */
-function renderChart(equity: readonly EquityPoint[]): string {
+function renderChart(equity: readonly EquityPoint[], bench?: readonly (number | null)[] | null): string {
   if (equity.length < 2) {
     return `<p class="empty">净值点只有 ${equity.length} 个，无法作图。</p>`;
   }
@@ -239,8 +232,16 @@ function renderChart(equity: readonly EquityPoint[]): string {
   const topArea = { top: PAD_T, h: 186 };
   const ddArea = { top: 232, h: 66 };
 
+  /**
+   * 量程必须把基准一起框进来。
+   *
+   * 只按策略净值定 y 轴的话，跑出量程的基准线会被 SVG 裁掉 ——
+   * 而裁剪是**静默**的：图上看不到基准，读者只会以为"这条策略一直压着基准"，
+   * 实际是基准涨得更高、被裁在框外。同图对比的前提是同量程。
+   */
   const eqVals = equity.map(p => p.equity);
-  let lo = Math.min(...eqVals), hi = Math.max(...eqVals);
+  const benchVals = (bench ?? []).filter((v): v is number => v !== null);
+  let lo = Math.min(...eqVals, ...benchVals), hi = Math.max(...eqVals, ...benchVals);
   if (hi === lo) { hi = hi * 1.02 + 1e-9; lo = lo * 0.98 - 1e-9; } // 全平的曲线：造个量程，别除以 0
   const pad = (hi - lo) * 0.06;
   lo -= pad; hi += pad;
@@ -283,15 +284,48 @@ function renderChart(equity: readonly EquityPoint[]): string {
 
   const startLabel = equity[0]!.date;
   const endLabel = equity[equity.length - 1]!.date;
+  const legend = benchVals.length > 1
+    ? `<line class="bm" x1="${W - PAD_R - 118}" y1="${PAD_T - 8}" x2="${W - PAD_R - 98}" y2="${PAD_T - 8}"/>`
+      + `<line class="eq" x1="${W - PAD_R - 92}" y1="${PAD_T - 8}" x2="${W - PAD_R - 72}" y2="${PAD_T - 8}"/>`
+      + `<text class="cap" x="${W - PAD_R - 66}" y="${PAD_T - 5}">基准 / 策略</text>`
+    : "";
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="净值曲线与回撤">`
     + `<rect class="ddband" x="${PAD_L}" y="${ddArea.top}" width="${pw}" height="${ddArea.h}"/>`
     + grid + ddGrid
     + `<polygon class="dd" points="${ddPoly}"/>`
+    // 基准画在策略下面：两条线交叠时策略是主角，压在上方
+    + benchSegments(bench ?? [], x, yEq)
     + `<polyline class="eq" points="${eqLine}"/>`
     + `<text class="cap" x="${PAD_L}" y="${PAD_T - 5}">净值 ${esc(startLabel)} → ${esc(endLabel)}</text>`
     + `<text class="cap ddcap" x="${W - PAD_R}" y="${PAD_T - 5}" text-anchor="end">回撤（下半区）</text>`
+    + legend
     + xLabels.join("")
     + `</svg>`;
+}
+
+/**
+ * 基准线。**遇到 null 要断成多段**，不能一条线连过去。
+ *
+ * 连过去等于用直线跨过"我们没数据"的那几天，而直线在图上和真实的走势
+ * 长得一模一样 —— 这正是"看起来有基准"的最坏情形。
+ */
+function benchSegments(
+  bench: readonly (number | null)[],
+  x: (i: number) => number,
+  y: (v: number) => number
+): string {
+  const segs: string[] = [];
+  let cur: string[] = [];
+  bench.forEach((v, i) => {
+    if (v === null) {
+      if (cur.length > 1) segs.push(cur.join(" "));
+      cur = [];
+      return;
+    }
+    cur.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  });
+  if (cur.length > 1) segs.push(cur.join(" "));
+  return segs.map(s => `<polyline class="bm" points="${s}"/>`).join("");
 }
 
 /* ------------------------------- 片段渲染 ------------------------------- */
@@ -300,6 +334,55 @@ function cell(label: string, value: string, hint = "", tone = ""): string {
   return `<div class="cell${tone ? ` ${tone}` : ""}"><div class="k">${esc(label)}</div>`
     + `<div class="v">${value}</div>`
     + (hint ? `<div class="h">${esc(hint)}</div>` : "") + `</div>`;
+}
+
+/**
+ * 基准对比区块。
+ *
+ * 没有基准时必须**写明没有**，而不是整块不出现 ——
+ * 一块不出现的区域，读者会以为"这份报告本来就没有这一项"；
+ * 写明"取了但区间内没有日线"才分得清是没做还是做不了。
+ */
+function benchmarkBlock(
+  bm: { series: BenchmarkSeries; stats: BenchmarkStats } | null,
+  reason: string | undefined,
+): string {
+  if (bm === null) {
+    if (reason === undefined) return "";
+    return `<h2>基准对比</h2><p class="empty">无基准：${esc(reason)}</p>`;
+  }
+  const s = bm.stats;
+  const tone = (x: number | null) => (x === null ? "" : x >= 0 ? "up" : "down");
+  const dropped = bm.series.availableDays - (bm.series.equity.length - bm.series.missingDays);
+
+  const cells = [
+    cell("基准区间收益", pct(s.benchTotal), `${esc(bm.series.name)} 买入持有`, tone(s.benchTotal)),
+    cell("基准年化", pct(s.benchAnnual), "同一套折算口径", tone(s.benchAnnual)),
+    cell("基准最大回撤", pct(s.benchMaxDD), "", "down"),
+    cell("超额（区间）", pct(s.excessTotal), "策略 − 基准", tone(s.excessTotal)),
+    cell("年化超额", pct(s.excessAnnual), "两端年化之差", tone(s.excessAnnual)),
+    cell("Beta", num(s.beta), "cov(策略,基准)/var(基准)"),
+    cell("年化 Alpha", pct(s.alphaAnnual), "策略年化 − β×基准年化", tone(s.alphaAnnual)),
+    cell("相关系数", num(s.correlation), "日收益"),
+    cell("跟踪误差", pct(s.trackingError, 1), "日超额波动年化"),
+    cell("信息比率", num(s.infoRatio), "年化超额 / 跟踪误差", tone(s.infoRatio)),
+    cell("跑赢基准日占比", pct(s.outperformingDays, 1), `${s.paired} 个有效配对日`),
+  ].join("\n  ");
+
+  const caveats: string[] = [];
+  if (dropped > 0) {
+    caveats.push(`区间内基准自己有 ${bm.series.availableDays} 个交易日，其中 ${dropped} 天是策略的数据缺口日，已一并丢弃`);
+  }
+  if (bm.series.missingDays > 0) {
+    caveats.push(`有 ${bm.series.missingDays} 个策略交易日缺基准数据，这些天跳过配对、未插值，线在图上断开`);
+  }
+  caveats.push("基准是买入持有，不含任何费用；策略一侧含滑点与费率");
+
+  return `<h2>基准对比 · ${esc(bm.series.name)} <span style="color:var(--ink3);font-weight:400">${esc(bm.series.code)}</span></h2>
+<div class="grid">
+  ${cells}
+</div>
+<p class="note">${caveats.map(esc).join("；")}。</p>`;
 }
 
 function monthlyTable(monthly: Derived["monthly"]): string {
@@ -330,6 +413,9 @@ export function renderTearsheet(report: BacktestReport, o: TearsheetOptions = {}
   const low = cov.lowConfidenceFactors ?? [];
   const healthBad = cov.gapDays > 0 || low.length > 0;
   const generatedAt = o.generatedAt ?? nowTs();
+  const bm = o.benchmark ?? null;
+  const benchSeries = bm === null ? null : bm.series.equity;
+  const benchBlock = benchmarkBlock(bm, o.benchmarkReason);
 
   const constraints = [
     report.constraints.t1 ? "T+1" : "",
@@ -379,6 +465,7 @@ text.ax{font-size:11px;fill:var(--ink3);font-variant-numeric:tabular-nums}
 text.cap{font-size:11px;fill:var(--ink2)}
 text.ddcap{fill:var(--up)}
 .eq{fill:none;stroke:#2b6cb0;stroke-width:1.6}
+.bm{fill:none;stroke:#8b949e;stroke-width:1.3;stroke-dasharray:5 3}
 .dd{fill:rgba(192,57,43,.16);stroke:#c0392b;stroke-width:.8}
 .ddband{fill:#fbfaf7}
 table{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums}
@@ -424,7 +511,8 @@ footer{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:v
 </div>
 
 <h2>净值曲线</h2>
-<figure>${renderChart(report.equity)}</figure>
+<figure>${renderChart(report.equity, benchSeries)}</figure>
+${benchBlock}
 
 <h2>派生指标</h2>
 <div class="grid">

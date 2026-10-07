@@ -203,6 +203,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run daemon:stop` | Stop the collection daemon (it keeps running after the web server exits) |
 | `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run parity [days]` | v1 vs v2 engine parity: real factors over the last N trading days, field-by-field card diff. Non-zero exit on any mismatch |
+| `pnpm backtest:tearsheet` | Export a stored backtest as one self-contained HTML (equity / drawdown / monthly returns / benchmark). `--list` lists archives, `--latest` takes the newest, `--id <id>` picks one, `--bench sh000300` switches benchmark, `--no-bench` omits it |
 | `pnpm test` | Unit tests (**no network**) |
 | `pnpm test:watch` | Unit tests, watch mode |
 | `pnpm test:live` | Smoke tests against the real endpoints |

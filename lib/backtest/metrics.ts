@@ -1,5 +1,9 @@
 import type { BacktestMetrics, EquityPoint } from "@/lib/contracts";
 import type { BlockedRecord, ClosedTrade, ReplayTrade } from "@/lib/backtest/types";
+import { annualiseOf, dailyReturns, maxDrawdownOf, TRADING_DAYS_PER_YEAR } from "@/lib/backtest/series";
+
+/** 常数与序列数学住在 series.ts（那边不引本文件，否则成环）。对外名字不变 */
+export { TRADING_DAYS_PER_YEAR };
 
 /**
  * 回测指标（spec §10.4）。优化目标是 **Calmar = 年化 / 最大回撤**，不是纯收益。
@@ -16,7 +20,6 @@ import type { BlockedRecord, ClosedTrade, ReplayTrade } from "@/lib/backtest/typ
  * 原始 Calmar 不丢，走 computeMetricsDetailed().rawCalmar，报告里可以带 caveat 展示。
  */
 
-export const TRADING_DAYS_PER_YEAR = 252;
 /** 少于这个笔数，胜率/盈亏比没有统计意义 */
 export const MIN_SAMPLE_TRADES = 30;
 /** 少于这个交易日数，年化是放大噪音 */
@@ -39,36 +42,14 @@ export interface DetailedMetrics {
   rawCalmar: number | null;
 }
 
+/**
+ * 委托给 series.ts —— 报告层与基准层用的是同一份实现。
+ *
+ * 签名收窄成 EquityPoint 是为了不改动既有调用方；实现只有一处，
+ * 基准的年化/回撤才能和策略的并排放（否则两个数字不是同一种算法，读者无从发现）。
+ */
 export function maxDrawdown(equity: EquityPoint[]): number {
-  let peak = -Infinity;
-  let mdd = 0;
-  for (const p of equity) {
-    if (p.equity > peak) peak = p.equity;
-    if (peak > 0) mdd = Math.max(mdd, (peak - p.equity) / peak);
-  }
-  return mdd;
-}
-
-function dailyReturns(equity: EquityPoint[]): number[] {
-  const out: number[] = [];
-  for (let i = 1; i < equity.length; i++) {
-    const prev = equity[i - 1].equity;
-    if (prev <= 0) { out.push(0); continue; } // 净值归零后不再产生有意义的收益率
-    out.push(equity[i].equity / prev - 1);
-  }
-  return out;
-}
-
-/** 年化：按交易日折算。区间不足一年也照算，但会被标退化 */
-function annualise(equity: EquityPoint[]): number {
-  if (equity.length < 2) return 0;
-  const start = equity[0].equity;
-  const end = equity[equity.length - 1].equity;
-  if (start <= 0) return 0;
-  const periods = equity.length - 1;
-  const total = end / start;
-  if (total <= 0) return -1; // 亏光了：年化 −100%，不做 Math.pow(负数, 小数) 产生 NaN
-  return Math.pow(total, TRADING_DAYS_PER_YEAR / periods) - 1;
+  return maxDrawdownOf(equity);
 }
 
 function sharpe(equity: EquityPoint[]): number {
@@ -85,7 +66,7 @@ function sharpe(equity: EquityPoint[]): number {
 export function computeMetricsDetailed(input: MetricsInput): DetailedMetrics {
   const { equity, closed } = input;
   const mdd = maxDrawdown(equity);
-  const annualReturn = annualise(equity);
+  const annualReturn = annualiseOf(equity);
 
   const wins = closed.filter((t) => t.pnl > 0);
   const losses = closed.filter((t) => t.pnl <= 0);

@@ -6,6 +6,11 @@
  *   npx tsx scripts/backtest-tearsheet.ts --latest
  *   npx tsx scripts/backtest-tearsheet.ts --id 20260930233656188-k5n0
  *   npx tsx scripts/backtest-tearsheet.ts --json some/report.json --out out.html
+ *   npx tsx scripts/backtest-tearsheet.ts --latest --bench sh000852   # 换成中证1000
+ *   npx tsx scripts/backtest-tearsheet.ts --latest --no-bench         # 不比基准
+ *
+ * 默认基准是沪深300（sh000300）。可选代码见 lib/data/indices.ts —— 只认采了日线的那几条，
+ * 瞎编一个代码不会"查不到就当没基准"，而是直接报错。
  *
  * --json 是留给"报告不在本机库里"的情况：别人跑的那份、或者从别处拷来的 JSON。
  * 这也是 tearsheet 要自包含的另一个理由 —— 它得能离开这台机器还成立。
@@ -20,6 +25,8 @@ import { dirname, resolve } from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { checkBacktestShape, renderTearsheet } from "@/lib/backtest/tearsheet";
+import { DEFAULT_BENCHMARK, loadBenchmarkWithStats } from "@/lib/backtest/benchmark";
+import type { BacktestReport } from "@/lib/contracts/backtest";
 
 function arg(name: string): string | null {
   const i = process.argv.indexOf(`--${name}`);
@@ -38,6 +45,25 @@ function write(html: string, out: string): void {
 
 const db = openDb();
 runMigrations(db);
+
+/**
+ * 基准。默认沪深300，--no-bench 关掉。
+ *
+ * 显式给了 --bench 却取不到要**吵一声**（stderr），但仍然出报告并在里面写明无基准：
+ * 静默降级会让"我要对比沪深300"变成"报告里根本没有这一块"，而后者看起来是正常的。
+ */
+const benchArg = arg("bench");
+const benchCode = has("no-bench") ? null : benchArg ?? DEFAULT_BENCHMARK;
+
+function withBenchmark(report: BacktestReport) {
+  if (benchCode === null) return { note: "" };
+  const r = loadBenchmarkWithStats(db, benchCode, report.equity);
+  if (r.ok) return { benchmark: { series: r.series, stats: r.stats } };
+  if (benchArg !== null) {
+    console.error(`警告：取不到基准 ${benchCode} —— ${r.reason}`);
+  }
+  return { benchmarkReason: r.reason };
+}
 
 if (has("list")) {
   const rows = db.prepare(
@@ -62,7 +88,10 @@ if (jsonPath !== null) {
   const parsed: unknown = JSON.parse(readFileSync(resolve(jsonPath), "utf8"));
   const c = checkBacktestShape(parsed);
   if (!c.ok) throw new Error(`这份 JSON 不是 BacktestReport，缺：${c.missing.join("、")}`);
-  write(renderTearsheet(c.report), arg("out") ?? `reports/${c.report.strategyId}-${c.report.range.from}.html`);
+  write(
+    renderTearsheet(c.report, withBenchmark(c.report)),
+    arg("out") ?? `reports/${c.report.strategyId}-${c.report.range.from}.html`,
+  );
   db.close();
   process.exit(0);
 }
@@ -101,7 +130,7 @@ if (!c.ok) {
 
 const out = arg("out") ?? `reports/${row.id}.html`;
 write(
-  renderTearsheet(c.report, { note: `　由存档 ${row.id} 导出。` }),
+  renderTearsheet(c.report, { note: `　由存档 ${row.id} 导出。`, ...withBenchmark(c.report) }),
   out,
 );
 db.close();
