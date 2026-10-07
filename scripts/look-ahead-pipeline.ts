@@ -14,8 +14,7 @@ import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { loadStrategyFile } from "@/lib/strategy/loader";
 import { activeStrategyPath } from "@/lib/strategy/registry";
-import { activeVariants, runShadowDay, seedVariants } from "@/lib/shadow/book";
-import type { ActiveVariant } from "@/lib/shadow/types";
+import { activeVariants, runShadowDay, seedVariants, type ActiveVariant } from "@/lib/shadow/book";
 
 const D = process.argv[2] ?? "2025-06-10";
 const SCRATCH = "E:/project/PanTraderData/data/lookahead_probe.db";
@@ -26,12 +25,15 @@ const path = activeStrategyPath();
 if (path === null) throw new Error("没有生效的策略文件");
 const { config } = loadStrategyFile(path);
 const base = activeVariants(main);
-const probe: ActiveVariant[] = base.map(v => ({ ...v, id: `${v.id}#probe` } as ActiveVariant));
+const probe: ActiveVariant[] = base.map(v => ({ ...v, id: `${v.id}#probe` } satisfies ActiveVariant));
 
 function run(db: ReturnType<typeof openDb>, tag: string) {
   const t0 = Date.now();
   const r = runShadowDay(db, {
-    decidedOn: D, baseDate: D, asOf: `${D} 15:05:00`, phase: "collect",
+    // 必须是一个合法的 Phase。早先这里写的是 "collect"（不是 Phase 的取值），
+    // tsx 不做类型检查所以跑得起来，行为上等同于盘后（ decideHolding 只判 phase === "盘中" ），
+    // 结论不受影响 —— 但任由一个非法值留在测试脚本里，下次改判据时就会咬人。
+    decidedOn: D, baseDate: D, asOf: `${D} 15:05:00`, phase: "盘后",
     config, source: "replay", variants: probe,
   });
   console.log(`${tag}: 变体 ${r.variants} 记录 ${r.recorded} 跳过 ${r.skipped.length} 失败 ${r.failed.length} (${Math.round((Date.now()-t0)/1000)}s)`);
@@ -48,7 +50,8 @@ run(main, "主库（全量）");
 const a = rowsOf(main);
 main.prepare(`DELETE FROM shadow_outcome WHERE pred_id IN (SELECT id FROM shadow_pred WHERE variant_id LIKE '%#probe' AND base_date=?)`).run(D);
 main.prepare(`DELETE FROM shadow_pred WHERE variant_id LIKE '%#probe' AND base_date=?`).run(D);
-console.log(`主库已清理探针行，剩余: ${main.prepare(`SELECT COUNT(*) c FROM shadow_pred WHERE variant_id LIKE '%#probe'`).get().c}`);
+const 剩余 = main.prepare(`SELECT COUNT(*) c FROM shadow_pred WHERE variant_id LIKE '%#probe'`).get() as { c: number } | undefined;
+console.log(`主库已清理探针行，剩余: ${剩余?.c ?? "?"}`);
 main.close();
 
 const scratch = openDb(SCRATCH);

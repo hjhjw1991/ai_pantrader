@@ -225,8 +225,18 @@ export interface StrategyEngineInput {
   view: PointInTimeView;
   config: StrategyConfig;
   phase: Phase;
-  /** 当前持仓，用于产出持仓动作 */
-  positions: Array<{ account: AccountType; code: string; cost: number; qty: number; stopPx: number | null }>;
+  /**
+   * 当前持仓，用于产出持仓动作。
+   *
+   * `openDate` 是可选的，且**只在离场需要按持有天数判定时才用到**（时间止损、持有上限）。
+   * 给了就按它数交易日；**没给不代表"第 1 天"** —— 缺数据必须在卡片上点名，
+   * 让依赖天数的规则自己关掉。默认成第 1 天会让"持有 4 日了还没走"这类判断
+   * 在没人察觉的情况下从不触发。
+   */
+  positions: Array<{
+    account: AccountType; code: string; cost: number; qty: number; stopPx: number | null;
+    openDate?: string | null;
+  }>;
   /**
    * 代码 → 行业板块。可选。
    *

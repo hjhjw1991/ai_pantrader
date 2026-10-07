@@ -150,7 +150,15 @@ export interface ExitSlot extends SlotMeta {
   kind: "离场器";
   decide(
     ctx: SlotCtx, params: SlotParams,
-    position: { account: AccountId; code: string; cost: number; qty: number; stopPx: number | null },
+    /**
+     * `openDate` 可选：离场规则里凡是按持有交易日数判定的（时间止损、持有上限）都要它。
+     * **缺失时那些规则必须自己关掉并发 warning**，不许退化成"第 1 天"。
+     * —— 那会让时间类规则永久不触发，而卡片上看不出它没生效。
+     */
+    position: {
+      account: AccountId; code: string; cost: number; qty: number; stopPx: number | null;
+      openDate?: string | null;
+    },
     env: EnvAssessment
   ): Candidate;
 }

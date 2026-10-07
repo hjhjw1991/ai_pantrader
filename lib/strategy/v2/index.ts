@@ -15,6 +15,7 @@ export { 主线识别器_申万聚集 } from "@/lib/strategy/v2/slots/sw-mainlin
 export {
   候选源_连板梯队, 评估器_游资手法, 离场器_游资纪律, HOTMONEY_SLOTS,
 } from "@/lib/strategy/v2/slots/hotmoney";
+export { 离场器_路径纪律, PATH_DISCIPLINE_SLOTS, policyFromSlotParams } from "@/lib/strategy/v2/slots/path-discipline";
 
 import { createSlotRegistry } from "@/lib/strategy/v2/registry";
 import { BASELINE_SLOTS } from "@/lib/strategy/v2/slots/baseline";
@@ -23,6 +24,7 @@ import { 评估器_结构位定价 } from "@/lib/strategy/v2/slots/structure-pri
 import { 择时器_五段状态机 } from "@/lib/strategy/v2/slots/cycle-timer";
 import { 主线识别器_申万聚集 } from "@/lib/strategy/v2/slots/sw-mainline";
 import { HOTMONEY_SLOTS } from "@/lib/strategy/v2/slots/hotmoney";
+import { PATH_DISCIPLINE_SLOTS } from "@/lib/strategy/v2/slots/path-discipline";
 
 /**
  * 默认槽位注册表：模块加载时构建一次。
@@ -31,5 +33,5 @@ import { HOTMONEY_SLOTS } from "@/lib/strategy/v2/slots/hotmoney";
  */
 export const defaultSlotRegistry = createSlotRegistry([
   ...BASELINE_SLOTS, 评估器_可配权重打分, 评估器_结构位定价, 择时器_五段状态机, 主线识别器_申万聚集,
-  ...HOTMONEY_SLOTS,
+  ...HOTMONEY_SLOTS, ...PATH_DISCIPLINE_SLOTS,
 ]);
