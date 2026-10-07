@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +6,18 @@ import Database from "better-sqlite3";
 import { runMigrations } from "@/lib/db/migrate";
 import { saveBacktestReport, deleteBacktestReport, REPORT_KEEP } from "@/lib/ui/mutations";
 import { backtestReports, backtestReportById } from "@/lib/ui/queries";
+import { DELETE } from "@/app/api/backtest/reports/route";
+
+/**
+ * 路由用的是 writeDb() 自己开库。这里让它开到测试这个临时库上：
+ * 删除是不是真的删掉、有没有被注入，只有对着真库才测得出来。
+ * 工厂里不能直接引用 db（vi.mock 会被提到文件顶部，那时 db 还没建），
+ * 所以走 globalThis 间接取 —— 函数体是调用时才执行的。
+ */
+vi.mock("@/lib/ui/db", async (imp) => {
+  const actual = (await imp()) as Record<string, unknown>;
+  return { ...actual, writeDb: () => (globalThis as { __db?: Database.Database }).__db };
+});
 
 /**
  * 回测存档。
@@ -19,8 +31,14 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-archive-"));
   db = new Database(path.join(dir, "t.db"));
   runMigrations(db);
+  (globalThis as { __db?: Database.Database }).__db = db;
 });
-afterEach(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  // 路由里的 finally 已经把库关了（那是它的库还是我们的库，这里分不清），关第二次会抛
+  try { db.close(); } catch { /* 已关闭 */ }
+  delete (globalThis as { __db?: Database.Database }).__db;
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const input = (over: Partial<Parameters<typeof saveBacktestReport>[1]> = {}) => ({
   kind: "backtest" as const,
@@ -99,7 +117,69 @@ describe("回测存档", () => {
 
   it("能手动删掉一份", () => {
     const id = saveBacktestReport(db, input());
-    deleteBacktestReport(db, id);
+    expect(deleteBacktestReport(db, id)).toBe(true);
     expect(backtestReports(db)).toHaveLength(0);
+  });
+
+  /**
+   * 删除是**阻塞**的，界面点一下就该立刻看到那一行没了。
+   * 前提是删除这个动作本身说得出"到底删没删到" —— 下面两条测的就是这个。
+   */
+  it("删一个不存在的 id 返回 false，不静默报成功", () => {
+    saveBacktestReport(db, input());
+    expect(deleteBacktestReport(db, "20220101000000000-zzz")).toBe(false);
+    // 没删到不该顺带把别人的档弄没
+    expect(backtestReports(db)).toHaveLength(1);
+  });
+
+  it("同一份删两次，第二次是 false —— 手快点了第二下时这是唯一的线索", () => {
+    const id = saveBacktestReport(db, input());
+    expect(deleteBacktestReport(db, id)).toBe(true);
+    expect(deleteBacktestReport(db, id)).toBe(false);
+  });
+
+  it("删掉一份不影响其它份：id 是随机后缀，删错一份不该牵连同批次", () => {
+    const a = saveBacktestReport(db, input());
+    const b = saveBacktestReport(db, input({ strategyId: "另一套" }));
+    expect(deleteBacktestReport(db, a)).toBe(true);
+    const left = backtestReports(db);
+    expect(left).toHaveLength(1);
+    expect(left[0].id).toBe(b);
+  });
+});
+
+/**
+ * 删除接口本身。
+ *
+ * 界面是"await 到响应 = 删除已完成"，所以这条链路必须真的同步写完再回：
+ * better-sqlite3 是同步写，DELETE 语句执行完才 return，没有中间态。
+ * 测的是两件事 —— 删到了回 ok，没删到回 404 而不是 ok。
+ */
+describe("删除存档接口", () => {
+  const req = (id: string) => new Request(`http://127.0.0.1/api/backtest/reports?id=${id}`) as any;
+
+  it("删到了：回 200，库里真的没了", async () => {
+    const id = saveBacktestReport(db, input());
+    const r = await DELETE(req(id));
+    expect(r.status).toBe(200);
+    // 路由用完会 close 掉它拿到的库（这里就是测试库），所以重开一个连接看落盘结果 ——
+    // 顺带把"连接被关"这件事也验了：连接泄漏在生产里是迟早要重启的坑
+    const fresh = new Database(path.join(dir, "t.db"));
+    expect(backtestReports(fresh)).toHaveLength(0);
+    fresh.close();
+  });
+
+  it("没删到：回 404 而不是 200 —— 一律报成功的话，界面只能显示'已删除'", async () => {
+    const r = await DELETE(req("20220101000000000-zzz"));
+    expect(r.status).toBe(404);
+    expect(((await r.json()) as { error: string }).error).toMatch(/不在/);
+  });
+
+  it("id 形状不合法直接 400，不拿去查库", async () => {
+    const r = await DELETE(req("'; DROP TABLE backtest_report; --"));
+    expect(r.status).toBe(400);
+    // 库还在：注入没走到 SQL
+    expect(backtestReports(db)).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) c FROM backtest_report").get()).toEqual({ c: 0 });
   });
 });

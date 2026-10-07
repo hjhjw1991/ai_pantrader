@@ -33,12 +33,24 @@ export function GET(req: Request) {
   });
 }
 
+/**
+ * 删一份存档。
+ *
+ * 响应回来 = 库里已经没了：better-sqlite3 是同步写，DELETE 语句执行完才回，
+ * 不存在"请求回来了但删除还在路上"。前端因此可以拿这个响应当"删除已完成"的信号。
+ *
+ * 删不存在的 id 报 404 而不是 ok：那意味着这份档在按钮被点之前就已经没了
+ * （手快点了第二下、被保留数挤掉、另一个标签页刚删过）。一律报成功的话，
+ * 界面只能显示"已删除"，而用户看到的是列表没变化 —— 这个矛盾会让人反复点。
+ */
 export async function DELETE(req: Request) {
   const b = await parseQuery(req.url, "id", IdSchema);
   if (!b.ok) return b.res;
   const db = writeDb();
   try {
-    deleteBacktestReport(db, b.value);
+    if (!deleteBacktestReport(db, b.value)) {
+      return err(404, "这份存档已经不在了（可能刚被删过，或被保留数挤掉了）");
+    }
     return ok({ ok: true, id: b.value });
   } finally {
     db.close();

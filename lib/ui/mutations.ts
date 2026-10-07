@@ -210,7 +210,14 @@ export function saveBacktestReport(db: Db, i: SaveReportInput): string {
   return id;
 }
 
-/** 删一份存档。用户主动删才调，保留数超了走 saveBacktestReport 里的自动清理 */
-export function deleteBacktestReport(db: Db, id: string): void {
-  db.prepare("DELETE FROM backtest_report WHERE id = ?").run(id);
+/**
+ * 删一份存档。用户主动删才调，保留数超了走 saveBacktestReport 里的自动清理。
+ *
+ * 返回**有没有真的删掉**：DELETE 一个不存在的 id，SQL 不报错、changes 是 0，
+ * 于是"这份早就没了"和"刚删掉一份"在调用方看来一模一样。不区分的话，
+ * 点了删除而列表纹丝不动时，人不知道是该再点一次还是删除压根没生效
+ * —— 同 deactivateWatch 的道理，区别只在于这里删除是真的物理删。
+ */
+export function deleteBacktestReport(db: Db, id: string): boolean {
+  return db.prepare("DELETE FROM backtest_report WHERE id = ?").run(id).changes > 0;
 }
