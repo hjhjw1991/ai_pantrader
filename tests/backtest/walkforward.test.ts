@@ -96,13 +96,15 @@ describe("样本外不过就是不过：结构上不给回调样本内的机会"
 
   it("模块不提供任何看过样本外再回调样本内的入口", () => {
     // 导出面是白名单：加任何 retune/refit 类 API 都会让这条红。
-    // 新增的三个（聚合样本外，选项 D）经过检查同样不开后门：
+    // 后来加进来的几个经过检查同样不开后门：
     //   runWalkForwardAggregated —— optimize 依旧只拿到 train 区间
     //   stitchEquity            —— 纯函数，只拼净值
     //   suggestAggregatedPlan   —— 只吃交易日数量，碰不到收益
+    //   analyzeParamStability   —— 只读 bestParams（已被冻结的窗口），不提供重挑参数的入口
     expect(Object.keys(wf).sort()).toEqual([
-      "IN_SAMPLE_RATIO", "planWalkForward", "runWalkForward", "runWalkForwardAggregated",
-      "stitchEquity", "suggestAggregatedPlan", "summarizeWalkForward", "walkForwardVerdict",
+      "IN_SAMPLE_RATIO", "analyzeParamStability", "planWalkForward", "runWalkForward",
+      "runWalkForwardAggregated", "stitchEquity", "suggestAggregatedPlan",
+      "summarizeWalkForward", "walkForwardVerdict",
     ]);
   });
 

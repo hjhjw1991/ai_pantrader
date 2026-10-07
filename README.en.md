@@ -204,6 +204,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run job <name>` | Run one job by hand: `selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run parity [days]` | v1 vs v2 engine parity: real factors over the last N trading days, field-by-field card diff. Non-zero exit on any mismatch |
 | `pnpm backtest:tearsheet` | Export a stored backtest as one self-contained HTML (equity / drawdown / monthly returns / benchmark). `--list` lists archives, `--latest` takes the newest, `--id <id>` picks one, `--bench sh000300` switches benchmark, `--no-bench` omits it |
+| `pnpm backtest:walkforward` | Rolling out-of-sample validation: tune on the train slice → evaluate the test slice exactly once → verdict, in/out decay, parameter stability. `--plan` prints how many backtests it would run, `--grid path=v1,v2` sets the search grid, `--aggregated` stitches every OOS slice into one curve (double the compute). Non-zero exit when OOS fails |
 | `pnpm test` | Unit tests (**no network**) |
 | `pnpm test:watch` | Unit tests, watch mode |
 | `pnpm test:live` | Smoke tests against the real endpoints |

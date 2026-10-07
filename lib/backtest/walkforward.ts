@@ -205,6 +205,116 @@ export function summarizeWalkForward(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 参数稳定性
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 各窗口**自己**选出来的最优参数，是不是同一组。
+ *
+ * 这是过拟合最不容易伪装的一个指纹：
+ *   - 真规律：哪段行情上去寻优，都挑到同一个山头（参数稳定）；
+ *   - 拟合噪音：换一段行情就换一组参数（参数乱跳），
+ *     因为上次那组只是那批数据的巧合，换个样本就失效。
+ *
+ * `bestParams` 早在每个窗口里都存下来了，但一直没人读 ——
+ * 样本外 Calmar 达标而参数一路漂移，是最该警惕的一种"通过"。
+ *
+ * 两条判据（满足其一即判不稳）：
+ *   - 取值太散：3 个以上不同取值，且没有任何取值占到一半以上；
+ *   - 漂移太频：一半以上的窗口边界上参数都换了。
+ */
+export interface AxisStability {
+  axis: string;
+  /** 各窗口选出的取值，按窗口顺序 */
+  values: unknown[];
+  /** 取到过几个不同值 */
+  distinct: number;
+  /** 出现最多的那个值 */
+  mode: unknown;
+  /** 众数占窗口数的比例 */
+  modeShare: number;
+  /** 相邻窗口之间换了多少次 */
+  switches: number;
+  unstable: boolean;
+}
+
+export interface ParamStability {
+  windows: number;
+  axes: AxisStability[];
+  unstableAxes: string[];
+  /** 有任何一条轴不稳 */
+  unstable: boolean;
+  /** 窗口太少，不足以判断 */
+  undecidable: boolean;
+  note: string;
+}
+
+const r4 = (x: number): number => Math.round(x * 1e4) / 1e4;
+
+/** 取值可能是 number/boolean/string/对象，比较一律走规范化 JSON，不靠 === */
+function valueKey(v: unknown): string {
+  return v === undefined ? "null" : JSON.stringify(v);
+}
+
+export function analyzeParamStability(windows: WalkForwardWindowList): ParamStability {
+  const n = windows.length;
+  if (n === 0) {
+    return {
+      windows: 0, axes: [], unstableAxes: [], unstable: false, undecidable: true,
+      note: "没有 walk-forward 窗口，无从判断参数稳不稳",
+    };
+  }
+
+  const axisNames = [...new Set(windows.flatMap((w) => Object.keys(w.bestParams)))];
+  const axes: AxisStability[] = axisNames.map((axis) => {
+    const values = windows.map((w) => w.bestParams[axis]);
+    const keys = values.map(valueKey);
+
+    const freq = new Map<string, { v: unknown; c: number }>();
+    for (let i = 0; i < values.length; i++) {
+      const hit = freq.get(keys[i]!);
+      if (hit) hit.c += 1;
+      else freq.set(keys[i]!, { v: values[i], c: 1 });
+    }
+    let mode: unknown = values[0];
+    let modeCount = 0;
+    for (const e of freq.values()) if (e.c > modeCount) { mode = e.v; modeCount = e.c; }
+
+    let switches = 0;
+    for (let i = 1; i < keys.length; i++) if (keys[i] !== keys[i - 1]) switches += 1;
+
+    const distinct = freq.size;
+    const modeShare = modeCount / n;
+    // 两个窗口各挑一个值不算证据 —— 样本太小，判了也是掷骰子
+    const unstable = n >= 3 && (
+      (distinct >= 3 && modeShare < 0.5) || switches > (n - 1) / 2
+    );
+    return { axis, values, distinct, mode, modeShare: r4(modeShare), switches, unstable };
+  });
+
+  const unstableAxes = axes.filter((a) => a.unstable).map((a) => a.axis);
+  /**
+   * 一条轴都没有 = 每个窗口跑的都是同一套配置（根本没寻优）——
+   * 此时"参数一致"是**本来如此**，不是验证过的结论。
+   * 报成"稳定/真山头的样子"是最危险的一种假通过：它长得和真通过一模一样，
+   * 而实际上什么都没测。窗口少于 3 个同理。
+   */
+  const undecidable = n < 3 || axes.length === 0;
+  const note = axes.length === 0
+    ? "没有寻优参数（各窗口跑的都是同一套配置），谈不上参数稳定性 —— 这是滚动样本外评估，不是完整 walk-forward"
+    : undecidable
+    ? `只有 ${n} 个窗口，不足以判断参数稳不稳（至少要 3 个）`
+    : unstableAxes.length === 0
+      ? `${n} 个窗口、${axes.length} 条轴：各窗口选出的参数一致，是真山头的样子`
+      : `${n} 个窗口里，${unstableAxes.map((a) => {
+        const s = axes.find((x) => x.axis === a)!;
+        return `${a} 取了 ${s.distinct} 个不同值（众数只占 ${(s.modeShare * 100).toFixed(0)}%）`;
+      }).join("；")} —— 换一段行情就换一组参数，是拟合噪音的样子；样本外成绩要打折看。`;
+
+  return { windows: n, axes, unstableAxes, unstable: unstableAxes.length > 0, undecidable, note };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 聚合样本外（选项 D）
 // ─────────────────────────────────────────────────────────────────────────────
 

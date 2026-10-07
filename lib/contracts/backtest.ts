@@ -150,6 +150,27 @@ export interface SweepReport {
   /** 峰形。overfitRisk=true 时界面必须显著标出 */
   peak: { sharpness: number; neighbourMeanCalmar: number; overfitRisk: boolean };
   /**
+   * 选择偏差：试了 N 个组合取最好的那个，成绩被"挑"这个动作抬高了。
+   *
+   * 与 peak 互补，两个都要看：peak 看**形状**（最优点旁边是不是悬崖），
+   * selection 看**次数**（一共挑了多少次）。一片平缓的高原上也能挑出"最好"
+   * （peak 不报），但如果这片高原是试了 36 次才出现的，那个最好仍然带着运气。
+   *
+   * chanceCeiling = 什么都不做、纯靠挑最好能挑到多高；
+   * deflated = 最优点扣掉这份运气后剩下的。deflated ≤ 0 就是过拟合嫌疑。
+   *
+   * 老存档可能没有这个字段（它是后补的）—— 渲染处按缺失处理，不脑补成 0。
+   */
+  selection: {
+    trials: number;
+    mean: number;
+    sd: number;
+    chanceCeiling: number;
+    deflated: number;
+    overfitSuspected: boolean;
+    note: string;
+  };
+  /**
    * 覆盖率取自**最优点那次回测**的报告。
    * 不取平均也不省略：覆盖率 60% 的 Calmar 3.0 和覆盖率 99% 的 Calmar 1.5，
    * 后者才是可信的那个，热力图上的颜色深浅在覆盖率低时一律不可当结论。

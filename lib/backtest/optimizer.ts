@@ -1,5 +1,6 @@
 import type { BacktestMetrics } from "@/lib/contracts";
 import { canonicalJson } from "@/lib/backtest/hash";
+import { selectionBias, type SelectionBias } from "@/lib/backtest/selection-bias";
 
 /**
  * 参数寻优（spec §10.4）：网格 + 由粗到精，目标 **Calmar**。
@@ -57,6 +58,16 @@ export interface OptimizeResult {
   evaluations: Evaluation[];
   sensitivity: SensitivityAxis[];
   peak: PeakShape;
+  /**
+   * 选择偏差：试了 N 个组合取最好，成绩被"挑"这个动作抬高了。
+   *
+   * 与 peak（峰陡度）是**两件不同的事**，两个都要看：
+   *   peak 看的是**形状** —— 最优点旁边是不是悬崖，是几何判据；
+   *   selection 看的是**次数** —— 挑了多少次，是统计判据。
+   * 一片平缓的高原上也能挑出一个"最好"（peak 不报），
+   * 但如果这片高原本身是试了 36 次才出现的，那个最好仍然带着运气（selection 报）。
+   */
+  selection: SelectionBias;
   gridSize: number;
   refinedRounds: number;
   warnings: string[];
@@ -168,6 +179,8 @@ export function optimize(o: OptimizeOptions): OptimizeResult {
   const sharpness = best!.calmar > 0 ? 1 - neighbourMeanCalmar / best!.calmar : 0;
   const overfitRisk = best!.calmar > 0 && sharpness > peakThreshold;
 
+  const selection = selectionBias(evaluations.map((e) => e.calmar));
+
   const warnings: string[] = [];
   if (best!.calmar <= 0) {
     warnings.push(
@@ -181,10 +194,17 @@ export function optimize(o: OptimizeOptions): OptimizeResult {
       `（sharpness=${sharpness.toFixed(2)} > ${peakThreshold}），过拟合风险高 —— 宁可取平缓区的次优点。`
     );
   }
+  if (selection.overfitSuspected) {
+    warnings.push(
+      `选择偏差：${selection.note} 这个数字里有相当一部分是"试了 ${selection.trials} 次"送的，` +
+      "不是参数本身更好 —— 少试几次、或在样本外重跑一遍再信它。"
+    );
+  }
 
   return {
     best: best!, evaluations, sensitivity,
     peak: { sharpness, neighbourMeanCalmar, overfitRisk },
+    selection,
     gridSize: coarse.length, refinedRounds: rounds, warnings,
   };
 }

@@ -178,13 +178,26 @@ export function ReportArchive({ rows: serverRows, keep }: { rows: ReportSummary[
         </p>
 
         {report !== null ? <BacktestReportView report={report} /> : null}
-        {sweep !== null ? (
+      {sweep !== null ? (
+        <div className="flex flex-col gap-1">
           <p className="text-ink-2 text-[12px]">
             扫描存档：扫了 {sweep.evaluated} 个点，最优 Calmar{" "}
             <span className="num">{sweep.best.metrics.calmar.toFixed(2)}</span>
             {" "}@ {JSON.stringify(sweep.best.params)}
           </p>
-        ) : null}
+          {/* 去水成绩是后补的字段，老存档里没有 —— 如实说"这份没算过"，
+              不拿 0 冒充"成绩全是运气"，也不干脆不提 */}
+          {sweep.selection === undefined ? (
+            <p className="text-ink-3 text-[11px]">
+              这份存档跑在选择偏差校正之前，没有去水成绩。
+            </p>
+          ) : (
+            <p className={sweep.selection.overfitSuspected ? "text-danger text-[11px]" : "text-ink-3 text-[11px]"}>
+              去水后 <span className="num">{sweep.selection.deflated.toFixed(2)}</span>：{sweep.selection.note}
+            </p>
+          )}
+        </div>
+      ) : null}
       </div>
     </Panel>
   );

@@ -214,6 +214,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run parity [天数]` | v1↔v2 引擎对照：真实因子跑最近 N 个交易日，逐字段比信号卡。不一致即退出码非 0 |
 | `pnpm backtest:tearsheet` | 把回测存档导出成一份自包含 HTML（净值/回撤/月度收益/基准对比）。`--list` 列存档，`--latest` 取最新，`--id <id>` 指定，`--bench sh000300` 换基准，`--no-bench` 不比 |
+| `pnpm backtest:walkforward` | 滚动样本外验证：训练段寻优 → 测试段只评估一次 → 出裁决、样本内外落差、参数稳定性。`--plan` 先看要跑多少次回测，`--grid 路径=v1,v2` 指定寻优网格，`--aggregated` 把各段样本外拼成一条曲线再判（算力翻倍）。样本外不通过退出码非 0 |
 | `pnpm test` | 单元测试（**不打网络**） |
 | `pnpm test:watch` | 单元测试，watch 模式 |
 | `pnpm test:live` | 打真实接口的 smoke 测试 |

@@ -347,6 +347,12 @@ function SweepResult({ r }: { r: SweepReport }) {
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[12px]">
         <span className="text-ink-3">最优 Calmar</span>
         <span className="num text-ink">{r.best.metrics.calmar.toFixed(3)}</span>
+        {/* 去水后：扣掉"试了 N 次"送的那部分运气。这是真正该拿去下结论的数，
+            和最优 Calmar 并排 —— 只印最优那个等于把挑选动作的成绩算成策略的本事 */}
+        <span className="text-ink-3">去水后</span>
+        <span className={`num ${r.selection.overfitSuspected ? "text-danger" : "text-ink"}`}>
+          {r.selection.deflated.toFixed(3)}
+        </span>
         <span className="text-ink-3">峰陡度</span>
         <span className={r.peak.overfitRisk ? "num text-danger" : "num text-ink"}>
           {r.peak.sharpness.toFixed(3)}
@@ -364,6 +370,17 @@ function SweepResult({ r }: { r: SweepReport }) {
         </span>
         <span className="text-ink-3">缺口 {r.coverage.gapDays} 天</span>
       </div>
+
+      {/*
+        去水后的解释必须写在数字旁边：光看见"去水后 −0.29"没人知道那是什么，
+        而不知道的数字不会改变任何判断，等于没印。
+      */}
+      <p className={r.selection.overfitSuspected ? "text-danger text-[11px]" : "text-ink-3 text-[11px]"}>
+        {r.selection.note}
+        {r.selection.overfitSuspected
+          ? " 也就是说：这些参数里挑出来的最好成绩，没有超过「光靠挑」能给的高度 —— 它更像是试出来的，不是找出来的。"
+          : " 峰陡度看形状（旁边是不是悬崖），去水看次数（挑了多少次），两个都要看。"}
+      </p>
 
       {r.coverage.coverage < 0.9 ? (
         <p className="text-warn text-[11px]">
