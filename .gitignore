@@ -39,3 +39,8 @@ config/strategies/*.yaml
 # 那条命令是很多人清工作区的习惯动作，在这里会把整个库删掉。
 # 所以放仓库内就更要有独立备份（pnpm db:export 生成的 .ptbak 放到别处）。
 /data/
+
+# tearsheet 导出物。每次 `backtest-tearsheet` 都会在 reports/ 下留一份 HTML，
+# 它是**某次回测的产物**而不是源码；要留的是存档里的那行记录，不是这个文件。
+# 想归档就自己拷走到别处 —— 它的价值恰恰在于能被拷走（自包含、零外部请求）。
+/reports/

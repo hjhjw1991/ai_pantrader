@@ -87,9 +87,14 @@ describe("可复现性（spec §17 断言 4）", () => {
     for (const f of readdirSync(dir)) {
       if (!f.endsWith(".ts")) continue;
       const src = readFileSync(join(dir, f), "utf8");
-      // 注释里提到这两个名字是允许的（就是在解释为什么不能用），只查真实调用
+      // 注释里提到这几个名字是允许的（往往就是在解释为什么不能用），只查真实调用。
+      //
+      // `[^\r\n]*` 而不是 `.*$`：这个仓库在 Windows 上是 CRLF，而 JS 正则的 `.`
+      // **不匹配 \r**——于是 `.*$` 停在 \r 之前，`$` 到不了字符串末尾，整条不匹配，
+      // 以 ` * ` 开头的注释行就剥不掉。结果是：注释里提一句 `new Date(` 会被当成
+      // 真实调用误报。看着是"测试太严"，实际是这条防线在 CRLF 下从未按设计工作过。
       for (const line of src.split("\n")) {
-        const code = line.replace(/\/\/.*$/, "").replace(/^\s*\*.*$/, "");
+        const code = line.replace(/\/\/[^\r\n]*/, "").replace(/^\s*\*[^\r\n]*/, "");
         if (/Date\.now\s*\(|Math\.random\s*\(|new Date\s*\(/.test(code)) hits.push(`${f}: ${line.trim()}`);
       }
     }

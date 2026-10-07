@@ -16,7 +16,7 @@ import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { settleShadow } from "@/lib/shadow/settle";
 import {
   现行, advanceExit, decideToday, dropRulesNeedingAge, newExitState, scalePath, simulateExit, stepExit,
-  type ExitPolicy, type PathBar, type RawBar,
+  type ExitDecision, type ExitPolicy, type PathBar, type RawBar,
 } from "@/lib/shadow/exit-policy";
 
 /* ------------------------------- 造 K 线 ------------------------------- */
@@ -113,13 +113,25 @@ describe("T+1 与到期计数", () => {
 
 /* --------------------------- 跳空：按开盘价成交 --------------------------- */
 
+/**
+ * 断言这一步**一定得走**，并把联合类型窄到"已离场"那一支。
+ *
+ * 不写成 `expect(d.走).toBe(true)`：vitest 的 expect 不参与控制流分析，
+ * 下一行 `d.px` 照样是类型错误；而把它换成一步 `if (!d.走) return` 又会
+ * 在规则没触发时静默通过 —— 那正是这些用例要抓的东西。
+ * 要么走、要么炸，没有第三条路。
+ */
+function mustExit(d: ExitDecision): { px: number; reason: string } {
+  if (!d.走) throw new Error("这一步应当离场，但规则没触发");
+  return d;
+}
+
 describe("跳空按开盘价成交，不按那条线", () => {
   const prev = flat(0, 10);
 
   it("向下跳空：成交在开盘价，比止损价更差", () => {
     const st = newExitState(现行, 10, 9, null);
-    const d = stepExit(现行, st, box(1, 8.5, 8.8, 8.3, 8.6), 10, [prev]);
-    expect(d.走).toBe(true);
+    const d = mustExit(stepExit(现行, st, box(1, 8.5, 8.8, 8.3, 8.6), 10, [prev]));
     expect(d.px).toBe(8.5);   // 不是 9 —— 按线成交会把跳空低开的亏损记少
     expect(d.reason).toBe("止损");
   });
@@ -127,8 +139,7 @@ describe("跳空按开盘价成交，不按那条线", () => {
   it("向上跳空：同样按开盘价，可能好于目标价", () => {
     const pol: ExitPolicy = { ...现行, 目标: 6 };
     const st = newExitState(pol, 10, null, null);
-    const d = stepExit(pol, st, box(1, 11.5, 11.6, 11.2, 11.4), 10, [prev]);
-    expect(d.走).toBe(true);
+    const d = mustExit(stepExit(pol, st, box(1, 11.5, 11.6, 11.2, 11.4), 10, [prev]));
     expect(d.px).toBe(11.5);
     expect(d.reason).toBe("目标");
   });

@@ -101,6 +101,16 @@ export function ReportArchive({ rows, keep }: { rows: ReportSummary[]; keep: num
                   >
                     删除
                   </button>
+                  {/* 扫描报告的 JSON 结构不同，导不出来 —— 压根不给入口，比点了再报错好 */}
+                  {r.kind === "backtest" ? (
+                    <a
+                      className="ml-2 text-info hover:underline"
+                      href={`/api/backtest/report-html?id=${encodeURIComponent(r.id)}`}
+                      title="下载一份自包含 HTML：图表是内联 SVG，不带任何外部请求"
+                    >
+                      导出
+                    </a>
+                  ) : null}
                 </td>
               </tr>
             ))}

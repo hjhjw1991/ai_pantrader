@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { DailyBar, SignalCard, StrategyEngineInput } from "@/lib/contracts";
+import type { V2Input } from "@/lib/strategy/v2/engine";
 import { createSlotRegistry, createV2Engine, BASELINE_SLOTS } from "@/lib/strategy/v2";
 import { 离场器_路径纪律, policyFromSlotParams } from "@/lib/strategy/v2/slots/path-discipline";
 import { defaultSlotRegistry } from "@/lib/strategy/v2";
@@ -55,7 +56,7 @@ function bars(): DailyBar[] {
 
 interface Pos { openDate?: string | null; cost?: number; stopPx?: number | null; code?: string }
 
-function input(f: { slots: unknown; pos?: Pos; positions?: StrategyEngineInput["positions"] }): StrategyEngineInput {
+function input(f: { slots: unknown; pos?: Pos; positions?: StrategyEngineInput["positions"] }): V2Input {
   const p = f.pos ?? {};
   return {
     view: makeView({
@@ -71,7 +72,9 @@ function input(f: { slots: unknown; pos?: Pos; positions?: StrategyEngineInput["
       stopPx: p.stopPx === undefined ? null : p.stopPx,
       ...(p.openDate !== undefined ? { openDate: p.openDate } : { openDate: OPEN }),
     }],
-    slotConfig: f.slots as StrategyEngineInput["slotConfig"],
+    // slotConfig 属于 V2Input，不在 StrategyEngineInput 上：引擎靠它挑槽，
+    // 而 StrategyEngineInput 是 v1/v2 共用的那层，不该知道槽位这件事
+    slotConfig: f.slots as V2Input["slotConfig"],
   };
 }
 
