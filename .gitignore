@@ -2,6 +2,10 @@ node_modules/
 .next/
 # PANTRADER_DIST_DIR 另建的产物目录（dev 跑着的时候做生产构建用）
 .next-*/
+# 排查时挪开的坏产物目录（如 .next.broken-1008）：同属产物，不该进 git
+.next.*/
+# dev server / 采集的本地日志
+/logs/
 *.db
 *.db-journal
 *.db-wal

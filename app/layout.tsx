@@ -4,6 +4,7 @@ import "@/app/globals.css";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { DrawerGate } from "@/components/drawer/DrawerGate";
+import { ChunkReloadGuard } from "@/components/ChunkReloadGuard";
 import { systemStatus } from "@/lib/ui/status";
 
 export const metadata: Metadata = {
@@ -36,6 +37,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">
       <body className="h-screen overflow-hidden flex bg-bg text-ink">
+        <ChunkReloadGuard />
         <DrawerGate>
           <Sidebar mode={s.executionMode === "paper" ? "paper 模拟" : "manual 手工"} health={health} />
           <div className="flex-1 min-w-0 flex flex-col">
