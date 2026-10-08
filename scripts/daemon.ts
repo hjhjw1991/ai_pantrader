@@ -27,6 +27,7 @@ import { repairTrailingAdjFactors } from "@/lib/data/collectors/daily";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { startAutostart, stopAutostart } from "@/lib/data/autostart";
+import { startFreshnessGuard } from "@/lib/data/freshness";
 import { currentPlatform } from "@/lib/platform/keepawake";
 import { acquireLock, releaseLock } from "@/lib/platform/singleton";
 import { runPreopenPlan } from "@/lib/plan/preopen";
@@ -87,82 +88,51 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => shutdown
 process.on("exit", () => releaseLock(lockPath));
 
 /**
- * 代码新鲜度守卫：发现"被引用的源码比我启动更晚"就更替重启。
+ * 拉起接班进程。返回它的 pid，拉不起来返回 undefined。
  *
- * 三道闸，每一道都是实测踩出来的：
+ * 两点和"直接 spawn + stdio:ignore"不同，都是 2026-10-08 事故换来的：
  *
- * 1. **等这一轮 job 跑完**：半路退会留下 running 残行，下次还得靠回收逻辑擦屁股。
- *    不记"待重启"标志 —— mtime 不会变老，跑完那轮自己就会再看到。
- * 2. **等改动停下来（SETTLE_MS）**：一次保存常常连着写几个文件，
- *    刚看到第一个就重启，会把半成品的中间状态拉起来。
- * 3. **交班前必须真的拉起新进程**：tsx 的 `--import=tsx` 在 execArgv 里、
- *    不在 argv 里，漏掉它拉起来的是 `node scripts/daemon.ts` —— Node 解析不了 TS，
- *    新进程当场崩，旧进程已经退了，于是**采集进程凭空消失**
- *    （实测就是这么没的：pid 文件停在旧 pid，界面不再有数据进来）。
- *
- * 为什么用 mtime 而不是 git：仓库可能在没 git 的机器上跑，而 mtime 是免费现成的。
- * 只看 .ts —— 改注释和文档不该让人白等一次重启。
+ * 1. **输出必须落到文件**：以前用 stdio:"ignore"，接班进程启动即崩时一行报错都没有，
+ *    只剩一个死 pid 躺在锁文件里。现在它说什么都记进 logs/daemon.log。
+ * 2. **execArgv 要带上**：tsx 的 `--import=tsx` 在 execArgv 里而不在 argv 里，
+ *    漏掉它拉起来的是 `node scripts/daemon.ts` —— Node 解析不了 TS，当场崩。
  */
-const SETTLE_MS = 30_000;
+function spawnSuccessor(): number | undefined {
+  const argv = [...process.execArgv, ...process.argv.slice(1)];
+  const logPath = path.join(getConfig().dataDir, "logs", "daemon.log");
+  let fd: number | "ignore" = "ignore";
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fd = fs.openSync(logPath, "a");
+  } catch { /* 打不开日志也得起进程，退回 ignore */ }
 
-function startFreshnessGuard(sinceMs: number, busy: () => boolean, everyMs = 60_000): void {
-  const roots = [path.join(process.cwd(), "lib"), path.join(process.cwd(), "scripts")];
-
-  /** 返回 [最新改动文件, 它的 mtime]；没有比 sinceMs 更新的改动则为 null */
-  const newest = (dir: string): { file: string; mtime: number } | null => {
-    let best: { file: string; mtime: number } | null = null;
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, ent.name);
-      try {
-        if (ent.isDirectory()) {
-          const hit = newest(p);
-          if (hit && (best === null || hit.mtime > best.mtime)) best = hit;
-          continue;
-        }
-        if (!ent.name.endsWith(".ts")) continue;
-        const ms = fs.statSync(p).mtimeMs;
-        if (ms > sinceMs && (best === null || ms > best.mtime)) best = { file: p, mtime: ms };
-      } catch { /* 文件被删 / 没权限：跳过，不该为此重启 */ }
-    }
-    return best;
-  };
-
-  const timer = setInterval(() => {
-    try {
-      // 有 job 在跑：等下一轮。改动不会因此消失，mtime 不会变老
-      if (busy()) return;
-
-      let hit: { file: string; mtime: number } | null = null;
-      for (const root of roots) {
-        const h = newest(root);
-        if (h !== null && (hit === null || h.mtime > hit.mtime)) hit = h;
-      }
-      if (hit === null) return;
-      if (Date.now() - hit.mtime < SETTLE_MS) return;   // 还在改，等它停下来
-
-      const argv = [...process.execArgv, ...process.argv.slice(1)];
-      const child = spawn(process.execPath, argv, {
-        cwd: process.cwd(), detached: true, stdio: "ignore", windowsHide: true,
-        env: { ...process.env, PANTRADER_RUNNER: process.env.PANTRADER_RUNNER ?? "manual" },
-      });
-      if (child.pid === undefined) {
-        console.warn("[候潮 daemon] 交班失败：新进程没拉起来，本进程继续跑");
-        return;
-      }
-      child.unref();
-      console.log(`[候潮 daemon] 检测到代码更新（${hit.file}），交班给 pid ${child.pid}`);
-      stopAutostart();
-      releaseLock(lockPath);
-      clearInterval(timer);
-      process.exit(0);
-    } catch (e) {
-      console.warn(`[候潮 daemon] 新鲜度守卫出错：${(e as Error).message}`);
-    }
-  }, everyMs);
-  timer.unref?.();
+  const child = spawn(process.execPath, argv, {
+    cwd: process.cwd(), detached: true, windowsHide: true,
+    stdio: ["ignore", fd, fd],
+    env: { ...process.env, PANTRADER_RUNNER: process.env.PANTRADER_RUNNER ?? "manual" },
+  });
+  child.unref();
+  if (typeof fd === "number") { try { fs.closeSync(fd); } catch { /* 已 dup 给子进程 */ } }
+  return child.pid;
 }
 
-startFreshnessGuard(Date.now(), () => r.scheduler?.busy === true);
+startFreshnessGuard(Date.now(), {
+  roots: [path.join(process.cwd(), "lib"), path.join(process.cwd(), "scripts")],
+  busy: () => r.scheduler?.busy === true,
+  spawn: spawnSuccessor,
+  lockPath,
+  // 让位：交班必须先把锁交出去。握着锁等的话，接班进程启动第一步 acquireLock
+  // 会看到一个活着的持锁进程，打印"已有采集进程在运行"直接退出 —— 两个进程一起没
+  releaseLock: () => releaseLock(lockPath),
+  // 交班失败时接班进程可能已经把锁写成自己的 pid 才崩 —— 不拿回来的话，
+  // 锁上是个死 pid，下一个拉起的进程会以为没人采集而重复启动
+  retakeLock: () => acquireLock(lockPath).acquired,
+  stop: () => stopAutostart(),
+  exit: () => process.exit(0),
+  sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+  now: () => Date.now(),
+  log: (msg) => console.log(`[候潮 daemon] ${msg}`),
+});
 
 // 常驻：调度器的 timer 是 unref 的，这里显式挂住进程
 setInterval(() => {}, 1 << 30);
