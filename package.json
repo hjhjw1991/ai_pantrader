@@ -43,6 +43,7 @@
     "shadow:replay": "tsx scripts/shadow-replay.ts",
     "backtest:tearsheet": "tsx scripts/backtest-tearsheet.ts",
     "backtest:walkforward": "tsx scripts/backtest-walkforward.ts",
+    "backtest:cost-stress": "tsx scripts/backtest-cost-stress.ts",
     "shadow:switch": "tsx scripts/shadow-switch.ts",
     "parity": "tsx scripts/parity.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
