@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  newestTsFile, shouldAttempt, handoverTo, startFreshnessGuard,
+  newestTsFile, shouldAttempt, handoverTo, startFreshnessGuard, detachedSpawnSpec, watchSuccessor,
   type HandoverProbe,
 } from "@/lib/data/freshness";
 
@@ -59,12 +59,14 @@ function probe(o: {
   pid?: number | undefined;
   alive?: (pid: number) => boolean;
   lockPid?: () => number | undefined;
+  selfPid?: number;
 }): HandoverProbe & { logs: string[]; released: number } {
   const state = { logs: [] as string[], released: 0 };
   return {
     logs: state.logs,
     get released() { return state.released; },
     spawn: () => o.pid,
+    selfPid: o.selfPid,
     releaseLock: () => { state.released++; },
     alive: o.alive ?? (() => true),
     lockPid: o.lockPid ?? (() => undefined),
@@ -148,12 +150,14 @@ describe("新鲜度守卫（端到端）", () => {
     lockPath: string;
     retake: () => boolean;
     settleMs?: number;
+    selfPid?: number;
   }) => {
     const calls = { stop: 0, exit: 0, retake: 0, release: 0 };
     const handle = startFreshnessGuard(0, {
       roots: [dir],
       busy: () => false,
       spawn: o.spawn,
+      selfPid: o.selfPid,
       lockPath: o.lockPath,
       releaseLock: () => { calls.release++; },
       retakeLock: () => { calls.retake++; return o.retake(); },
@@ -356,4 +360,151 @@ describe("新鲜度守卫（端到端）", () => {
     expect(calls.release).toBe(0);
     expect(calls.exit).toBe(0);
   });
+
+  it("交班成功后先监护、再退出 —— 不是交完班就走", async () => {
+    write("changed.ts", 1000);
+    const order: string[] = [];
+    const handle = startFreshnessGuard(0, {
+      roots: [dir],
+      busy: () => false,
+      spawn: () => 555,
+      lockPath: path.join(dir, "scheduler.pid"),
+      releaseLock: () => {},
+      retakeLock: () => true,
+      lockPid: () => 555,
+      alive: () => true,
+      stop: () => { order.push("stop"); },
+      afterHandover: async () => { order.push("watch"); },
+      exit: () => { order.push("exit"); },
+      sleep, now: () => Date.now(), log: () => {},
+      everyMs: 10, settleMs: 0, graceMs: 2000, pollMs: 10, verifyMs: 10,
+    });
+    await sleep(150);
+    handle.stop();
+    expect(order).toEqual(["stop", "watch", "exit"]);
+  });
+
+  it("断链交班（拿不到接班 pid）：认出锁被别的活进程接管，才停采集并退出", async () => {
+    write("changed.ts", 1000);
+    const { calls, handle } = guardDeps({
+      spawn: () => undefined,
+      alive: () => true,
+      lockPid: () => 999,
+      lockPath: path.join(dir, "scheduler.pid"),
+      retake: () => true,
+      selfPid: 111,
+    });
+    await sleep(120);
+    handle.stop();
+    expect(calls.stop).toBe(1);
+    expect(calls.exit).toBe(1);
+  });
+});
+
+describe("接班进程必须脱离本进程树", () => {
+  // 2026-10-08 14:35：交班按设计走完了，接班进程 pid 21796 却在父进程退出后一起没了，
+  // 之后 594 分钟无人采集。detached:true 挡不住"整棵进程树被回收"—— 恰恰是父进程退出
+  // 让托管它的临时任务判定命令结束。实测：spawn+detached 的子进程出现在 taskkill /T 的
+  // 名单里，借 Start-Process 断链的则不在。
+  it("Windows 上不自己 spawn —— 让一个会立刻退出的中间进程去拉，断了父子链", () => {
+    const spec = detachedSpawnSpec(
+      "win32", "C:\\node\\node.exe", ["--import=tsx", "scripts/daemon.ts"],
+      "L:/logs/daemon.log", "L:/logs/daemon.err.log",
+    );
+    expect(spec.file.toLowerCase()).toBe("powershell.exe");
+    const cmd = spec.args.join(" ");
+    expect(cmd).toContain("Start-Process");
+    expect(cmd).toContain("daemon.log");
+    expect(cmd).toContain("daemon.err.log");
+    // 断链的代价：拿不到接班进程的 pid
+    expect(spec.pidUnknown).toBe(true);
+  });
+
+  it("命令行里的单引号要加倍 —— 否则 PowerShell 语法错误，接班进程根本起不来", () => {
+    const spec = detachedSpawnSpec("win32", "C:\\it's\\node.exe", ["a'b"], "L:/x.log", "L:/x.err.log");
+    const cmd = spec.args.join(" ");
+    expect(cmd).toContain("it''s");
+    expect(cmd).toContain("a''b");
+  });
+
+  it("POSIX 不必绕这一道 —— detached 已经 setsid，而且拿得到 pid", () => {
+    const spec = detachedSpawnSpec("linux", "/usr/bin/node", ["--import=tsx"], "L:/x.log", "L:/x.err.log");
+    expect(spec.file).toBe("/usr/bin/node");
+    expect(spec.args).toEqual(["--import=tsx"]);
+    expect(spec.pidUnknown).toBe(false);
+  });
+});
+
+describe("交班之后不许立刻走 —— 盯着接班进程", () => {
+  // 断链实测下来挡不住：接班进程还是在命令结束那一刻消失（按会话回收，不是按进程树）。
+  // 留住本进程才是关键：本进程不退出，命令就没结束，回收也不会发生。
+  const wprobe = (o: { lock: () => number | undefined; alive?: (pid: number) => boolean }) => ({
+    alive: o.alive ?? (() => true),
+    lockPid: o.lock,
+    sleep,
+    now: () => Date.now(),
+    log: () => {},
+  });
+
+  it("接班进程一直持有锁 → 站住了，本进程可以退", async () => {
+    expect(await watchSuccessor(wprobe({ lock: () => 777 }), 777, 60, 10)).toBe("stable");
+  });
+
+  it("锁没了 → 没站住（靠这个触发重拉）", async () => {
+    let owner: number | undefined = 777;
+    const p = wprobe({ lock: () => owner });
+    const real = p.sleep;
+    p.sleep = async (ms: number): Promise<void> => { owner = undefined; await real(ms); };
+    expect(await watchSuccessor(p, 777, 60, 10)).toBe("orphaned");
+  });
+
+  it("锁上换人了 —— 站住的未必是我交班给的那个，也算没站住", async () => {
+    expect(await watchSuccessor(wprobe({ lock: () => 999 }), 777, 60, 10)).toBe("orphaned");
+  });
+
+  it("接班进程死了但锁还写着它 → 一样算没站住", async () => {
+    expect(await watchSuccessor(wprobe({ lock: () => 777, alive: () => false }), 777, 60, 10)).toBe("orphaned");
+  });
+});
+
+describe("拿不到接班 pid 时怎么算接住了", () => {
+  it("锁被一个活着的、不是我的进程接管 → 算成功", async () => {
+    const p = probe({ pid: undefined, selfPid: 111, alive: () => true, lockPid: () => 222 });
+    const r = await handoverTo(p, 100, 10, 10);
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBe("handed-over");
+    expect(r.childPid).toBe(222);
+  });
+
+  it("锁还是我自己 → 不算数，否则等于自己跟自己交班然后退掉", async () => {
+    const p = probe({ pid: undefined, selfPid: 111, alive: () => true, lockPid: () => 111 });
+    const r = await handoverTo(p, 60, 10, 10);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("timeout");
+  });
+
+  it("锁上是个死 pid → 不算接住", async () => {
+    const p = probe({ pid: undefined, selfPid: 111, alive: () => false, lockPid: () => 222 });
+    const r = await handoverTo(p, 60, 10, 10);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("timeout");
+  });
+
+  it("既没有接班 pid 也没有 selfPid → 无从判断，按失败处理（不许稀里糊涂退掉自己）", async () => {
+    const p = probe({ pid: undefined });
+    const r = await handoverTo(p, 100, 10, 10);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("spawn-failed");
+  });
+
+  it("接住之后才崩也抓得到 —— 崩在自愈/迁移阶段同样没人为我采集", async () => {
+    let owner: number | undefined = 222;
+    const p = probe({ pid: undefined, selfPid: 111, alive: () => true, lockPid: () => owner });
+    const real = p.sleep;
+    p.sleep = async (ms: number): Promise<void> => { owner = undefined; await real(ms); };
+    const r = await handoverTo(p, 100, 10, 10);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("child-died");
+  });
+
 });
