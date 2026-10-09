@@ -97,7 +97,7 @@ There is one main page, `/`, the cockpit. The top row shows the market environme
 
 | Key | Path | Drawer |
 |---|---|---|
-| 1 | `/positions` | My stocks: holdings, P&L, distance to stop, execution fill-back, **account management**; watchlist |
+| 1 | `/positions` | My stocks: holdings, P&L, distance to stop, execution fill-back, **account management**; watchlist (click "分析" on a row for trend + entry/exit levels) |
 | 2 | `/shadow` | Shadow book: per-combination results, graduation progress, pending switches, rollback |
 | 3 | `/market` | Market: limit-up aggregates, board ladder, sector moves, dragon-tiger list |
 | 4 | `/ledger` | Review and backtest: prediction ledger and reconciliation, hit rate, parameter suggestions; backtesting and walk-forward |

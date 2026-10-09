@@ -1,10 +1,12 @@
 "use client";
 
+import { Fragment, useState } from "react";
 import { Num } from "@/components/Num";
 import { Tag } from "@/components/Panel";
 import { VsMarketTag } from "@/components/MoodBar";
 import { SortHead, SortNote, useTableSort, type SortValues } from "@/components/sort-table";
 import { WatchpoolRemoveButton } from "@/components/forms";
+import { AnalyzePanel } from "@/components/views/AnalyzePanel";
 import { fmtTs } from "@/lib/ui/format";
 import { absValue } from "@/lib/ui/sort";
 import type { WatchView } from "@/lib/ui/views";
@@ -55,6 +57,13 @@ export function WatchpoolTable({
     addedAt: (r) => r.row.addedAt,
   };
   const { sort, toggle, clear, rows: shown } = useTableSort(rows, values, { deltaRatio: "asc" });
+  /**
+   * 展开分析的那一只，同时只展开一行。
+   *
+   * 每次展开都要跑一遍引擎（与作战台同源的那一套筛），同时开十几行等于把作战台
+   * 的开销乘十几倍 —— 观察池是给人**逐只**看的地方，不是批量刷信号的入口。
+   */
+  const [openCode, setOpenCode] = useState<string | null>(null);
   const COLS: Array<{
     key: string; label: string; right?: boolean; sortable?: boolean; title?: string; cls?: string;
   }> = [
@@ -114,11 +123,23 @@ export function WatchpoolTable({
           <tbody>
             {shown.map((r) => {
               const riskRatio = riskRatioOf(r);
+              const open = openCode === r.row.code;
               return (
-                <tr key={r.row.code}>
+                <Fragment key={r.row.code}>
+                <tr>
                   <td className="num text-ink">{r.row.code}</td>
                   <td>
-                    <WatchpoolRemoveButton code={r.row.code} />
+                    <span className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        className="text-info hover:underline whitespace-nowrap"
+                        title="按需算一次趋势与买卖点（要跑一遍引擎，几秒）"
+                        onClick={() => setOpenCode(open ? null : r.row.code)}
+                      >
+                        {open ? "收起" : "分析"}
+                      </button>
+                      <WatchpoolRemoveButton code={r.row.code} />
+                    </span>
                   </td>
                   <td>{r.name ?? "—"}</td>
                   <td className="text-ink-2">{r.row.account ?? "—"}</td>
@@ -165,6 +186,14 @@ export function WatchpoolTable({
                   </td>
                   <td className="num text-ink-3">{fmtTs(r.row.addedAt, true)}</td>
                 </tr>
+                {open ? (
+                  <tr>
+                    <td colSpan={COLS.length} className="bg-panel-2 p-0">
+                      <AnalyzePanel code={r.row.code} onClose={() => setOpenCode(null)} />
+                    </td>
+                  </tr>
+                ) : null}
+                </Fragment>
               );
             })}
           </tbody>
