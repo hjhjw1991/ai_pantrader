@@ -16,6 +16,7 @@ import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { shanghaiTs } from "@/lib/data/clock";
 import { DEFAULT_VARIANTS, type VariantDef } from "@/lib/shadow/variants";
 import { settleShadow } from "@/lib/shadow/settle";
+import { repairAdjFactorSeries } from "@/lib/factors/util";
 
 /** 持有期。与正式台账的 PLAN_EVAL_HORIZON 一致，两本账的"5 天"是同一个 5 天 */
 export const SHADOW_HORIZON = 5;
@@ -160,9 +161,12 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
       ...(o.sectorMapAt ? { sectorMapAt: o.sectorMapAt } : {}),
     });
     const buys = (card.candidates as any[]).filter(c => c.action === "买入" && typeof c.triggerPx === "number");
+    // 先记在局部，事务提交之后才并进 out：事务中途抛错会整体回滚，外面还要重试，
+    // 直接累加到 out.recorded 的话回滚掉的行也算进去了，重试成功后再算一遍
+    let recorded = 0;
     db.transaction(() => {
       for (const c of buys) {
-        out.recorded += ins.run(
+        recorded += ins.run(
           `${o.baseDate}:${v.id}:${o.source}:${c.code}`, v.id, o.source, o.baseDate, o.decidedOn,
           c.code, c.name ?? null, c.account, c.triggerPx, c.stopPx ?? null,
           typeof c.targetPx === "number" ? c.targetPx : null,
@@ -179,6 +183,7 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
           o.config.id, o.config.version ?? null, lock, shanghaiTs());
       }
     })();
+    out.recorded += recorded;
   };
 
   for (const v of variants) {
@@ -236,6 +241,12 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const baseAdj = db.prepare("SELECT COALESCE(adj_factor, 1.0) AS f FROM kline_daily WHERE code = ? AND date = ?");
+  // 基准日之前最近一个非 1 的因子：坏掉的 1.0 要靠它顺延（见下面 repairAdjFactorSeries）
+  const priorAdj = db.prepare(
+    `SELECT adj_factor AS f FROM kline_daily
+      WHERE code = ? AND date < ? AND adj_factor IS NOT NULL AND adj_factor != 1
+      ORDER BY date DESC LIMIT 1`
+  );
   const nextDay = db.prepare(
     "SELECT date FROM trading_calendar WHERE is_open = 1 AND date > ? ORDER BY date LIMIT 1"
   );
@@ -250,8 +261,23 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
      */
     const next = (nextDay.get(p.base_date) as { date: string } | undefined)?.date ?? null;
     if (next === null || next > asOf) { r.pending++; continue; }
-    const bars = (barsAfter.all(p.code, p.base_date, asOf, SHADOW_HORIZON + 12) as any[])
+    const rawBars = (barsAfter.all(p.code, p.base_date, asOf, SHADOW_HORIZON + 12) as any[])
       .map(b => ({ code: b.code, date: b.date, o: b.o, h: b.h, l: b.l, c: b.c, vol: b.vol, amount: b.amount, adjFactor: b.adj_factor }) as DailyBar);
+    /**
+     * 因子走与 view.dailyBars 同一套读侧自愈（repairAdjFactorSeries）。
+     * 结算靠的是因子**比值**（计划价换算、逐日复权），一根坏掉的 1.0 会让
+     * 止损/目标价按除权前后的价差平白缩放，结算出一笔不存在的大赚或大亏。
+     * 序列前面垫上基准日之前最近一个非 1 因子和基准日本身，基准日坏了也能修。
+     */
+    const prior = (priorAdj.get(p.code, p.base_date) as { f: number } | undefined)?.f;
+    const baseF = (baseAdj.get(p.code, p.base_date) as { f: number } | undefined)?.f;
+    const head: Array<{ adjFactor: number }> = [
+      ...(prior !== undefined ? [{ adjFactor: prior }] : []),
+      ...(baseF !== undefined ? [{ adjFactor: baseF }] : []),
+    ];
+    const repaired = repairAdjFactorSeries<{ adjFactor: number }>([...head, ...rawBars]);
+    const baseFixed = baseF !== undefined ? repaired[head.length - 1].adjFactor : undefined;
+    const bars = repaired.slice(head.length) as DailyBar[];
     if (bars.length === 0 || bars[0].date !== next) {
       const n = Number((marketBars.get(next) as { n: number }).n);
       if (n < MIN_MARKET_BARS) { r.pending++; continue; }
@@ -263,7 +289,7 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
       { triggerPx: p.trigger_px, stopPx: p.stop_px, targetPx: p.target_px }, bars,
       {
         horizon: SHADOW_HORIZON, slippage: DEFAULT_CONSTRAINTS.slippage, feeRate: DEFAULT_CONSTRAINTS.feeRate,
-        ...(() => { const f = (baseAdj.get(p.code, p.base_date) as { f: number } | undefined)?.f; return f === undefined ? {} : { baseAdjFactor: f }; })(),
+        ...(baseFixed === undefined ? {} : { baseAdjFactor: baseFixed }),
       },
     );
     if (s.status === "待定") { r.pending++; continue; }

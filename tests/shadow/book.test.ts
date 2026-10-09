@@ -69,6 +69,23 @@ describe("runShadowDay", () => {
     expect(r.failed).toEqual([{ variant: "bad", error: "boom" }]);
     expect(rows().map(x => x.variant_id)).toEqual(["ok"]);
   });
+
+  it("瞬时故障重试：回滚掉的那次写入不计入 recorded", () => {
+    // 第二只候选第一次读 size 时抛瞬时错 —— 此时第一只已经 insert 并计数，事务随后回滚；
+    // 重试成功后 recorded 必须是 2，不是 3
+    let thrown = false;
+    const flaky = { ...buy("600002") } as any;
+    Object.defineProperty(flaky, "size", {
+      get() { if (!thrown) { thrown = true; throw new Error("SQLITE_BUSY: database is locked"); } return 0.1; },
+      enumerable: true,
+    });
+    const variants = [{ id: "a", name: "a", slots: {} }];
+    const r = runShadowDay(t.db, opts(() => () => card([buy("600001"), flaky]), { variants }));
+    expect(thrown).toBe(true);
+    expect(r.failed).toEqual([]);
+    expect(rows()).toHaveLength(2);
+    expect(r.recorded).toBe(2);
+  });
 });
 
 describe("settleShadowPending", () => {
@@ -115,6 +132,18 @@ describe("settleShadowPending", () => {
     settleShadowPending(t.db, "2026-09-08");
     expect(settleShadowPending(t.db, "2026-09-09").settled).toBe(0);
     expect(outcome()).toHaveLength(1);
+  });
+
+  it("结算按修复后的复权因子：非 1 台阶之后写坏的 1.0 不会把目标价离场算成止损", () => {
+    seed();
+    insDaily(t.db, "600001", DAYS[0], 10, { adj: 2 });                       // 基准日
+    insDaily(t.db, "600001", DAYS[1], 10.1, { o: 10, h: 10.2, l: 9.9, adj: 2 }); // 成交日
+    // 之后几天 daemon 写坏成 1.0：不修的话这些价按 ×1/2 换到成交日尺度，11 变 5.5 → 止损
+    insDaily(t.db, "600001", DAYS[2], 11, { o: 10.2, h: 11.3, l: 10.1, adj: 1 });
+    for (const d of DAYS.slice(3, 6)) insDaily(t.db, "600001", d, 11, { adj: 1 });
+    const r = settleShadowPending(t.db, "2026-09-08");
+    expect(r.settled).toBe(1);
+    expect(outcome()[0]).toMatchObject({ status: "已结算", exit_reason: "目标", exit_px: 11 });
   });
 
   it("哨兵行不结算", () => {

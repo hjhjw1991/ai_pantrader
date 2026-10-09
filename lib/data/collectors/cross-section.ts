@@ -338,6 +338,9 @@ export async function collectSectorMembersFromListing(
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   let codes = 0;
   let total: number | null = null;
+  // 本次刷新实际落库的行业。不能事后去 SELECT DISTINCT 整张表 ——
+  // 表里还留着以前刷进去的行业，那样报出来的是"历史累计"，不是这一次
+  const sectorsSeen = new Set<string>();
   // 每一页拿到的行直接落库，别攒在内存里 —— 60 页 × 100 行不算大，
   // 但中途崩掉时"已经落库的那部分"才是有用的东西
   const write = (rows: Array<{ code: string; sector: string }>) => {
@@ -345,6 +348,7 @@ export async function collectSectorMembersFromListing(
     db.transaction(() => {
       for (const m of rows) stmt.run(m.code, m.sector, bkByName.get(m.sector) ?? "", ts);
     })();
+    for (const m of rows) sectorsSeen.add(m.sector);
     codes += rows.length;
   };
 
@@ -356,7 +360,7 @@ export async function collectSectorMembersFromListing(
   total = first.total;
   write(first.rows);
   if (first.rows.length === 0) {
-    return { codes, failed: [], passes: 0, total, sectors: new Set(bkByName.keys()).size };
+    return { codes, failed: [], passes: 0, total, sectors: sectorsSeen.size };
   }
 
   const maxPages = total === null ? MARKET_LISTING_MAX_PAGES
@@ -381,11 +385,8 @@ export async function collectSectorMembersFromListing(
   recordSectorGap(db, ts, client.source, failed, pages.length + 1, passes);
   return {
     codes, failed, passes, total,
-    // 列表路不逐个行业计数，报落库的行业数，意义与之对齐
-    sectors: new Set(
-      (db.prepare("SELECT DISTINCT sector FROM security_sector").all() as Array<{ sector: string }>)
-        .map(r => r.sector)
-    ).size,
+    // 列表路不逐个行业计数，报**这次**落库的行业数，意义与之对齐
+    sectors: sectorsSeen.size,
   };
 }
 

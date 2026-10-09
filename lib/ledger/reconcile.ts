@@ -2,6 +2,7 @@ import type { Db } from "@/lib/db";
 import type { Action, ErrorType, Outcome, Prediction, Verdict } from "@/lib/contracts";
 import { dateOf, EVAL_HORIZONS, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
 import { listPendingPredictions } from "@/lib/ledger/record";
+import { repairAdjFactorSeries } from "@/lib/factors/util";
 
 /**
  * 到期对账（spec §11 第 2 步）。
@@ -96,14 +97,27 @@ export interface ResolvedPx {
  * 日线优先；日线还没落库（当日盘后 job 之前）时退回当日最后一笔快照。
  * 快照只认同一天的：拿前一天的快照顶上等于偷偷改了 horizon。
  *
- * 收盘价乘 adj_factor：M0 阶段该列恒为 1.0（新浪日线不复权，见 collectors/daily），
- * 乘上去当前无影响，将来填的是累计复权因子时口径才对得上。
+ * 收盘价乘 adj_factor（累计复权因子，见 collectors/adjust-factor），基准日与结算日
+ * 才在同一复权口径下比涨跌幅。
  */
 export function resolvePx(db: Db, code: string, date: string): ResolvedPx | null {
   const bar = db.prepare(
     `SELECT c, COALESCE(adj_factor, 1.0) f FROM kline_daily WHERE code = ? AND date = ?`
   ).get(code, date) as { c: number | null; f: number } | undefined;
-  if (bar && bar.c != null) return { px: bar.c * bar.f, source: "kline_daily", date };
+  if (bar && bar.c != null) {
+    // 因子走与 view.dailyBars 同一套读侧自愈：非 1 台阶之后的 1.0 是写坏的，顺延前值。
+    // 不修的话基准日与结算日一个是后复权价、一个是原始价，涨跌幅按除权比例凭空偏一截
+    const prior = db.prepare(
+      `SELECT adj_factor f FROM kline_daily
+        WHERE code = ? AND date < ? AND adj_factor IS NOT NULL AND adj_factor != 1
+        ORDER BY date DESC LIMIT 1`
+    ).get(code, date) as { f: number } | undefined;
+    const series = repairAdjFactorSeries([
+      ...(prior ? [{ adjFactor: prior.f }] : []), { adjFactor: bar.f },
+    ]);
+    const f = series[series.length - 1].adjFactor;
+    return { px: bar.c * f, source: "kline_daily", date };
+  }
 
   // quote_snapshot.ts 存的是 UTC ISO 串。交易时段（北京 09:30–15:00 = UTC 01:30–07:00）
   // 与盘后 job 都落在同一个 UTC 日期上，所以按前 10 位匹配是安全的；

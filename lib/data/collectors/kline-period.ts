@@ -1,4 +1,5 @@
 import type { Db } from "@/lib/db";
+import { repairAdjFactorSeries } from "@/lib/factors/util";
 
 /**
  * 周线 / 月线：从**后复权日线**本地聚合。
@@ -51,7 +52,7 @@ const monthKey = (date: string): string => date.slice(0, 7);
 
 interface DailyRow {
   date: string; o: number; h: number; l: number; c: number;
-  vol: number; amount: number; adj: number;
+  vol: number; amount: number; adjFactor: number;
 }
 
 function aggregate(rows: DailyRow[], keyOf: (d: string) => string): PeriodBar[] {
@@ -72,10 +73,10 @@ function aggregate(rows: DailyRow[], keyOf: (d: string) => string): PeriodBar[] 
     const first = g[0], last = g[g.length - 1];
     out.push({
       date: last.date,
-      o: first.o * first.adj,
-      h: Math.max(...g.map(r => r.h * r.adj)),
-      l: Math.min(...g.map(r => r.l * r.adj)),
-      c: last.c * last.adj,
+      o: first.o * first.adjFactor,
+      h: Math.max(...g.map(r => r.h * r.adjFactor)),
+      l: Math.min(...g.map(r => r.l * r.adjFactor)),
+      c: last.c * last.adjFactor,
       // 量与额不复权：复权调的是价格。量乘上因子的话，"放量"判定会在除权日前后凭空翻倍
       vol: g.reduce((s, r) => s + r.vol, 0),
       amount: g.reduce((s, r) => s + r.amount, 0),
@@ -107,13 +108,16 @@ export function buildPeriodBars(db: Db, codes: string[]): { codes: number; bars:
 
   let bars = 0;
   for (const code of codes) {
-    const rows = read.all(code).map((r: any) => ({
+    // 坏因子（非 1 台阶之后写成 1.0）顺延前值，与 view.dailyBars 同一套读侧自愈
+    // （见 lib/factors/util.ts 的 repairAdjFactorSeries）。不修的话，坏掉的那几天
+    // 后复权价会塌成原始价，一根周线里混着两个价格尺度，高低点全错
+    const rows = repairAdjFactorSeries(read.all(code).map((r: any) => ({
       date: String(r.date),
       o: Number(r.o), h: Number(r.h), l: Number(r.l), c: Number(r.c),
       vol: Number(r.vol ?? 0), amount: Number(r.amount ?? 0),
       // NULL 因子按 1：spec R1 说了有一段没有复权参照，读的人靠 adjFactor===1 判断
-      adj: Number(r.adj ?? 1) || 1,
-    }));
+      adjFactor: Number(r.adj ?? 1) || 1,
+    })));
     if (rows.length === 0) continue;
 
     const w = aggregate(rows, isoWeekKey);

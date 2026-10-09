@@ -5,6 +5,7 @@ import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { runJob, lhbRefreshDates, LHB_LABEL_OFFSETS } from "@/lib/data/jobs";
+import { BreakerPool } from "@/lib/data/health";
 
 let dir: string, db: any;
 beforeEach(() => {
@@ -15,11 +16,18 @@ beforeEach(() => {
 });
 afterEach(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
-const stub = (text: string) => ({
+const stub = (text: string) => {
+  // 与 lib/data/client.ts 的 SourceClient 同形：行业映射刷新会调 breakers.reset()/allOpen()，
+  // 缺了它夜间任务的行业刷新会直接抛错，成功路径就从来没被测到
+  const breakers = new BreakerPool();
+  return {
   source: "stub",
   breaker: { isOpen: () => false, record() {}, reset() {} } as any,
+  breakers,
+  breakerFor: (host: string) => breakers.for(host),
   async get() { return { ok: true as const, text, status: 200, latencyMs: 1 }; },
-});
+  };
+};
 
 const clients = () => ({
   sina: stub("[]") as any,

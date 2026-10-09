@@ -171,6 +171,17 @@ describe("行情读取", () => {
     expect(bars[0].adjFactor).toBe(1);
   });
 
+  it("日线读侧修复坏复权因子：非 1 台阶之后的 1.0 顺延前值（/api/data/kline 走这里）", () => {
+    const k = db.prepare(
+      "INSERT INTO kline_daily (code, date, o,h,l,c,vol,amount,adj_factor) VALUES (?,?,?,?,?,?,?,?,?)"
+    );
+    k.run("600667", "2026-07-30", 19, 20, 18, 19.4, 1e6, 1e7, 5.8);
+    k.run("600667", "2026-07-31", 19, 20, 18, 19.5, 1e6, 1e7, 5.8);
+    k.run("600667", "2026-08-03", 19, 20, 18, 19.6, 1e6, 1e7, 1);   // 坏行
+    const bars = dailyBars(db, "600667", 10);
+    expect(bars.map((b) => b.adjFactor)).toEqual([5.8, 5.8, 5.8]);
+  });
+
   it("涨停池映射到契约字段名", () => {
     const rows = ztPool(db, "2026-08-03");
     expect(rows[0]).toMatchObject({ code: "003032", lbc: 6, openTimes: 0, sector: "教育" });

@@ -457,11 +457,13 @@ export interface SectorMember { code: string; name: string }
  * 板块榜那里已经踩过的坑。total 缺失时返回 null，让调用方保留上一页的判断，
  * 不要拿 undefined 去比大小（NaN 比较恒 false，会把"到底了"判成"还没到底"）。
  */
-export function parseSectorMembersPage(text: string): { rows: SectorMember[]; total: number | null } {
+export function parseSectorMembersPage(
+  text: string
+): { rows: SectorMember[]; total: number | null; raw: number } {
   const j = JSON.parse(text);
   const diff = j?.data?.diff;
   // total=0 且 diff=null 是合法的（空板块），不能当报文异常
-  if (diff === undefined || diff === null) return { rows: [], total: null };
+  if (diff === undefined || diff === null) return { rows: [], total: null, raw: 0 };
   const list: any[] = Array.isArray(diff) ? diff : Object.values(diff);
 
   const rows = list
@@ -471,7 +473,9 @@ export function parseSectorMembersPage(text: string): { rows: SectorMember[]; to
     .map(x => ({ code: String(x.f12), name: String(x.f14 ?? "") }));
 
   const t = Number(j?.data?.total);
-  return { rows, total: Number.isFinite(t) ? t : null };
+  // raw = 过滤前的条数。翻页"满不满页"必须按它判断：一整页 100 条里混了一个指数代码，
+  // 过滤后只剩 99，若按 rows 判就会被当成最后一页，后面的成分静默丢掉。
+  return { rows, total: Number.isFinite(t) ? t : null, raw: list.length };
 }
 
 /**
@@ -519,8 +523,9 @@ export async function fetchSectorMembers(
       out.push(m);
     }
 
-    if (page.rows.length === 0) break;                 // 空页 = 到底
-    if (page.rows.length < CLIST_PAGE_MAX) break;      // 不满页 = 最后一页
+    // 满页/空页按 **过滤前** 的原始条数判：过滤掉的指数代码也占接口的页额度
+    if (page.raw === 0) break;                         // 空页 = 到底
+    if (page.raw < CLIST_PAGE_MAX) break;              // 不满页 = 最后一页
     if (out.length >= total) break;                    // 凑够 total 就停
   }
   return out;

@@ -841,6 +841,18 @@ describe("collectSectorMembersFromListing", () => {
    * 实测第 21 页失败时只拿到 2000/5920 行，全是 000/002 开头，
    * 600/300/920 一只没有。那不是"部分成功"，是系统性偏到半个市场。
    */
+  it("sectors 报的是这一次刷到的行业数，不是整张表的历史累计", async () => {
+    // 表里先放一批以前刷进来的、这次列表里已经没有的行业
+    const old = db.prepare("INSERT INTO security_sector (code, sector, bk, ts) VALUES (?, ?, '', 't')");
+    old.run("999001", "旧行业A"); old.run("999002", "旧行业B");
+    const rows = [...mkRows(3, "半导体"), ...mkRows(2, "化学制品", 10)];
+    const { client } = listingClient(rows);
+    const r = await collectSectorMembersFromListing(db, client as any, BOARDS, {
+      passes: 1, sleep: noSleep,
+    });
+    expect(r.sectors).toBe(2);
+  });
+
   it("中途失败的页会重来一轮，不是就此收尾", async () => {
     const rows = mkRows(150);
     const { client } = listingClient(rows, { 2: 11 });   // 第 2 页前十次都失败

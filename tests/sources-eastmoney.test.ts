@@ -309,14 +309,14 @@ describe("板块成分分页", () => {
       { f12: "600000", f14: "浦发银行" }, { f12: "000001", f14: "平安银行" }] } });
     expect(parseSectorMembersPage(asArray)).toEqual({
       rows: [{ code: "600000", name: "浦发银行" }, { code: "000001", name: "平安银行" }],
-      total: 2,
+      total: 2, raw: 2,
     });
     expect(parseSectorMembersPage(mkPage(["600000"])).rows).toEqual([{ code: "600000", name: "票600000" }]);
   });
 
   it("空板块不是错误 —— 返回空而不是抛", () => {
     expect(parseSectorMembersPage(JSON.stringify({ data: { total: 0, diff: null } })))
-      .toEqual({ rows: [], total: null });
+      .toEqual({ rows: [], total: null, raw: 0 });
   });
 
   it("只要 6 位 A 股代码，板块里混着的指数代码不要", () => {
@@ -365,7 +365,20 @@ describe("板块成分分页", () => {
     expect(pns).toEqual([1, 2]);
   });
 
-  it("空板块：一次请求就结束", async () => {
+  it("满页里混了一个指数代码（过滤后 99 条）也不能当成最后一页", async () => {
+    // 原始 100 条 = 99 只 A 股 + 1 个 BK 代码；按过滤后的条数判会把它当不满页而停
+    const p1 = JSON.stringify({ data: { total: 150, diff: [
+      ...seq(99).map(c => ({ f12: c, f14: `票${c}` })),
+      { f12: "BK0001", f14: "某指数" },
+    ] } });
+    const { pns, client } = pagedClient([p1, mkPage(seq(50, 100), 150)]);
+    const rows = await fetchSectorMembers(client as any, "BKmix", { rounds: 1 });
+    expect(pns).toEqual([1, 2]);
+    expect(rows).toHaveLength(149);
+    expect(rows.some(r => r.code === "BK0001")).toBe(false);
+  });
+
+    it("空板块：一次请求就结束", async () => {
     const { pns, client } = pagedClient([JSON.stringify({ data: { total: 0, diff: null } })]);
     const rows = await fetchSectorMembers(client as any, "BKzzzz", { rounds: 1 });
     expect(rows).toEqual([]);

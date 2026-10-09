@@ -15,6 +15,7 @@ import type { Position } from "@/lib/contracts/execution";
 import type { Outcome, Prediction, Verdict, ErrorType } from "@/lib/contracts/ledger";
 import type { Phase, Action, EnvGear } from "@/lib/contracts/strategy";
 import { shanghaiTs } from "@/lib/data/clock";
+import { repairAdjFactorSeries } from "@/lib/factors/util";
 import {
   tableCounts,
   readTableCountsSnapshot,
@@ -340,7 +341,7 @@ export function dailyBars(db: Db, code: string, n: number): DailyBar[] {
        FROM kline_daily WHERE code = ? ORDER BY date DESC LIMIT ?`
     )
     .all(code, n) as Array<Record<string, unknown>>;
-  return rows
+  const bars: DailyBar[] = rows
     .map((r) => ({
       code: r.code as string,
       date: r.date as string,
@@ -349,6 +350,10 @@ export function dailyBars(db: Db, code: string, n: number): DailyBar[] {
       adjFactor: r.adj_factor === null ? 1 : Number(r.adj_factor),
     }))
     .reverse(); // 契约要求升序
+  // 与 view.dailyBars 同一套读侧自愈：坏掉的 1.0 因子顺延前值。
+  // /api/data/kline 走的是这里而不是 view，不修的话那几根 K 线会按原始价落在
+  // 后复权尺度的图上，看着像一根断崖（见 lib/factors/util.ts 的 repairAdjFactorSeries）
+  return repairAdjFactorSeries(bars);
 }
 
 export function latestDailyDate(db: Db): string | null {
