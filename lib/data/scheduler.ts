@@ -105,6 +105,39 @@ export function claimSlot(db: Db, date: string, job: string, slot: string, runne
   }
 }
 
+/**
+ * 重跑一个已经记过账的时点（补数据用）。
+ *
+ * 与 claimSlot 的差别：允许把 **missed / failed** 的坑重新跑一遍 —— 补数的目标
+ * 恰恰就是这些没跑成的坑。而 **done 的不再重跑**（同一时点再拉一遍拿到的是同一份
+ * 数据，白烧一次限频额度），**卡住的 running 也不动**：那是 wake.ts 的
+ * reclaimStaleClaims 的活，它按超时判定并记成 failed，判完再来补；两条路径都去改
+ * running 会互相抢，而只有它知道"这个 running 是真的在跑还是进程早死了"。
+ *
+ * 为什么不能直接用 claimSlot：那个坑上已经有行了，INSERT 必然 UNIQUE 冲突，
+ * 于是一次补数会以"该时点已被其它 runner 认领"收场 —— 而那条记录的状态是 missed。
+ * 这正是 2026-10-08 close/15:05 至今仍记 missed 的原因：那趟是临时脚本跑的，
+ * 压根没认领，账本上既没补上也没人知道补过了。
+ */
+export function reclaimSlot(db: Db, date: string, job: string, slot: string, runner: Runner): boolean {
+  const upd = db.prepare(
+    `UPDATE job_run SET status = 'running', started_at = ?, finished_at = NULL,
+            stats_json = NULL, error = NULL, runner = ?
+     WHERE date = ? AND job = ? AND slot = ? AND status IN ('missed', 'failed')`
+  ).run(shanghaiTs(), runner, date, job, slot);
+  if (upd.changes > 0) return true;
+  // 没有可重跑的行：要么压根没有（走正常认领），要么是 done（不放行）
+  try {
+    db.prepare(
+      `INSERT INTO job_run (date, job, slot, status, started_at, runner)
+       VALUES (?, ?, ?, 'running', ?, ?)`
+    ).run(date, job, slot, shanghaiTs(), runner);
+    return true;
+  } catch {
+    return false;   // UNIQUE 冲突 = 这一趟已经 done 过
+  }
+}
+
 /** 落执行结果。同样导出给 scripts/job.ts —— 只认领不回填，时点会永远卡在 running */
 export function finishSlot(
   db: Db, date: string, job: string, slot: string,

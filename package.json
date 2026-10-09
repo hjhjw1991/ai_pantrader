@@ -40,6 +40,7 @@
     "test:watch": "vitest",
     "test:live": "vitest run --config vitest.live.config.ts",
     "job": "tsx scripts/job.ts",
+    "backfill": "tsx scripts/job.ts",
     "shadow:replay": "tsx scripts/shadow-replay.ts",
     "backtest:tearsheet": "tsx scripts/backtest-tearsheet.ts",
     "backtest:walkforward": "tsx scripts/backtest-walkforward.ts",

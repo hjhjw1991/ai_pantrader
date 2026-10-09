@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
-import { claimSlot, finishSlot } from "@/lib/data/scheduler";
+import { claimSlot, reclaimSlot, finishSlot } from "@/lib/data/scheduler";
 import { slotForNow } from "@/lib/data/schedule";
 
 /**
@@ -102,5 +102,65 @@ describe("claimSlot：两个 runner 抢同一个时点，只有一个能跑", ()
     ).get();
     expect(r.status).toBe("failed");
     expect(r.error).toBe("源掉线");
+  });
+});
+
+/**
+ * 补数为什么不能直接用 claimSlot：要补的那个坑上**已经有行了**（missed / failed），
+ * INSERT 必然撞主键，于是补数以"该时点已被其它 runner 认领"收场 —— 而那条记录
+ * 写的恰恰是"没跑成"。10-08 的 close/15:05 至今记 missed 就是这个机制的产物：
+ * 那趟是临时脚本跑的，压根没认领，账本上既没补上也没人知道补过了。
+ */
+describe("reclaimSlot：补数重跑一个已经记过账的时点", () => {
+  const row = () => db.prepare(
+    `SELECT status, runner, stats_json FROM job_run
+     WHERE date='2026-08-05' AND job='close' AND slot='15:05'`
+  ).get() as any;
+
+  it("没有记录时与 claimSlot 一样正常认领", () => {
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(true);
+    expect(row().status).toBe("running");
+  });
+
+  it("missed 的坑可以重跑，状态回到 running", () => {
+    db.prepare(
+      `INSERT INTO job_run (date, job, slot, status, runner) VALUES (?,?,?,?,?)`
+    ).run("2026-08-05", "close", "15:05", "missed", "scheduler");
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(true);
+    expect(row().status).toBe("running");
+    expect(row().runner).toBe("manual");
+  });
+
+  it("failed 的坑同样可以重跑 —— 补数的目标就是这些没跑成的", () => {
+    finishSlot(db, "2026-08-05", "close", "15:05", "failed", undefined, "源掉线");
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(true);
+    expect(row().status).toBe("running");
+    // 旧的错误要清掉，不然跑成功了账本上还挂着上一次的报错
+    expect(row().stats_json).toBeNull();
+  });
+
+  it("已经 done 的不再重跑：同一时点再拉一遍拿到的是同一份数据，白烧限频", () => {
+    claimSlot(db, "2026-08-05", "close", "15:05", "scheduler");
+    finishSlot(db, "2026-08-05", "close", "15:05", "done", { ztPoolRows: 43 });
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(false);
+    const r = row();
+    expect(r.status).toBe("done");
+    expect(JSON.parse(r.stats_json).ztPoolRows).toBe(43);
+  });
+
+  it("卡住的 running 不动 —— 判定它是不是真的在跑是 wake.ts 的活，两条路径都改会互相抢", () => {
+    claimSlot(db, "2026-08-05", "close", "15:05", "scheduler");   // 留一条 running
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(false);
+    expect(row().status).toBe("running");
+    expect(row().runner).toBe("scheduler");
+  });
+
+  it("两个进程同时补同一个坑，只有一个拿到（与 claimSlot 同样的互斥）", () => {
+    db.prepare(
+      `INSERT INTO job_run (date, job, slot, status, runner) VALUES (?,?,?,?,?)`
+    ).run("2026-08-05", "close", "15:05", "missed", "scheduler");
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(true);
+    // 拿到之后那一行已经是 running，第二次既不命中 UPDATE 也插不进去
+    expect(reclaimSlot(db, "2026-08-05", "close", "15:05", "manual")).toBe(false);
   });
 });

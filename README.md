@@ -212,6 +212,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run daemon` | 独立采集守护进程 |
 | `pnpm run daemon:stop` | 停掉采集守护进程（网页退出后它仍在跑） |
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
+| `pnpm run backfill <job> --at <时刻>` | 补历史数据：`--at` 是"当作几点"，runJob 里所有日期都由它推出来，补哪一趟就认领那一天那一个时点。`2026-10-08` 或 `2026-10-08T22:00:00+08:00`（不带时区按上海挂钟解释）。`night` 可加 `--derived=light`（只建情绪与代理截面，不结算影子盘、不动策略文件）/ `=skip`。源上没有历史接口的 job（`close` `intraday` `plan`）补到非今天会被拦下，确认源上仍挂着那天的现场才加 `--force` |
 | `pnpm run parity [天数]` | v1↔v2 引擎对照：真实因子跑最近 N 个交易日，逐字段比信号卡。不一致即退出码非 0 |
 | `pnpm backtest:tearsheet` | 把回测存档导出成一份自包含 HTML（净值/回撤/月度收益/基准对比）。`--list` 列存档，`--latest` 取最新，`--id <id>` 指定，`--bench sh000300` 换基准，`--no-bench` 不比 |
 | `pnpm backtest:walkforward` | 滚动样本外验证：训练段寻优 → 测试段只评估一次 → 出裁决、样本内外落差、参数稳定性。`--plan` 先看要跑多少次回测，`--grid 路径=v1,v2` 指定寻优网格，`--aggregated` 把各段样本外拼成一条曲线再判（算力翻倍）。样本外不通过退出码非 0 |
