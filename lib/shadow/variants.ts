@@ -146,6 +146,11 @@ export const DEFAULT_VARIANTS: VariantDef[] = [
    * 多五倍（602 / 604 笔 vs 122 笔）却只能测出更小的效应量，说明这两条**真的
    * 没什么用**，不是"样本还不够"。问题已经回答完，占着位置只会通过 Bonferroni
    * 抬高别人的毕业门槛。
+   *
+   * ⚠️ r-exit-hard 的那行数字**不成立**：029 之前影子盘结算不跑离场器，它只换了离场器，
+   * 同一笔入场结出来与 baseline 逐笔相同 —— 表里那 +0.10 无论来自哪里，都不可能来自离场规则。
+   * 退役判定要在 `pnpm shadow:resettle --apply r-exit-hard` 重结之后重新看；
+   * hm-* 的离场器部分同理（见 lib/shadow/exit-slot.ts）。
    */
   { id: "r-entry-ma5", name: "规则·触发价贴 MA5",
     slots: {

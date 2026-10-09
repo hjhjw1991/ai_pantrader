@@ -8,17 +8,24 @@
  * 每套变体的"持仓"都不一样却又都是假的，拿它们比没有意义。
  */
 import type { Db } from "@/lib/db";
-import { entryTypeOf, type DailyBar, type Phase, type SlotConfig, type StrategyConfig } from "@/lib/contracts";
+import { entryTypeOf, type Board, type DailyBar, type Phase, type SecurityRow, type SlotConfig, type StrategyConfig } from "@/lib/contracts";
 import { createSqliteView } from "@/lib/pit/sqlite-view";
 import { defaultRegistry } from "@/lib/factors";
 import { createV2Engine, defaultSlotRegistry } from "@/lib/strategy/v2";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
 import { isLateDecision, LATE_DECISION_NOTE, shanghaiTs, toShanghaiWall } from "@/lib/data/clock";
 import { DEFAULT_VARIANTS, type VariantDef } from "@/lib/shadow/variants";
-import { settleShadow } from "@/lib/shadow/settle";
+import { settleShadow, type ExitHook } from "@/lib/shadow/settle";
+import { resolveExitSlot, slotExitHook, legacyExitKey, outcomeMatchesExit, type ResolvedExit } from "@/lib/shadow/exit-slot";
 import { repairAdjFactorSeries } from "@/lib/factors/util";
 
-/** 持有期。与正式台账的 PLAN_EVAL_HORIZON 一致，两本账的"5 天"是同一个 5 天 */
+/**
+ * 持有期。与正式台账的 PLAN_EVAL_HORIZON 一致，两本账的"5 天"是同一个 5 天。
+ *
+ * 离场器跑进结算之后它仍是**上限**：离场器只能让仓位更早走，不能拿得更久。
+ * 路径纪律的"持有上限"配得比 5 大也不会生效 —— 要测长持有，得先改这里的共同口径
+ * （所有变体一起换，baseline 数字跟着变），不能由某个变体单方面延长。
+ */
 export const SHADOW_HORIZON = 5;
 
 /**
@@ -228,6 +235,13 @@ export interface SettleResult {
   settled: number; untriggered: number; pending: number;
   /** 本次判作废的（含把已结算的老行改判作废的）。作废的不进任何统计，见 voidLateShadow */
   voided: number;
+  /** 离场器抛错 / 槽未注册而没能结算的（不落表，下一晚重试；错误打到 stderr） */
+  failed: number;
+}
+
+export interface SettleOpts {
+  /** 只结算这些变体的预测（重结算用）。缺省 = 全部 */
+  variantIds?: string[];
 }
 
 /**
@@ -275,18 +289,65 @@ export function voidLateShadow(db: Db): number {
   return n;
 }
 
+/** 离场器要的成交日之前的日线根数：路径纪律取 250 根算均线 / 回看，多留几根 */
+const EXIT_PRIOR_BARS = 260;
+
 /**
- * 结算到期的影子预测：基准日之后已走过持有期的，按止损 / 目标价模拟离场。
+ * 结算到期的影子预测：基准日之后已走过持有期的，按止损 / 目标价模拟离场，
+ * 并让**该变体自己的离场器槽**每天收盘后判一次（见 lib/shadow/exit-slot.ts —— 叠加口径，
+ * baseline 的账户纪律中和后不出手，数字与之前逐笔一致）。用的是变体登记时的 slot_config，
+ * 槽实现取当前注册表里的版本；每行落 exit_slot（离场器名@版本），统计据此不混口径。
+ * 变体不在 shadow_variant 里（测试 / 探针行）按 baseline 离场器结算。
+ *
  * "待定"不落表，下一晚重试。晚决策先判作废（voidLateShadow），作废的已有 outcome 行，下面不会再扫到。
  */
-export function settleShadowPending(db: Db, asOf: string): SettleResult {
+export function settleShadowPending(db: Db, asOf: string, so: SettleOpts = {}): SettleResult {
   const voided = voidLateShadow(db);
-  const preds = db.prepare(
-    `SELECT p.id, p.code, p.base_date, p.trigger_px, p.stop_px, p.target_px, p.entry_type
+  const only = so.variantIds;
+  const preds = (db.prepare(
+    `SELECT p.id, p.variant_id, p.code, p.account, p.base_date, p.trigger_px, p.stop_px, p.target_px, p.entry_type,
+            v.slot_config
        FROM shadow_pred p LEFT JOIN shadow_outcome o ON o.pred_id = p.id
+       LEFT JOIN shadow_variant v ON v.id = p.variant_id
       WHERE o.pred_id IS NULL AND p.code != '-' AND p.base_date < ?
       ORDER BY p.base_date, p.id`
-  ).all(asOf) as Array<{ id: string; code: string; base_date: string; trigger_px: number; stop_px: number | null; target_px: number | null; entry_type: string | null }>;
+  ).all(asOf) as Array<{ id: string; variant_id: string; code: string; account: string; base_date: string; trigger_px: number; stop_px: number | null; target_px: number | null; entry_type: string | null; slot_config: string | null }>)
+    .filter(p => only === undefined || only.includes(p.variant_id));
+  /** 每个变体解析一次离场器。解析失败（槽名没注册、配置坏了）记成错误，这个变体的预测本轮不结 */
+  const exits = new Map<string, ResolvedExit | Error>();
+  const exitOf = (variantId: string, slotConfig: string | null): ResolvedExit | Error => {
+    let e = exits.get(variantId);
+    if (e === undefined) {
+      try { e = resolveExitSlot(slotConfig === null ? null : JSON.parse(slotConfig) as SlotConfig); }
+      catch (err) { e = err as Error; }
+      exits.set(variantId, e);
+    }
+    return e;
+  };
+  // 离场器的视图要成交日之前的原始日线（均线窗口）。过滤条件与 sqlite 视图的 dailyBars 一致
+  const barsBefore = db.prepare(
+    `SELECT code, date, o, h, l, c, vol, amount, COALESCE(adj_factor, 1.0) AS adj_factor
+       FROM kline_daily
+      WHERE code = ? AND date <= ? AND o IS NOT NULL AND h IS NOT NULL AND l IS NOT NULL AND c IS NOT NULL AND vol IS NOT NULL
+      ORDER BY date DESC LIMIT ?`
+  );
+  const secStmt = db.prepare("SELECT code, name, list_date, delist_date, board FROM security WHERE code = ?");
+  const secCache = new Map<string, SecurityRow | null>();
+  /**
+   * 离场器只用到板块（定涨跌停幅度）。ST 历史给空：ST 清仓属于被中和的账户纪律，
+   * 而且 security 表里的 ST 区间是当前采集的一份，回看历史天然带前视
+   */
+  const securityOf = (code: string): SecurityRow | null => {
+    if (!secCache.has(code)) {
+      const r = secStmt.get(code) as { code: string; name: string; list_date: string | null; delist_date: string | null; board: string } | undefined;
+      secCache.set(code, r === undefined ? null : {
+        code: r.code, name: r.name, listDate: r.list_date, delistDate: r.delist_date, board: r.board as Board, isStHistory: [],
+      });
+    }
+    return secCache.get(code)!;
+  };
+  const toBar = (b: any): DailyBar =>
+    ({ code: b.code, date: b.date, o: b.o, h: b.h, l: b.l, c: b.c, vol: b.vol, amount: b.amount, adjFactor: b.adj_factor });
   const barsAfter = db.prepare(
     `SELECT code, date, o, h, l, c, vol, amount, COALESCE(adj_factor, 1.0) AS adj_factor
        FROM kline_daily WHERE code = ? AND date > ? AND date <= ? ORDER BY date LIMIT ?`
@@ -294,8 +355,8 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
   const ins = db.prepare(
     `INSERT OR IGNORE INTO shadow_outcome
        (pred_id, status, entry_date, entry_px, exit_date, exit_px, exit_reason,
-        gross_pct, net_pct, mfe_pct, mae_pct, note, settled_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        gross_pct, net_pct, mfe_pct, mae_pct, note, settled_at, exit_slot)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const baseAdj = db.prepare("SELECT COALESCE(adj_factor, 1.0) AS f FROM kline_daily WHERE code = ? AND date = ?");
   // 基准日之前最近一个非 1 的因子：坏掉的 1.0 要靠它顺延（见下面 repairAdjFactorSeries）
@@ -308,8 +369,14 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
     "SELECT date FROM trading_calendar WHERE is_open = 1 AND date > ? ORDER BY date LIMIT 1"
   );
   const marketBars = db.prepare("SELECT COUNT(*) AS n FROM kline_daily WHERE date = ?");
-  const r: SettleResult = { settled: 0, untriggered: 0, pending: 0, voided };
+  const r: SettleResult = { settled: 0, untriggered: 0, pending: 0, voided, failed: 0 };
   for (const p of preds) {
+    const exit = exitOf(p.variant_id, p.slot_config);
+    if (exit instanceof Error) {
+      r.failed++;
+      console.error(`[shadow] ${p.id} 离场器解析失败，本轮不结算：${exit.message}`);
+      continue;
+    }
     /**
      * 成交日必须是基准日的**下一个交易日**。那天这只票没有 K 线有两种原因：
      *   全市场都没有 → 日线还没采到，待定
@@ -338,21 +405,93 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
     if (bars.length === 0 || bars[0].date !== next) {
       const n = Number((marketBars.get(next) as { n: number }).n);
       if (n < MIN_MARKET_BARS) { r.pending++; continue; }
-      ins.run(p.id, "未触发", next, null, null, null, null, null, null, null, null, "成交日停牌", shanghaiTs());
+      ins.run(p.id, "未触发", next, null, null, null, null, null, null, null, null, "成交日停牌", shanghaiTs(), exit.key);
       r.untriggered++;
       continue;
     }
-    const s = settleShadow(
-      { triggerPx: p.trigger_px, stopPx: p.stop_px, targetPx: p.target_px, entryType: entryTypeOf(p.entry_type) }, bars,
-      {
-        horizon: SHADOW_HORIZON, slippage: DEFAULT_CONSTRAINTS.slippage, feeRate: DEFAULT_CONSTRAINTS.feeRate,
-        ...(baseFixed === undefined ? {} : { baseAdjFactor: baseFixed }),
-      },
-    );
+    /**
+     * 离场器钩子。账户纪律（baseline 与绝大多数变体）中和后不出手，不问 —— 省掉每笔每天一次视图，
+     * 也让 baseline 的结算与之前**同一条代码路径**。其余离场器看的原始日线 = 成交日之前一段 + 持有期，
+     * 视图按日期截断到当天收盘（见 exit-slot.ts 的"时点"）
+     */
+    let hook: ExitHook | undefined;
+    if (!exit.legacyEquivalent) {
+      const before = (barsBefore.all(p.code, p.base_date, EXIT_PRIOR_BARS) as any[]).reverse().map(toBar);
+      const after = rawBars.filter(b => b.o !== null && b.h !== null && b.l !== null && b.c !== null && b.vol !== null);
+      hook = slotExitHook({
+        exit, code: p.code, account: p.account, raw: [...before, ...after], bars, security: securityOf(p.code),
+        // 槽要读日线 / 证券元数据以外的东西时退回 sqlite 视图；quote 一样不给（收盘后判，现价 = 收盘）
+        fallbackView: d => ({ ...createSqliteView(db, `${d} 15:05:00`), quote: () => null }),
+      });
+    }
+    let s;
+    try {
+      s = settleShadow(
+        { triggerPx: p.trigger_px, stopPx: p.stop_px, targetPx: p.target_px, entryType: entryTypeOf(p.entry_type) }, bars,
+        {
+          horizon: SHADOW_HORIZON, slippage: DEFAULT_CONSTRAINTS.slippage, feeRate: DEFAULT_CONSTRAINTS.feeRate,
+          ...(baseFixed === undefined ? {} : { baseAdjFactor: baseFixed }),
+        },
+        hook,
+      );
+    } catch (e) {
+      // 离场器有 bug：这一笔不落表（不能当"离场器没出手"结掉），其它照常
+      r.failed++;
+      console.error(`[shadow] ${p.id} 离场器 ${exit.key} 抛错，本轮不结算：${(e as Error).message}`);
+      continue;
+    }
     if (s.status === "待定") { r.pending++; continue; }
     ins.run(p.id, s.status, s.entryDate, s.entryPx, s.exitDate, s.exitPx, s.exitReason,
-      s.grossPct, s.netPct, s.mfePct, s.maePct, s.note, shanghaiTs());
+      s.grossPct, s.netPct, s.mfePct, s.maePct, s.note, shanghaiTs(), exit.key);
     if (s.status === "未触发") r.untriggered++; else r.settled++;
   }
   return r;
+}
+
+/**
+ * 离场口径已过期的变体：有已结算行的 exit_slot（NULL 视为旧结算 = 账户纪律口径）
+ * 与变体**当前**离场器不一致。退役的也算 —— 退役判定若是拿错口径的样本做的，正需要重结来复核。
+ */
+export function staleExitVariants(db: Db): string[] {
+  const legacy = legacyExitKey();
+  const vs = db.prepare("SELECT id, slot_config FROM shadow_variant ORDER BY id").all() as Array<{ id: string; slot_config: string }>;
+  const keys = db.prepare(
+    `SELECT DISTINCT o.exit_slot AS k FROM shadow_outcome o JOIN shadow_pred p ON p.id = o.pred_id
+      WHERE p.variant_id = ? AND o.status = '已结算'`
+  );
+  const out: string[] = [];
+  for (const v of vs) {
+    let cur: string;
+    try { cur = resolveExitSlot(JSON.parse(v.slot_config) as SlotConfig).key; } catch { continue; }
+    const ks = (keys.all(v.id) as Array<{ k: string | null }>).map(r => r.k);
+    if (ks.some(k => !outcomeMatchesExit("已结算", k, cur, legacy))) out.push(v.id);
+  }
+  return out;
+}
+
+export interface ResettleResult extends SettleResult {
+  /** 删掉重算的旧结果条数（已结算 + 未触发；作废的不动） */
+  removed: number;
+}
+
+/**
+ * 重结算：把指定变体已经落定的结果（作废的除外）删掉，按当前离场器口径重新结一遍。
+ *
+ * 幂等：同样的 K 线、同样的槽版本，跑几遍结果都一样（只有 settled_at 会变）。
+ * 整个过程在一个事务里 —— 中途抛错就整体回滚，不会留下"删了还没重算"的空洞。
+ * K 线后来被补 / 被修过的，重结出来会跟当初不同，这正是重结算该反映的；
+ * 所以缺省只挑 staleExitVariants，不碰口径没变的变体（baseline 的数字不会因为重结而漂）。
+ * 重结之后仍不够结的（K 线被清掉了）回到"待定"，不落表。
+ */
+export function resettleShadow(db: Db, asOf: string, variantIds: string[]): ResettleResult {
+  if (variantIds.length === 0) return { removed: 0, settled: 0, untriggered: 0, pending: 0, voided: 0, failed: 0 };
+  return db.transaction(() => {
+    const del = db.prepare(
+      `DELETE FROM shadow_outcome
+        WHERE status != '作废' AND pred_id IN (SELECT id FROM shadow_pred WHERE variant_id = ?)`
+    );
+    let removed = 0;
+    for (const v of variantIds) removed += del.run(v).changes;
+    return { removed, ...settleShadowPending(db, asOf, { variantIds }) };
+  })();
 }

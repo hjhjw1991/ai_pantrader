@@ -28,6 +28,7 @@ import { activeStrategyPath } from "@/lib/strategy/registry";
 import { validateStrategyYaml } from "@/lib/strategy/schema";
 import { writeSlotsInText, writeParamInText, bumpPatch } from "@/lib/strategy/loader";
 import { snapshotStrategy, hasSnapshot } from "@/lib/ledger/strategy-snapshot";
+import { legacyExitKey, outcomeMatchesExit, resolveExitSlot } from "@/lib/shadow/exit-slot";
 import { pushNotification } from "@/lib/ui/notify";
 import { shanghaiTs } from "@/lib/data/clock";
 import { dailyReturns, maxDrawdown, welch, type Trade } from "@/lib/shadow/stats";
@@ -147,7 +148,7 @@ export function slotKeys(slots: SlotConfig): string[] {
   ];
 }
 
-interface LiveRow { baseDate: string; code: string; slotLock: string; status: string | null; netPct: number | null; exitDate: string | null; exitReason: string | null; stage: string | null }
+interface LiveRow { baseDate: string; code: string; slotLock: string; status: string | null; netPct: number | null; exitDate: string | null; exitReason: string | null; exitSlot: string | null; stage: string | null }
 
 interface LiveSet {
   /** 结清的基准日（当天的预测全部落定）→ 那天的交易 */
@@ -156,13 +157,17 @@ interface LiveSet {
 
 function liveSet(db: Db, variantId: string, slots: SlotConfig, lock: Record<string, string>, since: string | null): LiveSet {
   const rows = (db.prepare(
-    `SELECT p.base_date, p.code, p.slot_lock, o.status, o.net_pct, o.exit_date, o.exit_reason, p.stage
+    `SELECT p.base_date, p.code, p.slot_lock, o.status, o.net_pct, o.exit_date, o.exit_reason, o.exit_slot, p.stage
        FROM shadow_pred p LEFT JOIN shadow_outcome o ON o.pred_id = p.id
       WHERE p.variant_id = ? AND p.source = 'live' ORDER BY p.base_date, p.id`
   ).all(variantId) as any[]).map(r => ({
     baseDate: r.base_date, code: r.code, slotLock: r.slot_lock, status: r.status, netPct: r.net_pct,
-    exitDate: r.exit_date, exitReason: r.exit_reason, stage: r.stage,
+    exitDate: r.exit_date, exitReason: r.exit_reason, exitSlot: r.exit_slot, stage: r.stage,
   }) as LiveRow);
+  // 离场口径对不上的结算行（换了离场器、还没重结算）当"还没结"：那天整天不算共同结清日
+  let exitKey: string | null = null;
+  try { exitKey = resolveExitSlot(slots).key; } catch { /* 槽未注册：lockOk 那关也过不去 */ }
+  const legacyKey = legacyExitKey();
   const keys = slotKeys(slots);
   const okLock = new Map<string, boolean>();
   const lockOk = (s: string): boolean => {
@@ -186,7 +191,9 @@ function liveSet(db: Db, variantId: string, slots: SlotConfig, lock: Record<stri
     // 同一时刻出，一条作废就是整天作废（哨兵行也会被判作废）—— 当这天没跑过，不算共同结清日
     if (r.status === "作废") { voided.add(r.baseDate); continue; }
     if (r.code === "-") continue;                        // 0 候选的哨兵行：只证明那天跑过
-    if (r.status === null) { open.add(r.baseDate); continue; }
+    if (r.status === null || exitKey === null || !outcomeMatchesExit(r.status, r.exitSlot, exitKey, legacyKey)) {
+      open.add(r.baseDate); continue;
+    }
     days.get(r.baseDate)!.push({
       status: r.status as Trade["status"], netPct: r.netPct, exitDate: r.exitDate,
       exitReason: r.exitReason, stage: r.stage, baseDate: r.baseDate,

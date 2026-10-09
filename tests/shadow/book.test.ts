@@ -148,7 +148,7 @@ describe("settleShadowPending", () => {
 
   it("哨兵行不结算", () => {
     runShadowDay(t.db, opts(() => () => card([], "防守"), { variants: [{ id: "a", name: "a", slots: {} }] }));
-    expect(settleShadowPending(t.db, "2026-09-08")).toEqual({ settled: 0, untriggered: 0, pending: 0, voided: 0 });
+    expect(settleShadowPending(t.db, "2026-09-08")).toEqual({ settled: 0, untriggered: 0, pending: 0, voided: 0, failed: 0 });
   });
 
   /* ---------- 晚决策作废（用户 2026-10-09 选定）与进场方式 ---------- */

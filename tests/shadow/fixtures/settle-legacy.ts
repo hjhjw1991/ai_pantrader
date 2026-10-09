@@ -1,4 +1,10 @@
 /**
+ * 冻结的旧结算：25d8993 的 lib/shadow/settle.ts 原样拷贝，只把 settleShadow 改名为 settleShadowLegacy。
+ *
+ * 用途只有一个：证明"影子盘跑离场器"之后，baseline（账户纪律中和后不出手）的结算
+ * 与改之前逐笔一致。别改这个文件 —— 改了它，对拍就只是在拿新代码比新代码。
+ */
+/**
  * 影子盘结算：按止损 / 目标价模拟离场。纯函数，只吃 K 线。
  *
  * 口径是用户 2026-09-23 定的，与正式台账（持有 5 天看收盘）刻意不同：
@@ -22,16 +28,6 @@
  *
  * K 线不够（停牌、还没走完持有期）一律"待定"：拿半截结果结算，
  * 胜率会被"恰好先走完的那批"决定，而先走完的往往是更早碰到止损的。
- *
- * 离场器（用户 2026-10-09 选定"影子盘要跑离场器"）：可选的第四个参数 `exit` 是一个
- * **收盘后**问一次的钩子（由 lib/shadow/exit-slot.ts 用变体自己的离场器槽实现）。
- *   - 第 i 天收盘、仍在场、且 i < H−1 时问它（成交日收盘也问：收盘后决定、次日开盘卖，满足 T+1）
- *   - 它说清仓 → **下一个能卖的交易日开盘**出（一字跌停照样顺延）；说减仓 → 那天开盘卖掉一部分，
- *     余下的照常走止损 / 目标 / 期满；减仓一笔只执行一次。离场价按卖出比例加权平均
- *   - 第 H−1 天不问：那天收盘本来就期满离场，问了也没有能执行的时点
- *   - 止损 / 目标 / 跳空 / 期满的判定**一行不改**，钩子只能让仓位更早离场、不能推迟。
- *     不给钩子（或钩子永远不出手）时与 2026-10-09 之前的结算逐笔一致 —— baseline 的结算数字不动，
- *     tests/shadow/exit-slot.test.ts 留着一份冻结的旧实现做对拍
  */
 import type { DailyBar, EntryType } from "@/lib/contracts";
 
@@ -59,20 +55,7 @@ export interface SettleOpts {
   baseAdjFactor?: number;
 }
 
-/** 离场器 = 变体自己的离场器槽在某天收盘后判了清仓，次日开盘出（见文件头"离场器"一段） */
-export type ExitReason = "止损" | "目标" | "期满" | "离场器";
-
-/**
- * 离场器在某天收盘后的判定。keep = 判定执行后**留下**的比例：0 = 清仓，0.5 = 减半。
- * why 写进结算 note，给人看是哪条线触发的。
- */
-export interface ExitOrder { keep: number; why: string }
-
-/**
- * 收盘后问离场器。i = bars 的下标（成交日 = 0），entryPx 是成交日原始价尺度的成交价。
- * 调用方要保证它**只看得到 bars[0..i]**（及成交日之前的 K 线）—— 本模块不替它截断数据。
- */
-export type ExitHook = (i: number, entryPx: number) => ExitOrder | null;
+export type ExitReason = "止损" | "目标" | "期满";
 
 export interface ShadowSettlement {
   status: "已结算" | "未触发" | "待定";
@@ -107,7 +90,7 @@ const r6 = (x: number): number => Math.round(x * 1e6) / 1e6;
  *     不模拟排队（封单厚薄、排没排到），排队风险忽略。回测那边有按封单额的成交概率，这里没有
  * px = null 表示没成交，note 说明为什么。
  */
-export function entryFill(
+function entryFill(
   type: EntryType, d1: { o: number; h: number; l: number }, trigger: number,
 ): { px: number | null; note: string | null } {
   if (type === "突破") {
@@ -120,7 +103,7 @@ export function entryFill(
 }
 
 /** bars：基准日**之后**的日线，升序，原始价带复权因子 */
-export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts, exit?: ExitHook): ShadowSettlement {
+export function settleShadowLegacy(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts): ShadowSettlement {
   if (bars.length === 0) return { status: "待定", ...EMPTY, note: "基准日之后还没有 K 线（停牌或未到）" };
   const d1 = bars[0];
   // 计划价换算到成交日的原始价尺度（见 baseAdjFactor 的说明）
@@ -142,41 +125,19 @@ export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts, 
   let note: string | null = null;
   const lastIdx = o.horizon - 1 + (o.maxDefer ?? 10);
 
-  /**
-   * 离场器状态。rem = 还在场的比例；sold = 已卖部分的 Σ 比例×价（成交日尺度）。
-   * 不给钩子时 rem 恒为 1、sold 恒为 0，done 走与旧实现同一个算式（见 done 里的分支）
-   */
-  let rem = 1, sold = 0, trimmed = false;
-  // 写成 `null as …`：order 在闭包 ask 里改，直接写 `= null` 会让 TS 在循环里把它收窄成 null
-  let order = null as ExitOrder | null;
-  const addNote = (t: string) => { note = note === null ? t : `${note}；${t}`; };
-  const ask = (i: number) => {
-    if (exit === undefined || order !== null || deferred !== null || i >= o.horizon - 1) return;
-    const d = exit(i, entry);
-    if (d === null) return;
-    const keep = Math.min(1, Math.max(0, d.keep));
-    if (keep >= 1) return;
-    // 减仓一笔只执行一次：槽不知道这笔已经减过，同一条止盈线明天还会再判一次"减半"
-    if (keep > 0 && trimmed) return;
-    order = { keep, why: `${bars[i].date} 收盘 · ${d.why}` };
-  };
-
   const done = (i: number, px: number, reason: ExitReason): ShadowSettlement => {
     const s = o.slippage, f = o.feeRate;
-    // 没减过仓时直接用 px —— 写成 0 + 1×px 数值上也相等，但这里要的是"与旧实现同一个算式"
-    const avg = rem === 1 ? px : sold + rem * px;
-    const gross = (avg / entry - 1) * 100;
-    const net = ((avg * (1 - s) * (1 - f)) / (entry * (1 + s) * (1 + f)) - 1) * 100;
+    const gross = (px / entry - 1) * 100;
+    const net = ((px * (1 - s) * (1 - f)) / (entry * (1 + s) * (1 + f)) - 1) * 100;
     return {
       status: "已结算", entryDate: d1.date, entryPx: r6(entry),
-      exitDate: bars[i].date, exitPx: r6(avg), exitReason: reason,
+      exitDate: bars[i].date, exitPx: r6(px), exitReason: reason,
       grossPct: r6(gross), netPct: r6(net),
       mfePct: r6((Math.max(hi, px) / entry - 1) * 100), maePct: r6((Math.min(lo, px) / entry - 1) * 100),
       note,
     };
   };
 
-  ask(0);
   for (let i = 1; i < bars.length && i <= lastIdx; i++) {
     const b = bars[i];
     const bo = sc(b.o, b), bh = sc(b.h, b), bl = sc(b.l, b), bc = sc(b.c, b);
@@ -189,26 +150,11 @@ export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts, 
       if (deferred === null) {
         if (p.stopPx !== null && bl <= p.stopPx) deferred = "止损";
         else if (i >= o.horizon - 1) deferred = "期满";
-        if (deferred !== null) addNote(`${b.date} 一字跌停卖不出，顺延`);
+        if (deferred !== null) note = `${b.date} 一字跌停卖不出，顺延`;
       }
-      // 离场器已经下了单的，单子留着，下一个能卖的日子开盘执行；没下的照样收盘后问一次
-      if (order !== null && deferred === null) addNote(`${b.date} 一字跌停，离场器的单顺延`);
-      ask(i);
       continue;
     }
     if (deferred !== null) return done(i, bo, deferred);
-
-    // 离场器昨天收盘（或更早、被一字跌停顺延）下的单：今天开盘执行，先于盘中的止损 / 目标
-    if (order !== null) {
-      const ord: ExitOrder = order;
-      order = null;
-      if (ord.keep <= 0) { addNote(`离场器：${ord.why}`); return done(i, bo, "离场器"); }
-      sold += (rem - ord.keep * rem) * bo;
-      rem = ord.keep * rem;
-      trimmed = true;
-      hi = Math.max(hi, bo); lo = Math.min(lo, bo);
-      addNote(`离场器减仓至 ${Math.round(rem * 100)}%（${b.date} 开盘 ${r6(bo)}）：${ord.why}`);
-    }
 
     // 跳空：开盘价就越过了线，挂单在开盘成交
     if (p.stopPx !== null && bo <= p.stopPx) return done(i, bo, "止损");
@@ -222,7 +168,6 @@ export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts, 
 
     hi = Math.max(hi, bh); lo = Math.min(lo, bl);
     if (i === o.horizon - 1) return done(i, bc, "期满");
-    ask(i);
   }
   return { status: "待定", ...EMPTY, entryDate: d1.date, entryPx: r6(entry), note: note ?? "持有期还没走完" };
 }

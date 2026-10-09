@@ -45,6 +45,7 @@
     "backtest:walkforward": "tsx scripts/backtest-walkforward.ts",
     "backtest:cost-stress": "tsx scripts/backtest-cost-stress.ts",
     "shadow:switch": "tsx scripts/shadow-switch.ts",
+    "shadow:resettle": "tsx scripts/shadow-resettle.ts",
     "parity": "tsx scripts/parity.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
     "seed-strategies": "tsx scripts/seed-strategies.ts",
