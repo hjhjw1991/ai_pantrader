@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DRAWERS, drawerAt, drawerOf } from "@/lib/ui/drawers";
+import { DRAWERS, closedFlagAfterNav, drawerAt, drawerClosed, drawerOf } from "@/lib/ui/drawers";
 
 /**
  * 抽屉路由的判定。
@@ -42,14 +42,14 @@ describe("drawerOf", () => {
 });
 
 /**
- * 关闭后的显示规则：`closed = 点过关闭 || 不在抽屉路由`。
+ * 关闭后的显示规则：`closed = 点过关闭 || 不在抽屉路由`（drawerClosed，DrawerGate 用的就是它）。
  *
  * 后半条是关键：某一台 DrawerFrame 实例是不是该收起来，看的是**地址**，
  * 不是"这个实例自己有没有被点过关闭" —— 因为导航过程中 @drawer 槽会换成
  * loading.tsx 里另一台 DrawerFrame，那台没被点过。
  */
 describe("抽屉是否可见", () => {
-  const visible = (closedFlag: boolean, pathname: string) => !closedFlag && drawerAt(pathname) !== null;
+  const visible = (closedFlag: boolean, pathname: string) => !drawerClosed(closedFlag, drawerAt(pathname));
 
   it("打开中：看得见", () => {
     expect(visible(false, "/positions")).toBe(true);
@@ -62,5 +62,30 @@ describe("抽屉是否可见", () => {
   });
   it("再看还在抽屉路由上、且没点关闭：看得见（关过一次后重开仍有效）", () => {
     expect(visible(false, "/ledger")).toBe(true);
+  });
+});
+
+/**
+ * "点过关闭"这面旗的复位规则（closedFlagAfterNav，DrawerGate 的 effect 用的就是它）。
+ * 按 DrawerGate 的真实时序走一遍：关闭置旗 → 地址回到作战台 → 再进抽屉。
+ */
+describe("关闭旗的复位", () => {
+  it("关闭后回到作战台：旗不撤（撤了就是关了又弹）", () => {
+    expect(closedFlagAfterNav(true, drawerAt("/"))).toBe(true);
+  });
+  it("进入某个抽屉：旗撤掉", () => {
+    expect(closedFlagAfterNav(true, drawerAt("/positions"))).toBe(false);
+  });
+  it("完整一轮：开 → 关 → 回作战台 → 重开", () => {
+    let flag = false;
+    flag = closedFlagAfterNav(flag, drawerAt("/positions"));
+    expect(drawerClosed(flag, drawerAt("/positions"))).toBe(false);
+    flag = true;                                             // close()
+    expect(drawerClosed(flag, drawerAt("/positions"))).toBe(true);   // 路由还没落地也已收起
+    flag = closedFlagAfterNav(flag, drawerAt("/"));
+    expect(flag).toBe(true);
+    expect(drawerClosed(flag, drawerAt("/"))).toBe(true);
+    flag = closedFlagAfterNav(flag, drawerAt("/ledger"));
+    expect(drawerClosed(flag, drawerAt("/ledger"))).toBe(false);
   });
 });

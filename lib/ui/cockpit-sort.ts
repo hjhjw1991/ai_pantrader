@@ -41,7 +41,7 @@ export interface GroupSortOption {
 
 /** 距止损：止损价相对现价的位置。越接近 0 越危险，正数 = 止损已在现价上方（已破） */
 const toStop: GroupSortOption["value"] = (it) => rel(it.stopPx, it.price);
-/** 距触发：触发价相对现价的位置。越接近 0 越接近买点 */
+/** 距触发：触发价 / 现价 - 1。负数 = 还没到价，越接近 0 越接近买点；正数 = 现价已在触发价下方（已到价） */
 const toTrigger: GroupSortOption["value"] = (it) => rel(it.triggerPx, it.price);
 
 const CODE: GroupSortOption = { key: "code", label: "代码", title: "按代码升序", value: (it) => it.code };
@@ -61,7 +61,7 @@ const OPTIONS: Record<ItemGroup, GroupSortOption[]> = {
     { key: "size", label: "建议仓位", title: "引擎建议的这笔仓位占比，大的排最前", value: (it) => it.size },
     {
       key: "toTrigger", label: "距触发价",
-      title: "触发价相对现价的位置：越接近 0 越接近买点，负数 = 现价已在触发价下方（已到价）",
+      title: "触发价相对现价的位置：负数 = 还没到价，越接近 0 越接近买点；正数 = 现价已跌到触发价下方（已到价）",
       value: toTrigger,
     },
     RR,
@@ -78,7 +78,7 @@ const OPTIONS: Record<ItemGroup, GroupSortOption[]> = {
   观察: [
     {
       key: "toTrigger", label: "距触发价",
-      title: "触发价相对现价的位置：越接近 0 越接近买点，负数 = 现价已在触发价下方（已到价）",
+      title: "触发价相对现价的位置：负数 = 还没到价，越接近 0 越接近买点；正数 = 现价已跌到触发价下方（已到价）",
       value: toTrigger,
     },
     PCT,

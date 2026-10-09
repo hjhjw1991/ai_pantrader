@@ -7,6 +7,7 @@ import { toShanghaiWall } from "@/lib/ui/time";
 import { shanghaiDay } from "@/lib/data/clock";
 import { intradayIntervalMin } from "@/lib/data/schedule";
 import { useCollectScan, CollectProgress } from "@/components/CollectScan";
+import { dedupeMerge, liveCap, olderCursor } from "@/lib/ui/notice-list";
 
 /**
  * 实时条：1 分钟自动刷新 + SSE 推送 + 桌面通知 + 立即采集按钮。
@@ -33,32 +34,13 @@ const SCAN_MIN = intradayIntervalMin();
  * 不是截掉，是折叠 —— 且渲染只做前 10 条，翻页前列表一屏就装得下，不用靠 max-height 兜。
  */
 const PAGE_SIZE = 10;
-/**
- * 会话内保留上限。
- *
- * SSE 一路往里塞，两天不关页面就能攒出上千条，而人根本不会翻到那么远。
- * 超过的部分丢最旧的（它们随时能从 /api/notifications 重新拉回来，不丢数据）。
- */
-const MAX_KEPT = 500;
+/* 会话内保留上限（MAX_KEPT）与合并规则在 lib/ui/notice-list.ts，那里有它和"加载更多"怎么共存的说明 */
 
 type Notice = {
   id: number; ts: string; kind: string;
   severity: "critical" | "warn" | "info";
   title: string; body: string | null;
 };
-
-/**
- * 按 id 去重合并，保持新→旧。
- *
- * SSE 推来的和历史翻页拉回来的会在中间地带撞车（同一条通知两边都到），
- * 直接 concat 会让同一个 id 出现两次，而 React 的 key 重复是运行时警告级别的脏数据。
- */
-function dedupeMerge(prev: Notice[], incoming: Notice[]): Notice[] {
-  const byId = new Map<number, Notice>();
-  for (const n of prev) byId.set(n.id, n);
-  for (const n of incoming) byId.set(n.id, n);   // 后来的覆盖：服务端口径是准的
-  return [...byId.values()].sort((a, b) => b.id - a.id).slice(0, MAX_KEPT);
-}
 
 export function LiveBar() {
   const router = useRouter();
@@ -81,6 +63,11 @@ export function LiveBar() {
     () => typeof Notification !== "undefined" && Notification.permission === "granted"
   );
   const lastIdRef = useRef(0);
+  /**
+   * 铃铛里已展开的条数，给 SSE 回调截断用（回调闭包里读不到最新的 revealed state）。
+   * 推新通知时不能把人已经翻出来看的旧通知截掉，见 liveCap。
+   */
+  const revealedRef = useRef(PAGE_SIZE);
 
   // ── 1 分钟软刷新 ──
   useEffect(() => {
@@ -105,7 +92,7 @@ export function LiveBar() {
       const n: Notice = JSON.parse((e as MessageEvent).data);
       lastIdRef.current = Math.max(lastIdRef.current, n.id);
       // 不再截断成 8 条：显示多少由铃铛里的"加载更多"管，这里是数据源不该替 UI 做决定
-      setNotices(prev => dedupeMerge(prev, [n]));
+      setNotices(prev => dedupeMerge(prev, [n], liveCap(revealedRef.current)));
       router.refresh();
       // 只有 critical / warn 才弹桌面通知（spec §13：只有关键信号才响）。
       // info 也弹的话，用户两天后就会关掉通知权限，等于把 critical 一起弄哑
@@ -141,6 +128,7 @@ export function LiveBar() {
   const [open, setOpen] = useState(false);
   const [seen, setSeen] = useState(0);
   const [revealed, setRevealed] = useState(PAGE_SIZE);
+  useEffect(() => { revealedRef.current = revealed; }, [revealed]);
   /** 服务端通知总数。用于算"还有几条"，以及判断该不该显示加载更多 */
   const [total, setTotal] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -167,7 +155,8 @@ export function LiveBar() {
       const items: Notice[] = d.items ?? [];
       // 总数而不是"剩余"：SSE 首推已经给过一批，服务端算的剩余会把重复的那部分算两遍
       setTotal(t => Math.max(t, Number(d.total ?? 0)));
-      setNotices(prev => dedupeMerge(prev, items));
+      // 人主动翻出来的旧通知不截断：截了游标就不前进，"加载更多"会原地打转
+      setNotices(prev => dedupeMerge(prev, items, null));
       return items;
     } catch {
       // 拿不到历史不许伪装成"没有更多"，否则那条加载更多按钮会静默失效
@@ -203,8 +192,7 @@ export function LiveBar() {
   const loadMore = async () => {
     // 本地已经拿到的先展开（免掉一次往返），不够了再去服务端要下一页
     if (notices.length < revealed + PAGE_SIZE && hidden > 0) {
-      const oldest = notices.length === 0 ? 0 : notices[notices.length - 1].id;
-      await loadOlder(oldest);
+      await loadOlder(olderCursor(notices));
     }
     setRevealed(r => r + PAGE_SIZE);
   };

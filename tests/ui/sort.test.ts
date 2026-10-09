@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  defaultDir, nextSortState, sortRows, type SortState, type SortableValue,
+  absValue, defaultDir, nextSortState, sortRows, type SortState, type SortableValue,
 } from "@/lib/ui/sort";
 
 type Row = { code: string; mv: SortableValue };
@@ -145,5 +145,38 @@ describe("nextSortState", () => {
     const trs: Row[] = [{ code: "a", mv: "银行Ⅱ" }];
     expect(nextSortState<Row>(prev, "name", trs, () => "银行Ⅱ"))
       .toEqual({ key: "name", dir: "asc" });
+  });
+});
+
+/**
+ * 观察池「距触发%」：显示带符号的 (现价-触发价)/触发价，表头说"最接近买点的排前面"。
+ * 按带符号值 + 数值默认降序排，排最前的是离得最远的那只 —— 和表头正好相反。
+ * 所以排序取 |偏离|、首次点击升序。
+ */
+describe("距触发% 排序：|偏离| 升序起手", () => {
+  type W = { code: string; ratio: number | null };
+  const ws: W[] = [
+    { code: "far", ratio: 0.2 },      // 还在触发价上方 20%
+    { code: "none", ratio: null },    // 无快照
+    { code: "near", ratio: 0.01 },    // 差 1%
+    { code: "hit", ratio: -0.03 },    // 已跌破触发价 3%
+  ];
+  const by = absValue<W>((r) => r.ratio);
+
+  it("absValue：数值取绝对值，null 保持 null", () => {
+    expect(ws.map(by)).toEqual([0.2, null, 0.01, 0.03]);
+  });
+
+  it("指定 firstDir=asc 时首次点击是升序，循环仍是 升 → 降 → 取消", () => {
+    const a = nextSortState<W>(null, "deltaRatio", ws, by, "asc");
+    expect(a).toEqual({ key: "deltaRatio", dir: "asc" });
+    const b = nextSortState<W>(a, "deltaRatio", ws, by, "asc");
+    expect(b).toEqual({ key: "deltaRatio", dir: "desc" });
+    expect(nextSortState<W>(b, "deltaRatio", ws, by, "asc")).toBeNull();
+  });
+
+  it("首次点击：最接近买点的在前，无值仍排最后", () => {
+    const st = nextSortState<W>(null, "deltaRatio", ws, by, "asc")!;
+    expect(sortRows(ws, by, st.dir).map((r) => r.code)).toEqual(["near", "hit", "far", "none"]);
   });
 });

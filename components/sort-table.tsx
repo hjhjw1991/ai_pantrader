@@ -31,13 +31,21 @@ import {
 /** 列的排序取值。`key → 取值函数`，不带函数的列就是不可排 */
 export type SortValues<T> = Record<string, ((r: T) => SortableValue) | undefined>;
 
-export function useTableSort<T>(rows: T[], values: SortValues<T>) {
+/**
+ * @param firstDirs 个别列的首次点击方向（覆盖"数值降序/文本升序"的默认规则），
+ *   给"越小越要紧"的数值列用。
+ */
+export function useTableSort<T>(
+  rows: T[],
+  values: SortValues<T>,
+  firstDirs?: Partial<Record<string, SortDir>>
+) {
   const [sort, setSort] = useState<SortState<T> | null>(null);
 
   function toggle(key: string) {
     const value = values[key];
     if (!value) return;
-    setSort((prev) => nextSortState(prev, key, rows, value));
+    setSort((prev) => nextSortState(prev, key, rows, value, firstDirs?.[key]));
   }
 
   const value = sort ? values[sort.key] : undefined;

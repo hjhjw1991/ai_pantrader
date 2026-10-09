@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { BacktestReport, SweepReport } from "@/lib/contracts/backtest";
 import { BacktestReportView } from "@/components/BacktestReportView";
-import { useArchiveRefresh, useArchiveRows } from "@/components/ArchiveSync";
+import { deleteOutcome, useArchiveRefresh, useArchiveRows } from "@/components/ArchiveSync";
 import { NoRows } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
 import type { ReportSummary } from "@/lib/ui/queries";
@@ -64,18 +64,30 @@ export function ReportArchive({ rows: serverRows, keep }: { rows: ReportSummary[
     try {
       const r = await fetch(`/api/backtest/reports?id=${encodeURIComponent(id)}`, { method: "DELETE" });
       const j = await r.json().catch(() => ({}));
-      // 服务端没删到就如实报错（比如这份已经被删过了），不拿"已删除"糊过去
-      if (!r.ok) throw new Error(j?.error ?? `HTTP ${r.status}`);
+      const outcome = deleteOutcome(r);
+      // 服务端没删到就如实报错，不拿"已删除"糊过去
+      if (outcome === "failed") throw new Error(j?.error ?? `HTTP ${r.status}`);
 
       if (openId === id) { setOpenId(null); setReport(null); setSweep(null); }
 
-      // 列表没取到也如实说一句：整页 refresh 仍会发起，最终会对齐，
+      // 列表没取到也如实说一句：整页 refresh 仍会发起（ArchiveSync 里无论成败都发），最终会对齐，
       // 但"已删除"这句话不能建立在没拿到的列表上
-      setNote(
-        await refresh()
-          ? { kind: "ok", text: "已删除" }
-          : { kind: "warn", text: "已删除，但列表没取到 —— 刷新页面可见" }
-      );
+      const listed = await refresh();
+      if (outcome === "alreadyGone") {
+        // 404 = 点之前就没了。不当错误报：照样刷新把这条鬼行清掉，再说一句它本来就不在了
+        setNote({
+          kind: "warn",
+          text: listed
+            ? "这份存档已经不在了（可能刚在别处删过，或被保留数挤掉），列表已刷新"
+            : "这份存档已经不在了，但列表没取到 —— 刷新页面可见",
+        });
+      } else {
+        setNote(
+          listed
+            ? { kind: "ok", text: "已删除" }
+            : { kind: "warn", text: "已删除，但列表没取到 —— 刷新页面可见" }
+        );
+      }
     } catch (e) {
       setErr((e as Error).message);
     } finally {

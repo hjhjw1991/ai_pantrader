@@ -71,6 +71,19 @@ export function defaultDir<T>(rows: T[], value: (r: T) => SortableValue): SortDi
   return "desc";   // 整列都无值：给个默认值，方向无所谓
 }
 
+/**
+ * 把一个数值取值函数包成"只看大小、不分正负"的版本，null 照旧是 null（仍排最后）。
+ *
+ * 给「距触发%」这类带符号的偏离用：表里显示 +3% / -1%，但"哪只最接近"
+ * 问的是离 0 多远。直接按带符号值排，降序排最前的是离得最远的那只。
+ */
+export function absValue<T>(value: (r: T) => SortableValue): (r: T) => SortableValue {
+  return (r) => {
+    const v = value(r);
+    return typeof v === "number" ? Math.abs(v) : v;
+  };
+}
+
 export type SortState<T = unknown> = { key: string; dir: SortDir };
 
 /**
@@ -86,9 +99,14 @@ export function nextSortState<T>(
   prev: SortState<T> | null,
   key: string,
   rows: T[],
-  value: (r: T) => SortableValue
+  value: (r: T) => SortableValue,
+  /**
+   * 这一列指定的首次方向，覆盖 defaultDir 的"数值给降序"。
+   * 用于"越小越要紧"的数值列 —— 例如观察池「距触发%」按 |偏离| 升序，最接近买点的排前面。
+   */
+  firstDir?: SortDir
 ): SortState<T> | null {
-  const first = defaultDir(rows, value);
+  const first = firstDir ?? defaultDir(rows, value);
   if (prev === null || prev.key !== key) return { key, dir: first };
   // 已经在默认方向 → 翻到反向；已经翻过 → 取消
   return prev.dir === first ? { key, dir: first === "asc" ? "desc" : "asc" } : null;

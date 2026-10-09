@@ -61,7 +61,12 @@ function useSubmit() {
    * 让用户以为删掉了而其实没删，是最糟的一种反馈。
    */
   async function call(
-    url: string, method: string, body?: unknown
+    url: string, method: string, body?: unknown,
+    /**
+     * HTTP 200 但业务上没办成时，返回要显示的错误文字（例如移出观察池回了 removed:false）；
+     * 办成了返回 null。不传 = 只看 HTTP 状态。
+     */
+    check?: (j: Record<string, unknown>) => string | null
   ): Promise<Record<string, unknown> | null> {
     setBusy(true);
     setMsg(null);
@@ -74,6 +79,12 @@ function useSubmit() {
       });
       const j = (await r.json().catch(() => ({}))) as Record<string, unknown>;
       if (!r.ok) throw new Error(String(j?.error ?? `HTTP ${r.status}`));
+      const failed = check?.(j) ?? null;
+      if (failed !== null) {
+        // 没办成就不刷新：屏幕上的数据本来就是对的，刷了只会让人以为动过
+        setMsg({ kind: "err", text: failed });
+        return null;
+      }
       setMsg({ kind: "ok", text: String(j.note ?? "已完成") });
       startTransition(() => router.refresh());
       return j;
@@ -215,7 +226,12 @@ export function WatchpoolForm({ accountIds = [] }: { accountIds?: string[] }) {
  * 写下来的（买入逻辑、触发价、止损），批量删的工具会让人不再逐条看。
  */
 export function WatchpoolRemoveButton({ code }: { code: string }) {
-  const { busy, send } = useSubmit();
+  /*
+   * 用 call 不用 send：后端对"重复点 / 早已不在池里"回的是 200 + removed:false，
+   * send 只看 HTTP 状态，会把没移出的也当成"已保存"。失败原因要显示在按钮旁边 ——
+   * 这一格原来不渲染 msg，移出失败时界面毫无反应。
+   */
+  const { busy, pending, msg, call } = useSubmit();
   const [armed, setArmed] = useState(false);
   return (
     <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -233,7 +249,11 @@ export function WatchpoolRemoveButton({ code }: { code: string }) {
             setArmed(true);
             return;
           }
-          if (await send("/api/signal/watchpool", "DELETE", { code })) setArmed(false);
+          const j = await call(
+            "/api/signal/watchpool", "DELETE", { code },
+            (r) => (r.removed === false ? `${code} 没有移出：不在观察池里（可能已被移出）` : null),
+          );
+          if (j) setArmed(false);
         }}
       >
         {armed ? "确认移出？" : "移出"}
@@ -248,6 +268,7 @@ export function WatchpoolRemoveButton({ code }: { code: string }) {
           取消
         </button>
       ) : null}
+      <Msg msg={msg} pending={pending} />
     </span>
   );
 }
@@ -259,17 +280,21 @@ export function WatchpoolRemoveButton({ code }: { code: string }) {
  * 触发价、止损、买入逻辑重新手填一遍 —— 而那些值本来就在库里没丢。
  */
 export function WatchpoolRestoreButton({ code }: { code: string }) {
-  const { busy, send } = useSubmit();
+  // 后端对"不在池里 / 已经在池中"回 409，错误原文要显示出来，不能点了没反应
+  const { busy, pending, msg, send } = useSubmit();
   return (
-    <button
-      type="button"
-      className={btnCls + " py-0.5 hover:text-ink"}
-      disabled={busy}
-      onClick={() => send("/api/signal/watchpool", "PATCH", { code })}
-      title="放回观察池。触发价、止损、买入逻辑都还是原来那套，不重置"
-    >
-      放回
-    </button>
+    <span className="inline-flex items-center gap-1 whitespace-nowrap">
+      <button
+        type="button"
+        className={btnCls + " py-0.5 hover:text-ink"}
+        disabled={busy}
+        onClick={() => send("/api/signal/watchpool", "PATCH", { code })}
+        title="放回观察池。触发价、止损、买入逻辑都还是原来那套，不重置"
+      >
+        放回
+      </button>
+      <Msg msg={msg} pending={pending} />
+    </span>
   );
 }
 

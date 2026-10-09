@@ -29,3 +29,26 @@ export function drawerAt(pathname: string | null | undefined): DrawerSlug | null
   if (!pathname) return null;
   return DRAWERS.find(d => pathname === `/${d.slug}`)?.slug ?? null;
 }
+
+// ─────────────────────────── 抽屉槽的开关状态（DrawerGate 用） ───────────────────────────
+
+/**
+ * 抽屉是否已经关掉 = 点过关闭（即时生效的那一下），**或者**地址已经不在任何抽屉里。
+ *
+ * 后半句是给那些不走 DrawerFrame 关闭按钮的路径兜的：侧边栏的数字键、0 回作战台、
+ * 抽屉里的链接、浏览器后退。认地址而不是认哪个组件按下的键，一条规则覆盖所有关法。
+ * 拆成纯函数放这里，是为了让测试跑的就是 DrawerGate 真用的那一条，而不是测试里抄一份。
+ */
+export function drawerClosed(closedFlag: boolean, drawer: DrawerSlug | null): boolean {
+  return closedFlag || drawer === null;
+}
+
+/**
+ * 地址落定后"点过关闭"这面旗怎么变：**只在进入某个抽屉时复位**，其余情况原样保留。
+ *
+ * 不能写成"路径一变就复位"：push("/") 完成那一刻路径变了，槽里可能正停在 loading.tsx，
+ * 一复位就是"关了 → 弹回来显示加载中 → 再关"。/positions → / 不动，/ → /positions 才开盖。
+ */
+export function closedFlagAfterNav(closedFlag: boolean, drawer: DrawerSlug | null): boolean {
+  return drawer ? false : closedFlag;
+}

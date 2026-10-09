@@ -152,14 +152,18 @@ describe("applyGroupSort", () => {
    * 距触发价 = 触发价 / 现价 - 1，越接近 0 越接近买点，降序时它就是排在最前面的 ——
    * 这个方向对了，默认点开就能用。
    */
-  it("观察按距触发价降序：最接近买点的在前（负数 = 现价已到触发价下方）", () => {
+  it("观察按距触发价降序：已到价的（正数，现价跌到触发价下方）最前，其次最接近买点的", () => {
     const list = [
       item("观察", "600000", { price: 10, triggerPx: 8 }),      // -0.20，还差得远
       item("观察", "300750", { price: 10, triggerPx: 9.9 }),    // -0.01，基本到价
       item("观察", "000001", { price: 10, triggerPx: 9 }),      // -0.10
+      item("观察", "002594", { price: 9, triggerPx: 9.9 }),     // +0.10，现价已在触发价下方 = 已到价
     ];
-    const out = applyGroupSort(list, findSortOption("观察", "toTrigger"), "desc");
-    expect(keys(out)).toEqual(["300750", "000001", "600000"]);
+    const by = findSortOption("观察", "toTrigger")!;
+    expect(by.value(list[3])).toBeCloseTo(0.1, 10);
+    expect(by.value(list[3]) as number).toBeGreaterThan(0);
+    const out = applyGroupSort(list, by, "desc");
+    expect(keys(out)).toEqual(["002594", "300750", "000001", "600000"]);
   });
 
   it("持仓按距止损降序：最贴近止损的在前", () => {

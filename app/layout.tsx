@@ -5,6 +5,7 @@ import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { DrawerGate } from "@/components/drawer/DrawerGate";
 import { ChunkReloadGuard } from "@/components/ChunkReloadGuard";
+import { chunkGuardInlineScript } from "@/lib/ui/chunk-guard";
 import { systemStatus } from "@/lib/ui/status";
 
 export const metadata: Metadata = {
@@ -36,6 +37,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
    */
   return (
     <html lang="zh-CN">
+      <head>
+        {/*
+         * 代码块失效自救必须在 HTML 解析时就挂上：最常见的白屏是首屏 <script src> 404，
+         * 那时还没水合，ChunkReloadGuard 的 useEffect 根本跑不到。规则与冷却见 lib/ui/chunk-guard.ts
+         */}
+        <script dangerouslySetInnerHTML={{ __html: chunkGuardInlineScript() }} />
+      </head>
       <body className="h-screen overflow-hidden flex bg-bg text-ink">
         <ChunkReloadGuard />
         <DrawerGate>

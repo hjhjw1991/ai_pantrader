@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { drawerAt } from "@/lib/ui/drawers";
+import { closedFlagAfterNav, drawerAt, drawerClosed } from "@/lib/ui/drawers";
 
 /**
  * 「抽屉已经关掉了」这件事是**全局**的，不属于某一个 DrawerFrame 实例。
@@ -59,11 +59,11 @@ export function DrawerGate({ children }: { children: ReactNode }) {
    * 抽屉里的链接、浏览器后退。它们落地时 pathname 变了，槽里那台 DrawerFrame
    * 就该跟着收起来 —— 认地址而不是认哪个组件按下的键，一条规则覆盖所有关法。
    */
-  const closed = closedFlag || drawer === null;
+  const closed = drawerClosed(closedFlag, drawer);
 
-  // 回头再开抽屉时把上一次记的"关门"抹掉
+  // 回头再开抽屉时把上一次记的"关门"抹掉（规则见 closedFlagAfterNav）
   useEffect(() => {
-    if (drawer) setClosedFlag(false);
+    setClosedFlag(f => closedFlagAfterNav(f, drawer));
   }, [drawer]);
 
   const close = useCallback(() => {

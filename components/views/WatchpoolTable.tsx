@@ -6,6 +6,7 @@ import { VsMarketTag } from "@/components/MoodBar";
 import { SortHead, SortNote, useTableSort, type SortValues } from "@/components/sort-table";
 import { WatchpoolRemoveButton } from "@/components/forms";
 import { fmtTs } from "@/lib/ui/format";
+import { absValue } from "@/lib/ui/sort";
 import type { WatchView } from "@/lib/ui/views";
 
 /**
@@ -17,6 +18,8 @@ import type { WatchView } from "@/lib/ui/views";
  *
  * 「距触发%」也开放排序（顺带的），它回答的是"哪几只最接近买点"——
  * 这个问法比"哪几只最贵"更贴近观察池的用途，两者互不冲突。
+ * 显示的是带符号的 (现价-触发价)/触发价，但排序取的是**绝对值、首次点击升序**：
+ * 按带符号值降序排，排最前的是离触发价最远（涨得最高）的那只，和表头说的正好相反。
  */
 /**
  * 触发价买入到止损的距离 = 这一单的最大计划亏损比例。
@@ -45,13 +48,13 @@ export function WatchpoolTable({
     price: (r) => r.quote?.price ?? null,
     triggerPx: (r) => r.row.triggerPx,
     delta: (r) => r.dist.delta,
-    deltaRatio: (r) => r.dist.deltaRatio,
+    deltaRatio: absValue((r) => r.dist.deltaRatio),
     vs: (r) => r.vsMarket,
     stopPx: (r) => r.row.stopPx,
     risk: riskRatioOf,
     addedAt: (r) => r.row.addedAt,
   };
-  const { sort, toggle, clear, rows: shown } = useTableSort(rows, values);
+  const { sort, toggle, clear, rows: shown } = useTableSort(rows, values, { deltaRatio: "asc" });
   const COLS: Array<{
     key: string; label: string; right?: boolean; sortable?: boolean; title?: string; cls?: string;
   }> = [
@@ -68,7 +71,10 @@ export function WatchpoolTable({
     { key: "price", label: "现价", right: true, title: "按股价排序（无快照的排最后）" },
     { key: "triggerPx", label: "触发价", right: true },
     { key: "delta", label: "距触发", right: true },
-    { key: "deltaRatio", label: "距触发%", right: true, title: "最接近买点的排前面" },
+    {
+      key: "deltaRatio", label: "距触发%", right: true,
+      title: "按与触发价的偏离幅度（绝对值）排序：首次点击最接近买点的排前面；正数 = 现价还在触发价上方，负数 = 已跌到触发价下方",
+    },
     { key: "status", label: "状态", sortable: false },
     { key: "vs", label: "vs市场", right: true },
     { key: "stopPx", label: "止损价", right: true },
