@@ -141,6 +141,27 @@ describe("评估器·游资手法", () => {
     expect(low!.triggerPx).toBe(10.67);   // 11 × 0.97
   });
 
+  it("进场方式：打板 / 半路触发价在昨收上方 → 突破；低吸 / 首阴不带键（缺省即低吸）", () => {
+    // 打板挂涨停价是触价单：按低吸撮合的话"最低价 ≤ 涨停价"几乎天天成立，等于每天开盘就买到
+    const board = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "打板" } } });
+    const half = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "半路" } } });
+    const low = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "低吸" } } });
+    expect(board!.entryType).toBe("突破");
+    expect(half!.entryType).toBe("突破");
+    expect(low).toBeDefined();
+    expect("entryType" in low!).toBe(false);
+    // 半路叠 MA5 上限、把挂价压回昨收下方 → 以最终挂出去的价为准，回到低吸
+    const capped = cand({ 评估器: { 用: "游资手法", 参数: { 手法: "半路", 不高于MA5: true } } });
+    expect(capped!.triggerPx).toBeLessThanOrEqual(11);
+    expect("entryType" in capped!).toBe(false);
+  });
+
+  it("baseline 默认买点（昨收 −3%）的卡片不带 entryType —— 对照组卡片形状不变", () => {
+    const c = run({}, { zt: zt1 }).candidates[0];
+    expect(c).toBeDefined();
+    expect("entryType" in c).toBe(false);
+  });
+
   it("手法写错回落低吸并告警，不静默按未知手法处理", () => {
     const r = run({ 评估器: { 用: "游资手法", 参数: { 手法: "梭哈" } } }, { zt: zt1 });
     expect(r.warnings.some(w => w.includes("无法解释"))).toBe(true);

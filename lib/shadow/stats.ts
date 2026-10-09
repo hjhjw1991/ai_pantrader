@@ -3,6 +3,8 @@
  *
  * 口径（毕业门槛直接读这些数，改之前先看 ④期3 的判定）：
  *   - 只算"已结算"的；"未触发"只进触发率
+ *   - "作废"（决策晚于成交日 09:25，见 book.ts voidLateShadow）当它不存在：
+ *     不进触发率、胜率、期望、回撤、日度收益，也不占样本覆盖的起止日；只单独报个数
  *   - 胜率 = 净收益 > 0 的占比（净 = 扣双边滑点与费率）
  *   - 期望 = 平均净收益（百分点 / 笔）—— 毕业比的就是它
  *   - 盈亏比 = 平均盈利 / |平均亏损|；没有亏损时为 null，不是无穷大
@@ -13,7 +15,7 @@
 import { mean, stdevPop } from "@/lib/factors/util";
 
 export interface Trade {
-  status: "已结算" | "未触发";
+  status: "已结算" | "未触发" | "作废";
   netPct: number | null;
   exitDate: string | null;
   exitReason: string | null;
@@ -24,6 +26,8 @@ export interface Trade {
 export interface Summary {
   settled: number;
   untriggered: number;
+  /** 作废条数，只给人看"有多少样本因为晚决策被剔掉了"，不参与任何其它数 */
+  voided: number;
   triggerRate: number | null;
   winRate: number | null;
   meanNet: number | null;
@@ -56,7 +60,9 @@ export function maxDrawdown(ts: Trade[]): number | null {
   return r6(dd);
 }
 
-export function summarize(ts: Trade[]): Summary {
+export function summarize(all: Trade[]): Summary {
+  const voided = all.filter(t => t.status === "作废").length;
+  const ts = all.filter(t => t.status !== "作废");
   const xs = nets(ts);
   const untriggered = ts.filter(t => t.status === "未触发").length;
   const wins = xs.filter(x => x > 0), losses = xs.filter(x => x < 0);
@@ -78,7 +84,7 @@ export function summarize(ts: Trade[]): Summary {
   }
   const dates = ts.map(t => t.baseDate).sort();
   return {
-    settled: xs.length, untriggered,
+    settled: xs.length, untriggered, voided,
     triggerRate: xs.length + untriggered === 0 ? null : r6(xs.length / (xs.length + untriggered)),
     winRate: xs.length === 0 ? null : r6(wins.length / xs.length),
     meanNet: xs.length === 0 ? null : r6(mean(xs)),
@@ -106,6 +112,8 @@ export function summarize(ts: Trade[]): Summary {
  * 有成交也有未触发的日子，未触发的那几份照样占分母（2026-10-08 修正：
  * 之前这种日子只平均已结算的几笔，把日度收益与 t 都抬高了）。
  *
+ * 作废的（晚决策）当它不存在：不进分子也不进分母。
+ *
  * 还没落定的（已结算但 netPct 为空、或其它非"已结算 / 未触发"的状态，如持有中）
  * 既不进分子也不进分母：它的结果还不知道，记 0 会把还在路上的盈亏说成"没兑现"。
  * 正常情况下这种行进不来 —— 待定的不落 shadow_outcome，switch 那边整天剔除有未结的日子；
@@ -114,6 +122,7 @@ export function summarize(ts: Trade[]): Summary {
 export function dailyReturns(ts: Trade[]): number[] {
   const byDay = new Map<string, { sum: number; n: number }>();
   for (const t of ts) {
+    if (t.status === "作废") continue;                  // 作废：当它不存在
     const settled = t.status === "已结算" && t.netPct !== null;
     if (!settled && t.status !== "未触发") continue;   // 未落定：不计入当天
     const d = byDay.get(t.baseDate) ?? { sum: 0, n: 0 };

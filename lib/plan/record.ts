@@ -1,5 +1,5 @@
 import type { Db } from "@/lib/db";
-import type { Prediction, SignalCard } from "@/lib/contracts";
+import { entryTypeOf, type Prediction, type SignalCard } from "@/lib/contracts";
 import { recordPredictions } from "@/lib/ledger/record";
 import { tradingDayOffset } from "@/lib/ledger/reconcile";
 import { addDays } from "@/lib/data/clock";
@@ -87,6 +87,8 @@ export function planPredictions(
     action: c.action,
     account: c.account,
     triggerPx: c.triggerPx,
+    // 打板 / 半路这类触发价在昨收上方的是触价单，结算按"最高价 ≥ 触发价"撮合（见 EntryType）
+    entryType: entryTypeOf(c.entryType),
     stopPx: c.stopPx,
     size: c.size,
     thesis: c.thesis,

@@ -1,7 +1,7 @@
 import type { Db } from "@/lib/db";
 import type { Verdict } from "@/lib/contracts";
 import { countsTowardWinRate } from "@/lib/contracts";
-import { predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
+import { NOT_VOID, predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
 
 /**
  * 推荐质量复盘（本文件是"胜率>60%"这个目标的唯一口径来源）。
@@ -91,7 +91,7 @@ export function review(db: Db, filter: LedgerFilter = {}): ReviewStats {
   const rows = db.prepare(
     `SELECT o.verdict, o.actual_pct, o.triggered, o.mfe_pct, o.mae_pct
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
-     WHERE 1=1${w.sql}`
+     WHERE 1=1${NOT_VOID}${w.sql}`
   ).all(...w.params) as Row[];
 
   let triggerable = 0, triggered = 0, decided = 0, hit = 0, neutral = 0;

@@ -18,7 +18,7 @@
 import type { FactorRegistry, FactorResult } from "@/lib/contracts/factor";
 import type { PointInTimeView } from "@/lib/contracts/pit";
 import type {
-  AccountId, Candidate, EnvAssessment, Phase, StrategyConfig,
+  AccountId, Candidate, EntryType, EnvAssessment, Phase, StrategyConfig,
 } from "@/lib/contracts/strategy";
 
 /**
@@ -90,6 +90,8 @@ export interface EvaluatedCandidate {
   targetPx: number | null;
   /** 盈亏比 =(目标位 − 触发价)/(触发价 − 止损价)。任一端缺失给 null，不许填 0 */
   rrRatio: number | null;
+  /** 进场方式，缺省 = 低吸。见 Candidate.entryType */
+  entryType?: EntryType;
   thesis: string;
   passedFilters: string[];
   factors: FactorResult<any>[];

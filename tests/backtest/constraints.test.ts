@@ -214,3 +214,26 @@ describe("T+1", () => {
     expect(sellableQty({ qty: 1000, openDate: "2026-03-02" }, "2026-03-02", { ...DEFAULT_CONSTRAINTS, t1: false })).toBe(1000);
   });
 });
+
+describe("evaluateFill · 突破单（触价）", () => {
+  const S = 1 + DEFAULT_CONSTRAINTS.slippage;
+  const bo = (limitPx: number) => ({ code: "600000", side: "buy" as const, qty: 1000, limitPx, entryType: "突破" as const });
+
+  it("最高价 < 触发价 → 未触及；低吸口径同一根 K 线会成交", () => {
+    const m = normalMarket();   // 开 10.1 高 10.5 低 9.9
+    expect(evaluateFill(bo(10.6), m, DEFAULT_CONSTRAINTS).blockedBy).toBe("未触及限价");
+    expect(evaluateFill({ ...bo(10.6), entryType: "低吸" }, m, DEFAULT_CONSTRAINTS).filled).toBe(true);
+  });
+
+  it("盘中涨到触发价 → 按触发价；跳空高开 → 按开盘价", () => {
+    expect(evaluateFill(bo(10.4), normalMarket(), DEFAULT_CONSTRAINTS).px).toBeCloseTo(10.4 * S, 10);
+    expect(evaluateFill(bo(10), normalMarket(), DEFAULT_CONSTRAINTS).px).toBeCloseTo(10.1 * S, 10);
+  });
+
+  it("一字涨停 → 买不进（记 涨停封板）", () => {
+    const m = normalMarket({ bar: makeBar("600000", "2026-03-02", 11, 11, 11, 11) });
+    const r = evaluateFill(bo(11), m, DEFAULT_CONSTRAINTS);
+    expect(r.filled).toBe(false);
+    expect(r.blockedBy).toBe("涨停封板");
+  });
+});

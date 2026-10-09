@@ -125,7 +125,7 @@ export function runNightlyDerived(db: Db, date: string): Record<string, number> 
    * 影子盘结算也挂在这里：它要今晚刚落库的日线，而且和派生表一样是纯本地计算。
    * 放在情绪表之后 —— 结算失败不该连累派生表，所以各自兜底。
    */
-  let s = { settled: 0, untriggered: 0, pending: 0 }, shadowFailed = 0;
+  let s = { settled: 0, untriggered: 0, pending: 0, voided: 0 }, shadowFailed = 0;
   try { s = settleShadowPending(db, date); }
   catch (e) { shadowFailed = 1; console.error(`[night] 影子盘结算失败：${(e as Error).message}`); }
   /**
@@ -139,6 +139,6 @@ export function runNightlyDerived(db: Db, date: string): Record<string, number> 
     switchProposed: sw === "proposed" ? 1 : 0, switchApplied: sw === "applied" ? 1 : 0, switchFailed,
     sentimentBuilt: r.built, sentimentKept: r.kept, sentimentThin: r.thin,
     crossProxyBuilt: c.built, crossProxyThin: c.thin, crossProxyFailed: crossFailed,
-    shadowSettled: s.settled, shadowUntriggered: s.untriggered, shadowPending: s.pending, shadowFailed,
+    shadowSettled: s.settled, shadowUntriggered: s.untriggered, shadowPending: s.pending, shadowVoided: s.voided, shadowFailed,
   };
 }

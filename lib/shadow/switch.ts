@@ -177,10 +177,14 @@ function liveSet(db: Db, variantId: string, slots: SlotConfig, lock: Record<stri
   };
   const days = new Map<string, Trade[]>();
   const open = new Set<string>();
+  const voided = new Set<string>();
   for (const r of rows) {
     if (since !== null && r.baseDate <= since) continue;
     if (!lockOk(r.slotLock)) continue;
     if (!days.has(r.baseDate)) days.set(r.baseDate, []);
+    // 作废 = 那天的卡是在成交日 09:25 之后才出的（机器晚醒补跑）。同一变体同一天的预测
+    // 同一时刻出，一条作废就是整天作废（哨兵行也会被判作废）—— 当这天没跑过，不算共同结清日
+    if (r.status === "作废") { voided.add(r.baseDate); continue; }
     if (r.code === "-") continue;                        // 0 候选的哨兵行：只证明那天跑过
     if (r.status === null) { open.add(r.baseDate); continue; }
     days.get(r.baseDate)!.push({
@@ -189,6 +193,7 @@ function liveSet(db: Db, variantId: string, slots: SlotConfig, lock: Record<stri
     });
   }
   for (const d of open) days.delete(d);                 // 还有没结的，那天整天不算
+  for (const d of voided) days.delete(d);
   return { days };
 }
 

@@ -290,3 +290,33 @@ describe("持仓带建仓日交给策略", () => {
     for (const ps of after) expect(ps[0]!.openDate).toBe(D[2]);
   });
 });
+
+/**
+ * 进场方式（用户 2026-10-09 选定）：突破单要价格**涨到**触发价才成交。
+ * D2 那根：开 11、高 11.5、低 10.9。与影子盘、台账同一口径（lib/shadow/settle.ts entryFill）。
+ */
+describe("回测撮合 · 突破单", () => {
+  const once = (over: Partial<Parameters<typeof makeCandidate>[0]>) => (input: StrategyEngineInput): SignalCard =>
+    input.view.asOf !== D[1] ? makeCard(input.view.asOf, [])
+      : makeCard(input.view.asOf, [makeCandidate({ code: "600000", size: 0.5, ...over })]);
+
+  it("最高价够不到触发价 → 未触及限价；同一触发价按低吸会以开盘价成交", () => {
+    // 11.52：高于当天最高 11.5、又在昨收 10.5 的涨停价 11.55 之内（越界会先被交易所拒单）
+    const bo = run({ strategy: once({ triggerPx: 11.52, entryType: "突破" }) });
+    expect(bo.detail.trades).toHaveLength(0);
+    expect(bo.detail.blocked.map(b => b.blockedBy)).toContain("未触及限价");
+    const low = run({ strategy: once({ triggerPx: 11.52 }) });
+    expect(low.detail.trades[0].px).toBeCloseTo(11 * (1 + DEFAULT_CONSTRAINTS.slippage), 10);
+  });
+
+  it("盘中涨到触发价 → 按 max(开盘, 触发价) 成交", () => {
+    const out = run({ strategy: once({ triggerPx: 11.2, entryType: "突破" }) });
+    expect(out.detail.trades).toHaveLength(1);
+    expect(out.detail.trades[0].px).toBeCloseTo(11.2 * (1 + DEFAULT_CONSTRAINTS.slippage), 10);
+  });
+
+  it("跳空高开越过触发价 → 按开盘价追进", () => {
+    const out = run({ strategy: once({ triggerPx: 10.8, entryType: "突破" }) });
+    expect(out.detail.trades[0].px).toBeCloseTo(11 * (1 + DEFAULT_CONSTRAINTS.slippage), 10);
+  });
+});

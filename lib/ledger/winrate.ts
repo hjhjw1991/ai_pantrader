@@ -1,7 +1,7 @@
 import type { Db } from "@/lib/db";
 import type { ErrorType, Phase, Verdict, WinRateStats } from "@/lib/contracts";
 import { countsTowardWinRate } from "@/lib/contracts";
-import { PHASES, predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
+import { NOT_VOID, PHASES, predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
 
 /**
  * 胜率统计（spec §11 第 5 步）+ Advisor 的 A/B 分组（spec §5.3）。
@@ -66,7 +66,7 @@ export function winRate(db: Db, filter: LedgerFilter = {}): LedgerWinRateStats {
   const rows = db.prepare(
     `SELECT p.phase, o.verdict, o.error_type, p.advisor_influenced
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
-     WHERE 1=1${w.sql}`
+     WHERE 1=1${NOT_VOID}${w.sql}`
   ).all(...w.params) as Row[];
 
   const byPhase = Object.fromEntries(

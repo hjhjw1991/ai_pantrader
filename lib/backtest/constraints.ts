@@ -178,7 +178,17 @@ export function evaluateFill(
 
   // 限价是否被触及。跳空到更有利的一侧时按开盘价成交
   let rawPx: number;
-  if (intent.side === "buy") {
+  if (intent.side === "buy" && intent.entryType === "突破" && intent.limitPx !== null) {
+    /**
+     * 突破（触价单，打板 / 半路）：价格**涨到**触发价才买，跳空高开就按开盘价追进。
+     * 与影子盘（lib/shadow/settle.ts entryFill）、正式台账（lib/ledger/reconcile.ts resolveEntry）同一口径。
+     * 一字涨停全天封死，直接买不进；盘中摸到涨停的，下面的封板排队按封单额折成交概率 ——
+     * 这一层是回测独有的细化，影子盘与台账按"摸到即按涨停价成交"的简化模型算。
+     */
+    if (bar.h < wantPx - 1e-9) return blocked("未触及限价", `最高 ${bar.h} < 突破价 ${wantPx}`);
+    if (Math.abs(bar.h - bar.l) < 1e-9) return blocked("涨停封板", `一字板（全天 ${bar.h}），触价单买不进`, 0);
+    rawPx = Math.max(wantPx, bar.o);
+  } else if (intent.side === "buy") {
     if (bar.l > wantPx + 1e-9) return blocked("未触及限价", `最低 ${bar.l} > 限价 ${wantPx}`);
     rawPx = Math.min(wantPx, bar.o);
   } else {

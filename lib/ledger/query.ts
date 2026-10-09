@@ -1,4 +1,4 @@
-import type { AccountType, Phase, Prediction } from "@/lib/contracts";
+import { entryTypeOf, type AccountType, type Phase, type Prediction } from "@/lib/contracts";
 
 /**
  * 台账查询的公共部分：过滤条件与行映射。
@@ -67,11 +67,20 @@ export interface PredictionRow {
   action: string; account: string | null; trigger_px: number | null; stop_px: number | null;
   size: number | null; thesis: string | null; gear: string | null;
   eval_horizon: number; valid_until: string; advisor_influenced: number;
+  /** 028 迁移加的，NOT NULL DEFAULT '低吸'；绕过迁移直接建的测试表可能没有，读侧按缺省处理 */
+  entry_type?: string | null;
 }
 
 export const PRED_COLS =
   `p.id, p.ts, p.phase, p.code, p.strategy_id, p.strategy_ver, p.action, p.account, p.trigger_px,
-   p.stop_px, p.size, p.thesis, p.gear, p.eval_horizon, p.valid_until, p.advisor_influenced`;
+   p.stop_px, p.size, p.thesis, p.gear, p.eval_horizon, p.valid_until, p.advisor_influenced, p.entry_type`;
+
+/**
+ * 统计口径：作废的结算（决策晚于成交日 09:25，见 Verdict）当它不存在。
+ * 胜率、复盘、仪表盘里每一条 JOIN outcome 的统计查询都要接上它（别名固定为 o）；
+ * 只有给人看的时间线列表不接 —— 作废要在那里留痕。
+ */
+export const NOT_VOID = ` AND o.verdict != '作废'`;
 
 /**
  * 行 → 契约。
@@ -91,6 +100,7 @@ export function toPrediction(r: PredictionRow): Prediction {
     action: r.action as Prediction["action"],
     account: r.account as Prediction["account"],
     triggerPx: r.trigger_px,
+    entryType: entryTypeOf(r.entry_type),
     stopPx: r.stop_px,
     size: r.size as number,
     thesis: r.thesis as string,

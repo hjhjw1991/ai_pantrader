@@ -141,6 +141,18 @@ describe("毕业判定", () => {
     expect(g.failures.join()).toMatch(/共同交易日 10 天/);
   });
 
+  it("作废（晚决策）的日子当它不存在：不算共同交易日，那天的笔数也不进已结算", () => {
+    const days = weekdays(10);
+    seedLive(t.db, "baseline", days, -1);
+    seedLive(t.db, "pricing", days, 1);
+    // pricing 第 1 天那批是 11:00 才出的卡 → 作废（结算侧 voidLateShadow 会这样改判）
+    t.db.prepare(`UPDATE shadow_outcome SET status = '作废', net_pct = NULL, exit_reason = NULL
+      WHERE pred_id LIKE ?`).run(`${days[0]}:pricing:%`);
+    const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+    expect(g.failures.join()).toMatch(/已结算 18 笔/);
+    expect(g.failures.join()).toMatch(/共同交易日 9 天/);
+  });
+
   it("≥120 笔、≥45 天、显著更好、回撤不更深 → 毕业", () => {
     const days = weekdays(60);          // 每天两笔 → 120 笔
     seedLive(t.db, "baseline", days, -1);

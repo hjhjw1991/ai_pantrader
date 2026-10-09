@@ -13,7 +13,7 @@
  * 静默放过等于宣称"条件都查过了"，那是这套系统里最贵的一种假阳性。
  */
 import type {
-  AccountId, AccountType, Action, Candidate, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
+  AccountId, AccountType, Action, Candidate, EntryType, EnvAssessment, EnvGear, FactorRegistry, FactorResult,
   Phase, PointInTimeView, PoolRow, SignalCard, StrategyConfig, StrategyEngine, StrategyEngineInput } from "@/lib/contracts";
 import { accountRule, takeProfitRules, unparsedTakeProfit } from "@/lib/strategy/loader";
 // 视图层的工具，不是因子实现 —— 引擎只依赖 PointInTimeView 这个契约
@@ -422,6 +422,8 @@ export interface RawCandidate {
   /** 带定价的评估器才给（v2）。v1 永远不带，见 Candidate.targetPx */
   targetPx?: number | null;
   rrRatio?: number | null;
+  /** 进场方式，只在突破时带（见 Candidate.entryType） */
+  entryType?: EntryType;
 }
 
 /** 进池的理由。写进 thesis，也让人在卡片上看得出这只票是怎么被捞出来的 */
@@ -739,6 +741,12 @@ export function evaluateRow(
       code: row.code, name: sec.name, account,
       sector: row.sector ?? mainline, mainline,
       triggerPx, stopPx,
+      /**
+       * 触发价高于昨收 = 等它涨上来再买（打板挂涨停价、半路红盘追），是触价单不是限价单。
+       * 按低吸撮合的话"最低价 ≤ 触发价"几乎天天成立，票不必涨到那个价就算买到了。
+       * 不高于昨收的不带这个键：默认买点（昨收 −3%）的卡片形状与历史逐字一致。
+       */
+      ...(triggerPx > lastClose ? { entryType: "突破" as const } : {}),
       thesis: parts.join("；"),
       passedFilters: strArray(filt.inputs?.["通过"]),
       factors: stockFacts,
@@ -799,6 +807,8 @@ export function applyPortfolioCaps(
       factors: c.factors, score: c.score,
       // 只在有目标位时才带上这两个键：baseline 的 targetPx 是 null，带上 null 就改了对照组的卡片形状
       ...(typeof c.targetPx === "number" ? { targetPx: c.targetPx, rrRatio: c.rrRatio ?? null } : {}),
+      // 同理：只有突破才带进场方式，缺省即低吸
+      ...(c.entryType === "突破" ? { entryType: "突破" as const } : {}),
     };
 
     if (size <= 1e-9) {

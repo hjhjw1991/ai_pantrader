@@ -323,6 +323,11 @@ export default function LedgerPage() {
                         <Tag tone="up">命中</Tag>
                       ) : t.outcome.verdict === "偏差" ? (
                         <Tag tone="danger">偏差</Tag>
+                      ) : t.outcome.verdict === "未触发" ? (
+                        <Tag>未触发</Tag>
+                      ) : t.outcome.verdict === "作废" ? (
+                        // 决策晚于成交日 09:25：不进任何统计，只在列表里留痕（原因见归因列）
+                        <Tag tone="warn">作废</Tag>
                       ) : (
                         <Tag>中性</Tag>
                       )}

@@ -5,7 +5,10 @@
  * 影子盘要比出"定价类"策略的价值，而目标价与止损只有在结算里真的触发，才谈得上盈亏比。
  *
  *   成交：只看基准日之后的**第一个交易日**（与正式台账、回测撮合一致，TRIGGER_WINDOW = 1），
- *         最低价 ≤ 触发价即成交，价 = min(开盘, 触发价)
+ *         按进场方式（EntryType）撮合：
+ *           低吸（买入限价）：最低价 ≤ 触发价即成交，价 = min(开盘, 触发价)
+ *           突破（买入触价）：最高价 ≥ 触发价才成交，价 = max(开盘, 触发价)；一字涨停买不进 → 未触发
+ *         决策晚于成交日 09:25 的不走到这里 —— 调用方（book.ts voidLateShadow）先判作废
  *   T+1：买入当天不能卖。止损 / 目标最早从第 2 天起判
  *   离场（第 2 天起逐日）：
  *     - 开盘就在止损下方 → 按开盘价（跳空低开，止损单成交在开盘）
@@ -20,12 +23,14 @@
  * K 线不够（停牌、还没走完持有期）一律"待定"：拿半截结果结算，
  * 胜率会被"恰好先走完的那批"决定，而先走完的往往是更早碰到止损的。
  */
-import type { DailyBar } from "@/lib/contracts";
+import type { DailyBar, EntryType } from "@/lib/contracts";
 
 export interface ShadowPlan {
   triggerPx: number;
   stopPx: number | null;
   targetPx: number | null;
+  /** 缺省 = 低吸（加这个字段之前全部样本的口径） */
+  entryType?: EntryType;
 }
 
 export interface SettleOpts {
@@ -68,6 +73,29 @@ const EMPTY: Omit<ShadowSettlement, "status"> = {
 
 const r6 = (x: number): number => Math.round(x * 1e6) / 1e6;
 
+/**
+ * 成交日（d1）一根日线上的进场撮合。影子盘、正式台账（lib/ledger/reconcile.ts resolveEntry）、
+ * 回测撮合（lib/backtest/constraints.ts evaluateFill）三处同一口径，改一处要三处一起改。
+ *
+ * 突破的两条取舍（用户 2026-10-09 选定的简化模型）：
+ *   - 一字涨停（最高 = 最低，全天一个价）记未触发：全天封死，触价单排不进去。
+ *     触发价高于昨收，所以"一字且最高 ≥ 触发价"只可能是一字涨停，不会误伤一字跌停
+ *   - 触发价就是涨停价（打板）时，盘中摸到涨停、哪怕随后封死，也算按涨停价成交 ——
+ *     不模拟排队（封单厚薄、排没排到），排队风险忽略。回测那边有按封单额的成交概率，这里没有
+ * px = null 表示没成交，note 说明为什么。
+ */
+export function entryFill(
+  type: EntryType, d1: { o: number; h: number; l: number }, trigger: number,
+): { px: number | null; note: string | null } {
+  if (type === "突破") {
+    if (d1.h < trigger) return { px: null, note: null };
+    if (Math.abs(d1.h - d1.l) < 1e-9) return { px: null, note: "一字涨停，触价单买不进" };
+    return { px: Math.max(d1.o, trigger), note: null };
+  }
+  if (d1.l > trigger) return { px: null, note: null };
+  return { px: Math.min(d1.o, trigger), note: null };
+}
+
 /** bars：基准日**之后**的日线，升序，原始价带复权因子 */
 export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts): ShadowSettlement {
   if (bars.length === 0) return { status: "待定", ...EMPTY, note: "基准日之后还没有 K 线（停牌或未到）" };
@@ -79,9 +107,10 @@ export function settleShadow(plan: ShadowPlan, bars: DailyBar[], o: SettleOpts):
     stopPx: plan.stopPx === null ? null : plan.stopPx * k,
     targetPx: plan.targetPx === null ? null : plan.targetPx * k,
   };
-  if (d1.l > p.triggerPx) return { status: "未触发", ...EMPTY, entryDate: d1.date };
+  const fill = entryFill(plan.entryType ?? "低吸", d1, p.triggerPx);
+  if (fill.px === null) return { status: "未触发", ...EMPTY, entryDate: d1.date, note: fill.note };
 
-  const entry = Math.min(d1.o, p.triggerPx);
+  const entry = fill.px;
   const f0 = d1.adjFactor > 0 ? d1.adjFactor : 1;
   const sc = (x: number, b: DailyBar) => (b.adjFactor > 0 ? (x * b.adjFactor) / f0 : x);
 

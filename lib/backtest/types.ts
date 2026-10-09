@@ -1,5 +1,5 @@
 import type {
-  AccountType, Board, DailyBar, DtRow, Side, ZtRow,
+  AccountType, Board, DailyBar, DtRow, EntryType, Side, ZtRow,
 } from "@/lib/contracts";
 
 /**
@@ -16,6 +16,8 @@ export interface FillIntent {
   qty: number;
   /** 限价。null = 按当日开盘价挂单，仍受涨跌幅限制 */
   limitPx: number | null;
+  /** 买单的进场方式，缺省 = 低吸（限价）。突破 = 触价单，见 evaluateFill */
+  entryType?: EntryType;
 }
 
 /** 撮合当日的市场状态。zt/dt 为 null 表示"没有真快照"，不等于"没涨停" */
@@ -67,6 +69,8 @@ export interface ReplayDecision {
   side: Side;
   /** 触发价。null = 次日开盘挂 */
   limitPx: number | null;
+  /** 进场方式，只在突破时带（缺省 = 低吸），见 Candidate.entryType */
+  entryType?: EntryType;
   stopPx: number | null;
   qty: number;
   thesis: string;

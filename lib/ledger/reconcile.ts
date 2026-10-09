@@ -1,8 +1,11 @@
 import type { Db } from "@/lib/db";
 import type { Action, ErrorType, Outcome, Prediction, Verdict } from "@/lib/contracts";
-import { dateOf, EVAL_HORIZONS, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
+import {
+  dateOf, EVAL_HORIZONS, PRED_COLS, round, toPrediction, type EvalHorizon, type LedgerFilter, type PredictionRow,
+} from "@/lib/ledger/query";
 import { listPendingPredictions } from "@/lib/ledger/record";
 import { repairAdjFactorSeries } from "@/lib/factors/util";
+import { isLateDecision, LATE_DECISION_NOTE, toShanghaiWall } from "@/lib/data/clock";
 
 /**
  * 到期对账（spec §11 第 2 步）。
@@ -167,9 +170,16 @@ export interface EntryFill {
 }
 
 /**
- * 限价成交。
+ * 限价 / 触价成交。
  *
- * 买方向：当日最低价 <= trigger_px 就算够到了。成交价取 min(开盘价, trigger_px) ——
+ * 买方向按进场方式（Prediction.entryType，口径与影子盘 lib/shadow/settle.ts entryFill、
+ * 回测撮合 lib/backtest/constraints.ts evaluateFill 一致）：
+ *
+ * 突破（触价单，打板 / 半路）：当日最高价 >= trigger_px 才算到价，成交价取 max(开盘价, trigger_px)；
+ * 一字涨停（最高 = 最低）买不进，跳过那一天。触发价就是涨停价时，摸到涨停即按涨停价成交，
+ * 不模拟排队（用户选定的简化模型）。
+ *
+ * 低吸（限价单，缺省）：当日最低价 <= trigger_px 就算够到了。成交价取 min(开盘价, trigger_px) ——
  * 低开时挂单会以更好的开盘价成交，取 trigger_px 会系统性地少算这部分优势；
  * 反过来若一路高开高走没回头，low > trigger_px，本来就不成交。
  * 卖方向对称：最高价 >= trigger_px，成交价取 max(开盘价, trigger_px)。
@@ -189,15 +199,22 @@ export function resolveEntry(
   const dir = directionOf(p.action);
   const end = tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
   if (!end) return null;                       // 日历没排到，交给调用方报"日历不足"
+  // 突破只对买方向有意义；卖方向本来就是"最高价够到"的对称口径
+  const breakout = dir !== "看跌" && p.entryType === "突破";
 
   const row = db.prepare(
     dir === "看跌"
       ? `SELECT date, o, h FROM kline_daily
          WHERE code = ? AND date > ? AND date <= ? AND h IS NOT NULL AND h >= ?
          ORDER BY date LIMIT 1`
-      : `SELECT date, o, l FROM kline_daily
-         WHERE code = ? AND date > ? AND date <= ? AND l IS NOT NULL AND l <= ?
-         ORDER BY date LIMIT 1`
+      : breakout
+        ? `SELECT date, o, h FROM kline_daily
+           WHERE code = ? AND date > ? AND date <= ? AND h IS NOT NULL AND l IS NOT NULL
+             AND h >= ? AND ABS(h - l) > 1e-9
+           ORDER BY date LIMIT 1`
+        : `SELECT date, o, l FROM kline_daily
+           WHERE code = ? AND date > ? AND date <= ? AND l IS NOT NULL AND l <= ?
+           ORDER BY date LIMIT 1`
   ).get(p.code, base, end, p.triggerPx) as { date: string; o: number | null } | undefined;
 
   if (!row) {
@@ -220,7 +237,7 @@ export function resolveEntry(
   // 开盘价缺失（极少见的脏行）就退回用触发价，不猜
   const open = row.o;
   const px = open == null ? p.triggerPx
-    : dir === "看跌" ? Math.max(open, p.triggerPx) : Math.min(open, p.triggerPx);
+    : dir === "看跌" || breakout ? Math.max(open, p.triggerPx) : Math.min(open, p.triggerPx);
   return { triggered: true, px, date: row.date };
 }
 
@@ -312,6 +329,16 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   if (!base) {
     return { ...head, ok: false, reason: "日历不足", detail: `${dateOf(p.ts)} 之前没有交易日记录` };
   }
+  /**
+   * 晚决策作废：决策时刻（ts）在成交日 09:25 集合竞价撮合之后 → 这笔推荐不可执行。
+   * 放在取价之前：作废不需要任何价格，也不该因为缺价卡在 pending 里。
+   * 成交日要日历排到了才判（排不到就照常往下走，下面会报"日历不足"）。
+   */
+  const fillDay = tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
+  if (fillDay !== null && isLateDecision(p.ts, fillDay)) {
+    return { ...head, ok: true, outcome: voidOutcome(p, fillDay, opts.now ?? new Date().toISOString()) };
+  }
+
   const horizonEnd = tradingDayOffset(db, base, p.evalHorizon);
   if (!horizonEnd) {
     return { ...head, ok: false, reason: "日历不足", detail: `${base} 之后不足 ${p.evalHorizon} 个交易日` };
@@ -403,10 +430,52 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   return { ...head, ok: true, facts, outcome };
 }
 
+/** 作废的结算：没有成交、没有盈亏、没有错因，只有一句为什么 */
+function voidOutcome(p: Prediction, fillDay: string, settledAt: string): Outcome {
+  return {
+    predId: p.id, verdict: "作废", actualPct: null, errorType: null,
+    attribution: `${LATE_DECISION_NOTE}（决策 ${toShanghaiWall(p.ts)}，成交日 ${fillDay}）→ 作废（不进任何统计）`,
+    settledAt, triggered: null, entryPx: null, entryDate: null, mfePct: null, maePct: null,
+  };
+}
+
+/**
+ * 把已经结算、但决策晚于成交日 09:25 的老行原地改判作废。
+ *
+ * 台账只追加不改写 —— 这是唯一的例外，理由：那些结算本身就是错的（拿决策之前就发生了的
+ * 开盘价成交），而用户 2026-10-09 选定把它们作废。判据只有一份（settleOne 里同一个
+ * isLateDecision），每次对账开跑先扫一遍：幂等，已作废的不再碰；跑过一次就修好了历史。
+ * prediction 表一天一批，全表扫的代价可以忽略。
+ */
+export function voidLateSettled(db: Db, now: string = new Date().toISOString()): number {
+  const rows = db.prepare(
+    `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
+      WHERE o.verdict != '作废'`
+  ).all() as PredictionRow[];
+  const up = db.prepare(
+    `UPDATE outcome SET verdict = '作废', actual_pct = NULL, error_type = NULL, attribution = ?,
+       settled_at = ?, triggered = NULL, entry_px = NULL, entry_date = NULL, mfe_pct = NULL, mae_pct = NULL
+     WHERE pred_id = ? AND verdict != '作废'`
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const p = toPrediction(r);
+      const base = baseTradingDay(db, p);
+      const fillDay = base === null ? null : tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
+      if (fillDay === null || !isLateDecision(p.ts, fillDay)) continue;
+      n += up.run(voidOutcome(p, fillDay, now).attribution, now, p.id).changes;
+    }
+  })();
+  return n;
+}
+
 export interface ReconcileReport {
   asOf: string;
   /** 本次扫到的到期未结算条数 */
   scanned: number;
+  /** 本次把已结算老行改判作废的条数（新结算出的作废在 settled 里，verdict = 作废） */
+  revoided: number;
   settled: Outcome[];
   /** 拿不到价 / 日历不够，留着下次再来。必须报出来，不能沉默 */
   skipped: SettleAttempt[];
@@ -418,6 +487,7 @@ export interface ReconcileReport {
  */
 export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport {
   const asOf = opts.asOf ?? shanghaiToday();
+  const revoided = voidLateSettled(db, opts.now);
   const pending = listPendingPredictions(db, asOf, opts.filter ?? {}, opts.limit);
 
   const settled: Outcome[] = [];
@@ -439,5 +509,5 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
     );
     if (info.changes > 0) settled.push(o);
   }
-  return { asOf, scanned: pending.length, settled, skipped };
+  return { asOf, scanned: pending.length, revoided, settled, skipped };
 }

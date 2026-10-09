@@ -38,6 +38,21 @@ export interface EnvAssessment {
 
 export type Action = "买入" | "加仓" | "减仓" | "清仓" | "持有" | "观察";
 
+/**
+ * 进场方式，决定触发价怎么撮合（影子盘结算、正式台账、回测撮合三处同一口径）：
+ *   低吸 —— 买入限价单：成交日最低价 ≤ 触发价即成交，价 = min(开盘, 触发价)
+ *   突破 —— 买入触价单：成交日最高价 ≥ 触发价才成交，价 = max(开盘, 触发价)；
+ *           一字涨停（全天一个价）买不进，记未触发
+ * 触发价高于昨收的（打板挂涨停价、半路红盘追）都是突破：按低吸撮合的话，
+ * 最低价 ≤ 涨停价几乎天天成立，等于"每天开盘就买到了"，票根本不必涨到那个价。
+ */
+export type EntryType = "低吸" | "突破";
+
+/** 缺省（老数据、没声明的槽位）一律按低吸 —— 这是加这个字段之前全部样本的撮合口径 */
+export function entryTypeOf(v: unknown): EntryType {
+  return v === "突破" ? "突破" : "低吸";
+}
+
 export interface Candidate {
   code: string;
   name: string;
@@ -61,6 +76,11 @@ export interface Candidate {
    */
   targetPx?: number;
   rrRatio?: number | null;
+  /**
+   * 进场方式。**可选**，缺省 = 低吸（见 EntryType）。只在突破时带上这个键：
+   * baseline 默认买点在昨收下方，卡片形状与历史口径逐字一致。
+   */
+  entryType?: EntryType;
 }
 
 /** 技术面提示：只作参考，不改变纪律动作或正式评估的结论 */

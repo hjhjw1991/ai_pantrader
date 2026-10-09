@@ -151,7 +151,12 @@ function decisionsFrom(
         blocked.push({ date, code: c.code, side: "buy", blockedBy: "不足一手", reason: `目标仓位 ${c.size} 折算不足一手（基准价 ${basePx}）`, wantQty: qty });
         continue;
       }
-      out.push({ decidedOn: date, code: c.code, account: c.account, side: "buy", limitPx: c.triggerPx, stopPx: c.stopPx, qty, thesis: c.thesis, action: c.action });
+      out.push({
+        decidedOn: date, code: c.code, account: c.account, side: "buy", limitPx: c.triggerPx,
+        // 只在突破时带键：低吸的决策对象形状与历史逐字一致（结果哈希不动）
+        ...(c.entryType === "突破" ? { entryType: "突破" as const } : {}),
+        stopPx: c.stopPx, qty, thesis: c.thesis, action: c.action,
+      });
       continue;
     }
 
@@ -271,7 +276,10 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
       } else if (m.bar) {
         // 买入先按可用现金削到买得起的手数，再去撮合。
         // 不能先撮合再削 —— 封板折算会被折两次
-        const estPx = Math.min(dec.limitPx ?? m.bar.o, m.bar.o) * (1 + c.slippage);
+        // 突破是追价：成交价 = max(触发价, 开盘)，估价也要按高的那头算，不然现金会被透支
+        const estPx = (dec.entryType === "突破" && dec.limitPx !== null
+          ? Math.max(dec.limitPx, m.bar.o)
+          : Math.min(dec.limitPx ?? m.bar.o, m.bar.o)) * (1 + c.slippage);
         const affordable = Math.floor(cash / (estPx * (1 + c.feeRate)) / LOT) * LOT;
         if (affordable < LOT) {
           blocked.push({ date, code: dec.code, side: "buy", blockedBy: "资金不足", reason: `现金 ${cash.toFixed(2)} 买不起一手`, wantQty });
@@ -280,7 +288,10 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
         wantQty = Math.min(wantQty, affordable);
       }
 
-      const r = evaluateFill({ code: dec.code, side: dec.side, qty: wantQty, limitPx: dec.limitPx }, m, c, fillOpts);
+      const r = evaluateFill({
+        code: dec.code, side: dec.side, qty: wantQty, limitPx: dec.limitPx,
+        ...(dec.entryType === undefined ? {} : { entryType: dec.entryType }),
+      }, m, c, fillOpts);
       if (!r.filled) {
         blocked.push({ date, code: dec.code, side: dec.side, blockedBy: r.blockedBy!, reason: r.reason, wantQty });
         continue;

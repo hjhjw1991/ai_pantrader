@@ -119,3 +119,49 @@ describe("settleShadow", () => {
     expect(r.maePct).toBeCloseTo(-3, 6);
   });
 });
+
+/**
+ * 进场方式（用户 2026-10-09 选定）：
+ *   低吸（缺省）= 买入限价：最低 ≤ 触发价，价 = min(开盘, 触发价)
+ *   突破        = 买入触价：最高 ≥ 触发价，价 = max(开盘, 触发价)；一字涨停买不进
+ */
+describe("settleShadow · 进场方式", () => {
+  const BO = { ...P, triggerPx: 11, stopPx: 10.5, targetPx: 12, entryType: "突破" as const };
+  const tail = [b(1, 11.2, 11.3, 11.1, 11.2), b(2, 11.2, 11.3, 11.1, 11.2), b(3, 11.2, 11.3, 11.1, 11.2), b(4, 11.2, 11.3, 11.1, 11.3)];
+
+  it("突破：最高价没摸到触发价 → 未触发（低吸口径下这笔会以开盘价成交）", () => {
+    const d1 = b(0, 10.2, 10.9, 10.1, 10.8);
+    expect(settleShadow(BO, [d1, ...tail], { horizon: 5, ...NOCOST }).status).toBe("未触发");
+    expect(settleShadow({ ...BO, entryType: "低吸" }, [d1, ...tail], { horizon: 5, ...NOCOST }).entryPx).toBe(10.2);
+  });
+
+  it("突破：盘中涨到触发价 → 按触发价成交", () => {
+    const r = settleShadow(BO, [b(0, 10.5, 11.2, 10.4, 11.1), ...tail], { horizon: 5, ...NOCOST });
+    expect(r.status).toBe("已结算");
+    expect(r.entryPx).toBe(11);
+  });
+
+  it("突破：跳空高开在触发价上方 → 按开盘价追进（不是触发价）", () => {
+    const r = settleShadow(BO, [b(0, 11.1, 11.25, 11.05, 11.2), ...tail], { horizon: 5, ...NOCOST });
+    expect(r.entryPx).toBe(11.1);
+  });
+
+  it("突破：一字涨停（全天一个价）→ 未触发，买不进", () => {
+    const r = settleShadow(BO, [b(0, 11, 11, 11, 11), ...tail], { horizon: 5, ...NOCOST });
+    expect(r.status).toBe("未触发");
+    expect(r.note).toContain("一字涨停");
+  });
+
+  it("突破：触发价 = 涨停价，盘中摸板后封死（非一字）→ 按涨停价成交，不模拟排队", () => {
+    const r = settleShadow(BO, [b(0, 10.5, 11, 10.4, 11), ...tail], { horizon: 5, ...NOCOST });
+    expect(r.status).toBe("已结算");
+    expect(r.entryPx).toBe(11);
+  });
+
+  it("低吸不变：缺省 entryType 与显式低吸结果逐字一致", () => {
+    const bars = [b(0, 9.8, 10.2, 9.7, 10), b(1, 10, 10.1, 9.9, 10), b(2, 10, 10.1, 9.9, 10), b(3, 10, 10.1, 9.9, 10), b(4, 10, 10.1, 9.9, 10.2)];
+    const a = settleShadow(P, bars, { horizon: 5, ...NOCOST });
+    expect(settleShadow({ ...P, entryType: "低吸" }, bars, { horizon: 5, ...NOCOST })).toEqual(a);
+    expect(a.entryPx).toBe(9.8);
+  });
+});

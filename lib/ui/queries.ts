@@ -842,7 +842,9 @@ export function settledPredictions(db: Db): SettledRow[] {
   const rows = db
     .prepare(
       `SELECT p.phase, p.advisor_influenced, o.verdict, o.error_type, o.actual_pct
-       FROM outcome o JOIN prediction p ON p.id = o.pred_id`
+       FROM outcome o JOIN prediction p ON p.id = o.pred_id
+      -- 作废（晚决策）当它不存在，口径同 lib/ledger/query.ts NOT_VOID
+      WHERE o.verdict != '作废'`
     )
     .all() as Array<Record<string, unknown>>;
   return rows.map((r) => ({

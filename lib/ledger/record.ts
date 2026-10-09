@@ -1,5 +1,5 @@
 import type { Db } from "@/lib/db";
-import type { Prediction } from "@/lib/contracts";
+import { entryTypeOf, type Prediction } from "@/lib/contracts";
 import { snapshotForPrediction } from "@/lib/ledger/strategy-snapshot";
 import { EVAL_HORIZONS, PRED_COLS, predWhere, toPrediction, type EvalHorizon, type LedgerFilter, type PredictionRow } from "@/lib/ledger/query";
 
@@ -51,6 +51,8 @@ function fingerprint(p: Prediction): string {
   return JSON.stringify([
     p.ts, p.phase, p.code, p.strategyId, p.strategyVersion, p.action, p.account, p.triggerPx, p.stopPx,
     p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil, p.advisorInfluenced,
+    // 缺省即低吸：老行读回来是"低吸"，新写的不带字段也是"低吸"，两者必须算同一内容
+    entryTypeOf(p.entryType),
   ]);
 }
 
@@ -82,11 +84,11 @@ export function recordPrediction(db: Db, p: Prediction): void {
 
   db.prepare(
     `INSERT INTO prediction (id, ts, phase, code, strategy_id, strategy_ver, action, account,
-       trigger_px, stop_px, size, thesis, gear, eval_horizon, valid_until, advisor_influenced)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       trigger_px, stop_px, size, thesis, gear, eval_horizon, valid_until, advisor_influenced, entry_type)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(p.id, p.ts, p.phase, p.code, p.strategyId, p.strategyVersion, p.action, p.account,
         p.triggerPx, p.stopPx, p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil,
-        p.advisorInfluenced ? 1 : 0);
+        p.advisorInfluenced ? 1 : 0, entryTypeOf(p.entryType));
 }
 
 /** 整卡信号一起落库：一条非法就整批回滚，避免半张信号卡进台账 */

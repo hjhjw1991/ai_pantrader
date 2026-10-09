@@ -148,6 +148,83 @@ describe("settleShadowPending", () => {
 
   it("哨兵行不结算", () => {
     runShadowDay(t.db, opts(() => () => card([], "防守"), { variants: [{ id: "a", name: "a", slots: {} }] }));
-    expect(settleShadowPending(t.db, "2026-09-08")).toEqual({ settled: 0, untriggered: 0, pending: 0 });
+    expect(settleShadowPending(t.db, "2026-09-08")).toEqual({ settled: 0, untriggered: 0, pending: 0, voided: 0 });
+  });
+
+  /* ---------- 晚决策作废（用户 2026-10-09 选定）与进场方式 ---------- */
+
+  const variants = [{ id: "a", name: "a", slots: {} }];
+  const fullPath = () =>
+    fill("600001", [[10, 10.2, 9.9, 10.1], [10.2, 11.3, 10.1, 11], [11, 11, 11, 11], [11, 11, 11, 11], [11, 11, 11, 11]]);
+
+  it("决策时刻落库的是视图时点（asOf），不是写库挂钟；进场方式随候选落库", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001"), buy("600002", { entryType: "突破" })]), { variants }));
+    const r = rows();
+    expect(r.map(x => x.decided_at)).toEqual(["2026-09-02 09:15:00", "2026-09-02 09:15:00"]);
+    expect(r.map(x => x.entry_type)).toEqual(["低吸", "突破"]);
+  });
+
+  it("盘前计划补跑到 11:00（晚于成交日 09:25）→ 作废，不管当天行情多好", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001", { targetPx: 11 })]), { variants, asOf: "2026-09-02 11:00:00" }));
+    fullPath();
+    const r = settleShadowPending(t.db, "2026-09-08");
+    expect(r).toMatchObject({ voided: 1, settled: 0, untriggered: 0 });
+    expect(outcome()[0]).toMatchObject({ status: "作废", entry_px: null, net_pct: null, exit_reason: null });
+    expect(outcome()[0].note).toContain("决策晚于成交日 09:25");
+  });
+
+  it("恰好 09:25:00 也算晚（集合竞价已撮合）；09:24:59 不算", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001")]), { variants, asOf: "2026-09-02 09:25:00" }));
+    runShadowDay(t.db, opts(() => () => card([buy("600001")]), {
+      variants: [{ id: "b", name: "b", slots: {} }], asOf: "2026-09-02 09:24:59" }));
+    fullPath();
+    settleShadowPending(t.db, "2026-09-08");
+    const by = Object.fromEntries((t.db.prepare(
+      "SELECT p.variant_id v, o.status s FROM shadow_pred p JOIN shadow_outcome o ON o.pred_id = p.id").all() as any[])
+      .map(x => [x.v, x.s]));
+    expect(by).toEqual({ a: "作废", b: "已结算" });
+  });
+
+  it("已经按老口径结算过的晚决策：下次结算原地改判作废（幂等，只改一次）", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001", { targetPx: 11 })]), { variants, asOf: "2026-09-02 11:00:00" }));
+    fullPath();
+    // 模拟 028 之前落定的老结算
+    t.db.prepare(`INSERT INTO shadow_outcome (pred_id, status, entry_date, entry_px, exit_date, exit_px, exit_reason, net_pct, settled_at)
+      SELECT id, '已结算', '2026-09-02', 10, '2026-09-03', 11, '目标', 9.5, 'x' FROM shadow_pred`).run();
+    expect(settleShadowPending(t.db, "2026-09-08").voided).toBe(1);
+    expect(outcome()[0]).toMatchObject({ status: "作废", entry_px: null, exit_px: null, net_pct: null });
+    expect(settleShadowPending(t.db, "2026-09-09").voided).toBe(0);
+  });
+
+  it("老行没有 decided_at（旧备份导入）：live 按 created_at 兜底判，replay 按基准日 15:05 不会被误判", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001")]), { variants }));
+    runShadowDay(t.db, opts(() => () => card([buy("600001")]), { variants, source: "replay", asOf: "2026-09-01 15:05:00" }));
+    // 回放的 created_at 是回放那天的挂钟（远晚于成交日）—— 拿它判会把回放全判作废
+    t.db.prepare("UPDATE shadow_pred SET decided_at = NULL, created_at = '2026-10-01 20:00:00.000'").run();
+    fullPath();
+    settleShadowPending(t.db, "2026-09-08");
+    const by = Object.fromEntries((t.db.prepare(
+      "SELECT p.source v, o.status s FROM shadow_pred p JOIN shadow_outcome o ON o.pred_id = p.id").all() as any[])
+      .map(x => [x.v, x.s]));
+    expect(by).toEqual({ live: "作废", replay: "已结算" });
+  });
+
+  it("晚决策当天 0 候选的哨兵行也作废：那天整天不算跑过", () => {
+    runShadowDay(t.db, opts(() => () => card([], "防守"), { variants, asOf: "2026-09-02 10:00:00" }));
+    expect(settleShadowPending(t.db, "2026-09-08").voided).toBe(1);
+    expect(outcome()[0]).toMatchObject({ pred_id: "2026-09-01:a:live:-", status: "作废" });
+  });
+
+  it("突破单：成交日最高价够不到触发价 → 未触发；按低吸撮合的话这笔会在开盘成交", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001", { triggerPx: 11, stopPx: 10.5, entryType: "突破" })]), { variants }));
+    fill("600001", [[10, 10.8, 9.9, 10.5], [10.5, 10.6, 10.4, 10.5], [10.5, 10.6, 10.4, 10.5], [10.5, 10.6, 10.4, 10.5], [10.5, 10.6, 10.4, 10.5]]);
+    expect(settleShadowPending(t.db, "2026-09-08")).toMatchObject({ untriggered: 1, settled: 0 });
+  });
+
+  it("突破单：摸到触发价 → 按 max(开盘, 触发价) 成交", () => {
+    runShadowDay(t.db, opts(() => () => card([buy("600001", { triggerPx: 10.5, stopPx: 9.5, entryType: "突破" })]), { variants }));
+    fill("600001", [[10, 10.8, 9.9, 10.6], [10.6, 10.7, 10.5, 10.6], [10.6, 10.7, 10.5, 10.6], [10.6, 10.7, 10.5, 10.6], [10.6, 10.7, 10.5, 10.6]]);
+    expect(settleShadowPending(t.db, "2026-09-08").settled).toBe(1);
+    expect(outcome()[0]).toMatchObject({ status: "已结算", entry_px: 10.5 });
   });
 });

@@ -68,3 +68,44 @@ export function addDays(date: string, n: number): string {
   const t = new Date(Date.UTC(y, m - 1, d + n));
   return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, "0")}-${String(t.getUTCDate()).padStart(2, "0")}`;
 }
+
+/**
+ * 集合竞价撮合时刻（上海）。开盘价就是这一刻定出来的。
+ *
+ * 结算口径"成交日最低价 ≤ 触发价即成交、价 = min(开盘, 触发价)"隐含了一个前提：
+ * 单子在这一刻**之前**就挂上了。晚于它才做的决定，开盘价与之前的盘中低点都已经
+ * 是过去式 —— 拿它们结算等于让策略"回到过去下单"（见 isLateDecision）。
+ */
+export const AUCTION_MATCH = "09:25:00";
+
+/**
+ * 任意时间戳 → 上海挂钟 `YYYY-MM-DD HH:MM:SS`（截到秒）。
+ *
+ * 库里的决策时刻有两种写法：全库口径的上海挂钟串（shanghaiTs），
+ * 与老台账 / 测试里带偏移的 ISO 串（`2026-08-03T15:30:00+08:00`、`...Z`）。
+ * 带偏移或 Z 的按时区换算；不带的视为已经是上海挂钟，只把 T 换成空格。
+ * 只有日期的视为当天 00:00:00。
+ */
+export function toShanghaiWall(ts: string): string {
+  const s = ts.trim();
+  if (/(?:z|[+-]\d{2}:?\d{2})$/i.test(s) && s.length > 10) {
+    const ms = Date.parse(s);
+    if (!Number.isNaN(ms)) return shanghaiTs(new Date(ms)).slice(0, 19);
+  }
+  const wall = s.replace("T", " ").slice(0, 19);
+  return wall.length === 10 ? `${wall} 00:00:00` : wall;
+}
+
+/** 作废行的说明。影子盘（shadow_outcome.note）与台账（outcome.attribution）用同一句 */
+export const LATE_DECISION_NOTE = "决策晚于成交日 09:25，开盘前的价格不可得";
+
+/**
+ * 决策是否晚于成交日的集合竞价撮合（含等于）。是 → 这笔预测作废，不进任何统计。
+ *
+ * 实测场景：机器 11:00 才醒，09:15 的盘前计划 catchUp 到 11:00 才跑，
+ * 而结算仍按成交日整天的开盘 / 最低价算 —— 开盘前就已经发生的成交被记到了它头上。
+ * 用户 2026-10-09 选定：这种样本作废，不计入胜率、毕业与报表，只在列表里留痕。
+ */
+export function isLateDecision(decidedAt: string, fillDate: string): boolean {
+  return toShanghaiWall(decidedAt) >= `${fillDate} ${AUCTION_MATCH}`;
+}

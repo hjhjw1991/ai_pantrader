@@ -1,4 +1,4 @@
-import type { Action, AccountType, EnvGear, Phase } from "@/lib/contracts/strategy";
+import type { Action, AccountType, EntryType, EnvGear, Phase } from "@/lib/contracts/strategy";
 
 /**
  * 自校准闭环（spec §11）。
@@ -24,6 +24,11 @@ export interface Prediction {
   action: Action;
   account: AccountType;
   triggerPx: number | null;
+  /**
+   * 触发价怎么撮合（低吸 = 限价，突破 = 触价，见 EntryType）。
+   * 可选：缺省按低吸 —— 028 迁移之前的老行与没声明的调用方都是这个口径。
+   */
+  entryType?: EntryType;
   stopPx: number | null;
   size: number;
   thesis: string;
@@ -43,8 +48,13 @@ export interface Prediction {
  *   未触发 —— 价格根本没到推荐的买点，这笔推荐从未成为一个仓位
  * 两者都不进胜率分母，但病因完全不同：前者是"看得不够准"，
  * 后者是"买点定得够不到"。混成一类，就再也分不出该改选股还是该改触发价。
+ *
+ * 作废 是第五类，性质又不同：决策晚于成交日 09:25（机器晚醒、盘前计划补跑到盘中），
+ * 开盘价与之前的盘中低点在决策时已经是过去式，这笔推荐根本不可执行。
+ * 用户 2026-10-09 选定：当它不存在 —— 不进胜率、触发率、复盘与仪表盘的任何分母或计数，
+ * 只在时间线列表里留痕（查询口径见 lib/ledger/query.ts NOT_VOID）。
  */
-export type Verdict = "命中" | "偏差" | "中性" | "未触发";
+export type Verdict = "命中" | "偏差" | "中性" | "未触发" | "作废";
 
 /** 进胜率分母的判定：只有真形成了方向承诺并且有结果的才算 */
 export function countsTowardWinRate(v: Verdict): boolean {

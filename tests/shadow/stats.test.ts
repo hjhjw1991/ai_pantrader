@@ -151,3 +151,23 @@ describe("dailyReturns（按基准日合成的独立观测）", () => {
     expect(tVs0(perTrade)).toBeGreaterThan(tVs0(perDay));
   });
 });
+
+describe("作废（决策晚于成交日 09:25）当它不存在", () => {
+  const v = (over: Partial<Trade> = {}): Trade => ({ ...tr(0), status: "作废", netPct: null, exitDate: null, exitReason: null, ...over });
+
+  it("summarize：不进触发率 / 胜率 / 期望 / 起止日，只单独报个数", () => {
+    const base = [tr(2), tr(-1), { ...tr(0), status: "未触发" as const, netPct: null }];
+    const s = summarize([...base, v({ baseDate: "2026-01-01" }), v()]);
+    const { voided, ...rest } = s;
+    expect(voided).toBe(2);
+    const { voided: v0, ...clean } = summarize(base);
+    expect(v0).toBe(0);
+    expect(rest).toEqual(clean);
+    expect(s.from).toBe("2026-08-25");
+  });
+
+  it("dailyReturns：不进分子也不进分母；整天作废的那天不出数", () => {
+    expect(dailyReturns([tr(2), v(), { ...tr(0), status: "未触发", netPct: null }])).toEqual([1]);
+    expect(dailyReturns([v({ baseDate: "2026-08-26" }), tr(2)])).toEqual([2]);
+  });
+});

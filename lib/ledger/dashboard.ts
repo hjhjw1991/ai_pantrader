@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db";
 import type { Action, ErrorType, Verdict } from "@/lib/contracts";
-import { dateOf, predWhere, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
+import { dateOf, NOT_VOID, predWhere, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
 import { directionOf, type Direction } from "@/lib/ledger/reconcile";
 import { countsTowardWinRate } from "@/lib/contracts";
 import { ERROR_TYPES, winRate, type LedgerWinRateStats } from "@/lib/ledger/winrate";
@@ -107,7 +107,7 @@ function joinRows(db: Db, filter: LedgerFilter): JoinRow[] {
   return db.prepare(
     `SELECT p.ts, p.code, o.verdict, o.actual_pct
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
-     WHERE 1=1${w.sql} ORDER BY p.ts`
+     WHERE 1=1${NOT_VOID}${w.sql} ORDER BY p.ts`
   ).all(...w.params) as JoinRow[];
 }
 
@@ -226,7 +226,8 @@ export function pendingSummary(db: Db, asOf: string, filter: LedgerFilter = {}):
     `SELECT
        SUM(CASE WHEN o.pred_id IS NULL THEN 1 ELSE 0 END) pending,
        SUM(CASE WHEN o.pred_id IS NULL AND p.valid_until <= ? THEN 1 ELSE 0 END) overdue,
-       SUM(CASE WHEN o.pred_id IS NOT NULL THEN 1 ELSE 0 END) settled
+       -- 作废的既不是待结算也不算已结算样本（当它不存在，见 NOT_VOID）
+       SUM(CASE WHEN o.pred_id IS NOT NULL AND o.verdict != '作废' THEN 1 ELSE 0 END) settled
      FROM prediction p LEFT JOIN outcome o ON o.pred_id = p.id
      WHERE 1=1${w.sql}`
   ).get(asOf, ...w.params) as any;

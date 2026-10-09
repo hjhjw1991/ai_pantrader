@@ -32,7 +32,11 @@ export interface VariantReport {
 
 export function variantReports(db: Db, source: Source): VariantReport[] {
   const vs = db.prepare("SELECT id, name, status FROM shadow_variant ORDER BY id").all() as Array<{ id: string; name: string; status: string }>;
-  const dayCount = db.prepare("SELECT COUNT(DISTINCT base_date) AS n FROM shadow_pred WHERE variant_id = ? AND source = ?");
+  // 作废的日子（晚决策，见 book.ts voidLateShadow）不算"跑过"：与毕业判定数共同结清日同一口径
+  const dayCount = db.prepare(
+    `SELECT COUNT(DISTINCT p.base_date) AS n FROM shadow_pred p LEFT JOIN shadow_outcome o ON o.pred_id = p.id
+      WHERE p.variant_id = ? AND p.source = ? AND (o.status IS NULL OR o.status != '作废')`
+  );
   const trades = new Map(vs.map(v => [v.id, loadTrades(db, v.id, source)]));
   const netOf = (ts: Trade[]) => ts.filter(t => t.status === "已结算" && t.netPct !== null).map(t => t.netPct as number);
   const base = netOf(trades.get(BASELINE_VARIANT) ?? []);

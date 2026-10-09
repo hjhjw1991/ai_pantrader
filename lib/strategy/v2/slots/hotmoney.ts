@@ -280,6 +280,10 @@ export const 评估器_游资手法: EvaluatorSlot = {
       code: raw.code, name: raw.name, account: raw.account,
       sector: raw.sector, mainline: raw.mainline,
       triggerPx: raw.triggerPx, stopPx, targetPx, rrRatio,
+      // 打板（挂涨停价）、半路（红盘 +5% 追）的触发价在昨收上方 → evaluateRow 判成突破：
+      // 要等价格**涨到**触发价才成交。低吸 / 首阴在昨收下方，按限价单撮合。
+      // 贴 MA5 把触发价压回昨收下方时也随之回到低吸 —— 以最终挂出去的价为准，不以手法名为准
+      ...(raw.entryType === "突破" ? { entryType: "突破" as const } : {}),
       thesis: `${raw.thesis}；${手法说明}，${定价说明}`
         + `${rrRatio === null ? "" : `，盈亏比 ${rrRatio.toFixed(2)}`}`
         + `${止损 === null ? "" : `，硬止损 ${pct(止损)}`}`

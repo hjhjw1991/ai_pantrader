@@ -148,6 +148,8 @@ export const 评估器_七道筛打分: EvaluatorSlot = {
       sector: c.sector, mainline: c.mainline,
       triggerPx: c.triggerPx, stopPx: c.stopPx,
       targetPx: null, rrRatio: null,
+      // 进场方式原样透传（只有突破才带键，见 evaluateRow）
+      ...(c.entryType === "突破" ? { entryType: "突破" as const } : {}),
       thesis: c.thesis, passedFilters: c.passedFilters,
       factors: c.factors, score: c.score,
     };

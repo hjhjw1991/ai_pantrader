@@ -8,12 +8,12 @@
  * 每套变体的"持仓"都不一样却又都是假的，拿它们比没有意义。
  */
 import type { Db } from "@/lib/db";
-import type { DailyBar, Phase, SlotConfig, StrategyConfig } from "@/lib/contracts";
+import { entryTypeOf, type DailyBar, type Phase, type SlotConfig, type StrategyConfig } from "@/lib/contracts";
 import { createSqliteView } from "@/lib/pit/sqlite-view";
 import { defaultRegistry } from "@/lib/factors";
 import { createV2Engine, defaultSlotRegistry } from "@/lib/strategy/v2";
 import { DEFAULT_CONSTRAINTS } from "@/lib/contracts/backtest";
-import { shanghaiTs } from "@/lib/data/clock";
+import { isLateDecision, LATE_DECISION_NOTE, shanghaiTs, toShanghaiWall } from "@/lib/data/clock";
 import { DEFAULT_VARIANTS, type VariantDef } from "@/lib/shadow/variants";
 import { settleShadow } from "@/lib/shadow/settle";
 import { repairAdjFactorSeries } from "@/lib/factors/util";
@@ -147,11 +147,17 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
     `INSERT OR IGNORE INTO shadow_pred
        (id, variant_id, source, base_date, decided_on, code, name, account,
         trigger_px, stop_px, target_px, rr_ratio, size, score, gear, stage,
-        strategy_id, strategy_ver, slot_lock, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        strategy_id, strategy_ver, slot_lock, created_at, decided_at, entry_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const out: ShadowDayResult = { variants: variants.length, recorded: 0, skipped: [], failed: [] };
+  /**
+   * 决策时刻 = 视图时点（引擎只看得到 asOf 之前的东西），不是写库的挂钟：
+   * 回放几个月后才写库，created_at 与"当时能不能在开盘前挂单"毫无关系。
+   * 结算拿它判"是否晚于成交日 09:25"（见 isLateDecision）
+   */
+  const decidedAt = toShanghaiWall(o.asOf);
 
   /** 单变体的"算 + 写"。抽成闭包是为了外面那层瞬时故障重试能重跑它 */
   const recordOne = (v: ActiveVariant) => {
@@ -173,6 +179,7 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
           typeof c.rrRatio === "number" ? c.rrRatio : null,
           c.size, typeof c.score === "number" ? c.score : null,
           card.env.gear, card.stage ?? null, o.config.id, o.config.version ?? null, lock, shanghaiTs(),
+          decidedAt, entryTypeOf(c.entryType),
         ).changes;
       }
       // 当天一只都没有也要留痕：否则"这个变体那天判了防守、0 候选"和"那天没跑"分不开，
@@ -180,7 +187,7 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
       if (buys.length === 0) {
         ins.run(`${o.baseDate}:${v.id}:${o.source}:-`, v.id, o.source, o.baseDate, o.decidedOn,
           "-", null, "-", 0, null, null, null, 0, null, card.env.gear, card.stage ?? null,
-          o.config.id, o.config.version ?? null, lock, shanghaiTs());
+          o.config.id, o.config.version ?? null, lock, shanghaiTs(), decidedAt, "低吸");
       }
     })();
     out.recorded += recorded;
@@ -217,19 +224,69 @@ export function runShadowDay(db: Db, o: ShadowDayOpts): ShadowDayResult {
 /** 某天全市场日线少于这么多行，视为那天的日线还没采全 */
 const MIN_MARKET_BARS = 1000;
 
-export interface SettleResult { settled: number; untriggered: number; pending: number }
+export interface SettleResult {
+  settled: number; untriggered: number; pending: number;
+  /** 本次判作废的（含把已结算的老行改判作废的）。作废的不进任何统计，见 voidLateShadow */
+  voided: number;
+}
+
+/**
+ * 把"决策晚于成交日 09:25"的预测判作废 —— 包括**已经结算过的老行**，原地改判。
+ *
+ * 为什么连已落定的也改（024 迁移说结算一旦落定不再改）：那些结算本身就是错的 ——
+ * 拿决策之前就发生了的开盘价 / 低点成交，是让策略回到过去下单。用户 2026-10-09 选定作废，
+ * 不计入胜率、毕业与报表。判据只有一份（isLateDecision），每次结算开跑先扫一遍：
+ * 夜里那一轮跑过就修好了历史，幂等，已经作废的不会再碰。
+ *
+ * 0 候选的哨兵行也一并作废：毕业判定按"共同结清日"数天，晚跑的那天整天不该算作跑过。
+ * 成交日要日历里已经排到才判（还没排到 → 下次再说）。
+ */
+export function voidLateShadow(db: Db): number {
+  const rows = db.prepare(
+    `SELECT p.id, p.next, p.decided FROM (
+       SELECT id,
+              (SELECT MIN(date) FROM trading_calendar WHERE is_open = 1 AND date > base_date) AS next,
+              -- 028 之前的行与从旧备份导入的行没有 decided_at，按 028 迁移同一规则兜底
+              COALESCE(decided_at, CASE WHEN source = 'replay' THEN base_date || ' 15:05:00' ELSE created_at END) AS decided
+         FROM shadow_pred) p
+       LEFT JOIN shadow_outcome o ON o.pred_id = p.id
+      WHERE p.next IS NOT NULL AND (o.status IS NULL OR o.status != '作废')
+        AND p.decided >= p.next || ' 09:25:00'`
+  ).all() as Array<{ id: string; next: string; decided: string }>;
+  const up = db.prepare(
+    `INSERT INTO shadow_outcome
+       (pred_id, status, entry_date, entry_px, exit_date, exit_px, exit_reason,
+        gross_pct, net_pct, mfe_pct, mae_pct, note, settled_at)
+     VALUES (?, '作废', ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+     ON CONFLICT(pred_id) DO UPDATE SET
+       status = '作废', entry_date = excluded.entry_date, entry_px = NULL, exit_date = NULL, exit_px = NULL,
+       exit_reason = NULL, gross_pct = NULL, net_pct = NULL, mfe_pct = NULL, mae_pct = NULL,
+       note = excluded.note, settled_at = excluded.settled_at`
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      // SQL 粗筛只认上海挂钟串；带偏移的 ISO 串在这里按真实时区再判一次
+      if (!isLateDecision(r.decided, r.next)) continue;
+      up.run(r.id, r.next, `${LATE_DECISION_NOTE}（决策 ${toShanghaiWall(r.decided)}，成交日 ${r.next}）`, shanghaiTs());
+      n++;
+    }
+  })();
+  return n;
+}
 
 /**
  * 结算到期的影子预测：基准日之后已走过持有期的，按止损 / 目标价模拟离场。
- * "待定"不落表，下一晚重试。
+ * "待定"不落表，下一晚重试。晚决策先判作废（voidLateShadow），作废的已有 outcome 行，下面不会再扫到。
  */
 export function settleShadowPending(db: Db, asOf: string): SettleResult {
+  const voided = voidLateShadow(db);
   const preds = db.prepare(
-    `SELECT p.id, p.code, p.base_date, p.trigger_px, p.stop_px, p.target_px
+    `SELECT p.id, p.code, p.base_date, p.trigger_px, p.stop_px, p.target_px, p.entry_type
        FROM shadow_pred p LEFT JOIN shadow_outcome o ON o.pred_id = p.id
       WHERE o.pred_id IS NULL AND p.code != '-' AND p.base_date < ?
       ORDER BY p.base_date, p.id`
-  ).all(asOf) as Array<{ id: string; code: string; base_date: string; trigger_px: number; stop_px: number | null; target_px: number | null }>;
+  ).all(asOf) as Array<{ id: string; code: string; base_date: string; trigger_px: number; stop_px: number | null; target_px: number | null; entry_type: string | null }>;
   const barsAfter = db.prepare(
     `SELECT code, date, o, h, l, c, vol, amount, COALESCE(adj_factor, 1.0) AS adj_factor
        FROM kline_daily WHERE code = ? AND date > ? AND date <= ? ORDER BY date LIMIT ?`
@@ -251,7 +308,7 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
     "SELECT date FROM trading_calendar WHERE is_open = 1 AND date > ? ORDER BY date LIMIT 1"
   );
   const marketBars = db.prepare("SELECT COUNT(*) AS n FROM kline_daily WHERE date = ?");
-  const r: SettleResult = { settled: 0, untriggered: 0, pending: 0 };
+  const r: SettleResult = { settled: 0, untriggered: 0, pending: 0, voided };
   for (const p of preds) {
     /**
      * 成交日必须是基准日的**下一个交易日**。那天这只票没有 K 线有两种原因：
@@ -286,7 +343,7 @@ export function settleShadowPending(db: Db, asOf: string): SettleResult {
       continue;
     }
     const s = settleShadow(
-      { triggerPx: p.trigger_px, stopPx: p.stop_px, targetPx: p.target_px }, bars,
+      { triggerPx: p.trigger_px, stopPx: p.stop_px, targetPx: p.target_px, entryType: entryTypeOf(p.entry_type) }, bars,
       {
         horizon: SHADOW_HORIZON, slippage: DEFAULT_CONSTRAINTS.slippage, feeRate: DEFAULT_CONSTRAINTS.feeRate,
         ...(baseFixed === undefined ? {} : { baseAdjFactor: baseFixed }),

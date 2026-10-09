@@ -43,7 +43,13 @@ function ReportTable({ rows, incumbent, showDays }: { rows: VariantReport[]; inc
                 {v.status !== "active" ? <span className="ml-1"><Tag>已退役</Tag></span> : null}
               </td>
               {showDays ? <td className="num">{v.days}</td> : null}
-              <td className="num">{v.summary.settled}</td>
+              <td className="num">
+                {v.summary.settled}
+                {/* 作废 = 决策晚于成交日 09:25（机器晚醒补跑），不进任何统计，只在这里露个数 */}
+                {v.summary.voided > 0
+                  ? <span className="ml-1 text-ink-3" title="决策晚于成交日 09:25，开盘前的价格不可得，不计入统计">作废 {v.summary.voided}</span>
+                  : null}
+              </td>
               <td className="num">{ratio(v.summary.triggerRate)}</td>
               <td className="num">{ratio(v.summary.winRate)}</td>
               <td className={`num ${dir(v.summary.meanNet)}`}>{pct(v.summary.meanNet)}</td>
