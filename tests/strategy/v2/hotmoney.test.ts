@@ -282,6 +282,32 @@ describe("离场器·游资纪律", () => {
     expect(h.thesis).toContain("炸板");
   });
 
+  /**
+   * 叠加只许加严、不许放松：账户纪律已经判了清仓，游资纪律哪条都没触发，
+   * 结果也必须还是清仓 —— 不能因为"游资纪律未触发"就把 baseline 的离场吞掉。
+   */
+  it("账户纪律已判清仓、游资纪律未触发 → 仍是清仓", () => {
+    // 卫星账户（测试配置：止损 −5%、灾难位 −8%）。昨收 11，成本 13 → 浮亏 −15.4%，穿了灾难位；
+    // 游资这边把三条都放开，确保清仓只可能来自账户纪律
+    const h = holding({ 止损: -0.5, 破线: null, 炸板走: false },
+      { positions: [{ account: "卫星账户", code: "600183", cost: 13, qty: 1000, stopPx: null }] });
+    expect(h.action).toBe("清仓");
+    expect(h.thesis).toContain("游资纪律未触发");
+  });
+
+  it("破线: null 关掉破线离场；不写则默认 MA5", () => {
+    const fix = {
+      positions: pos(10.4),
+      bars: { "600183": withOHLC("600183", [10, 10.5, 10.8, 11.2, 10.5]) },   // 收 10.5 < MA5 10.70
+    };
+    const off = holding({ 止损: -0.5, 破线: null, 炸板走: false }, fix);
+    expect(off.action).not.toBe("清仓");
+    expect(off.thesis).not.toContain("跌破");
+    const dflt = holding({ 止损: -0.5, 炸板走: false }, fix);
+    expect(dflt.action).toBe("清仓");
+    expect(dflt.thesis).toContain("跌破MA5");
+  });
+
   it("止盈到位 → 清仓", () => {
     const h = holding({ 止损: -0.5, 止盈: 0.03, 破线: null }, { positions: pos(10.5) });
     // 11 / 10.5 − 1 = +4.76%

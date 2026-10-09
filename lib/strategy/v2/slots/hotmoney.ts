@@ -331,7 +331,9 @@ export const 离场器_游资纪律: ExitSlot = {
     const last = bars[bars.length - 1];
     const 止损 = num(params["止损"]) ?? -0.08;
     const 止盈 = num(params["止盈"]);
-    const 破线 = typeof params["破线"] === "string" ? params["破线"] : "MA5";
+    // 破线：不写（undefined）= 默认 MA5；显式写 null = 关掉这条。
+    // 之前 null 也回落成 MA5，于是"不要破线离场"根本配不出来
+    const 破线 = params["破线"] === null ? null : typeof params["破线"] === "string" ? params["破线"] : "MA5";
     const 炸板走 = params["炸板走"] !== false;
 
     const pnl = position.cost > 0 ? last.c / position.cost - 1 : 0;

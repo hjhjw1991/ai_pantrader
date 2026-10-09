@@ -2,8 +2,9 @@
  * 影子盘毕业与策略切换。
  *
  * 口径（用户 2026-09-23 选定，见 memory shadow-book-decisions）：
- *   毕业 = 实盘影子样本 ≥ 30 笔已结算、≥ 20 个交易日，期望显著优于在任者（Welch t ≥ 2），
- *          最大回撤不比在任者差。回放样本一概不算
+ *   毕业 = 实盘影子样本 ≥ 120 笔已结算、≥ 45 个共同交易日（2026-09-27 收紧，见 GRADUATION），
+ *          日度期望显著优于在任者（Welch t ≥ 2.5，k 个候选同场时按 Bonferroni 再抬），
+ *          自身日度期望为正且对 0 检验 t ≥ 2，最大回撤 ≤ 25% 且不比在任者深。回放样本一概不算
  *   切换 = 前 2 次由人批，之后自动。回滚之后重新数：人连续批过 2 次才恢复自动
  *
  * "在任者"不是固定的 baseline，而是当前正式策略用的那套组合：
@@ -275,24 +276,39 @@ export function checkGraduation(db: Db, challengerId: string, incumbentId: strin
   };
 }
 
+/** 同场参评的挑战者：除在任者外所有在跑的变体。Bonferroni 的 k 就是它的个数 */
+function challengerIds(db: Db, incumbentId: string): string[] {
+  return (db.prepare("SELECT id FROM shadow_variant WHERE status = 'active' AND id != ? ORDER BY id").all(incumbentId) as Array<{ id: string }>).map(r => r.id);
+}
+
+/**
+ * Bonferroni：k 个候选同场竞技，就得用 k 重比较的尺子。
+ * 不做这一步，榜单第一名常常只是这一次抽样里运气最好的那个 ——
+ * 九个候选各自按 t ≥ 2 独立过关，至少一个假阳性进场的机会约 37%。
+ *
+ * 榜单、批准前复核、夜间复核待批提案**必须用同一把尺子**：
+ * 只在榜单上收紧、批准时又退回 2.5，等于提案阶段拦住的假阳性在批准阶段放行。
+ */
+function applyMultipleTesting(c: GradCheck, k: number): GradCheck {
+  const tBar = bonferroniT(k);
+  if (c.passed && c.t !== null && c.t < tBar) {
+    c.passed = false;
+    c.failures = [...c.failures,
+      `多重检验：${k} 个候选同场比较，Bonferroni 门槛 t ≥ ${tBar.toFixed(2)}，当前 ${c.t.toFixed(2)}`];
+  }
+  return c;
+}
+
+/** 单个挑战者的毕业判定，带上与榜单一致的多重检验校正（k = 当前同场的挑战者数） */
+function checkGraduationAdjusted(db: Db, challengerId: string, incumbentId: string, lock: Record<string, string>): GradCheck {
+  const k = Math.max(1, challengerIds(db, incumbentId).length);
+  return applyMultipleTesting(checkGraduation(db, challengerId, incumbentId, lock), k);
+}
+
 /** 所有在跑的挑战者对在任者的成绩单，过线的排前面，其余按 t 降序 */
 export function graduationBoard(db: Db, incumbentId: string, lock: Record<string, string> = defaultSlotRegistry.lock()): GradCheck[] {
-  const ids = (db.prepare("SELECT id FROM shadow_variant WHERE status = 'active' AND id != ? ORDER BY id").all(incumbentId) as Array<{ id: string }>).map(r => r.id);
-  const checks = ids.map(id => checkGraduation(db, id, incumbentId, lock));
-
-  /**
-   * Bonferroni：k 个候选同场竞技，就得用 k 重比较的尺子。
-   * 不做这一步，榜单第一名常常只是这一次抽样里运气最好的那个 ——
-   * 九个候选各自按 t ≥ 2 独立过关，至少一个假阳性进场的机会约 37%。
-   */
-  const tBar = bonferroniT(checks.length);
-  for (const c of checks) {
-    if (c.passed && c.t !== null && c.t < tBar) {
-      c.passed = false;
-      c.failures = [...c.failures,
-        `多重检验：${checks.length} 个候选同场比较，Bonferroni 门槛 t ≥ ${tBar.toFixed(2)}，当前 ${c.t.toFixed(2)}`];
-    }
-  }
+  const ids = challengerIds(db, incumbentId);
+  const checks = ids.map(id => applyMultipleTesting(checkGraduation(db, id, incumbentId, lock), ids.length));
 
   /**
    * 排序：**合格者在前，合格者内部按日度期望（%/日）从高到低**。
@@ -399,7 +415,7 @@ export function approveSwitch(db: Db, id: number, by: "human" | "auto", o: Switc
     markStale(db, id, "等批期间策略文件的槽位被改过，提案作废", now);
     throw new Error(`策略文件的槽位已不是提案时的组合，提案 ${id} 作废（不覆盖手改）`);
   }
-  const g = checkGraduation(db, sw.toVariant!, sw.fromVariant!, o.lock ?? defaultSlotRegistry.lock());
+  const g = checkGraduationAdjusted(db, sw.toVariant!, sw.fromVariant!, o.lock ?? defaultSlotRegistry.lock());
   if (!g.passed) {
     markStale(db, id, `证据不再成立：${g.failures.join("；")}`, now);
     throw new Error(`提案 ${id} 的证据不再成立：${g.failures.join("；")}`);
@@ -491,7 +507,7 @@ export function runSwitchCycle(db: Db, o: SwitchOpts = {}): CycleResult {
       markStale(db, p.id, "等批期间策略文件的槽位被改过，提案作废", now);
       return { action: "stale", id: p.id, reason: "策略文件被改过" };
     }
-    const g = checkGraduation(db, p.toVariant!, p.fromVariant!, lock);
+    const g = checkGraduationAdjusted(db, p.toVariant!, p.fromVariant!, lock);
     if (!g.passed) {
       markStale(db, p.id, `证据不再成立：${g.failures.join("；")}`, now);
       pushNotification(db, {

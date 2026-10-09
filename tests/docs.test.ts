@@ -51,7 +51,9 @@ describe("docs/ARCHITECTURE.md", () => {
      * 直接在 Node 里读文件，跨平台，而且比起子进程快得多。
      */
     const SPEC_REF = /spec §\d+(?:\.\d+)?/g;
-    const TEXT = new Set([".ts", ".tsx", ".js", ".mjs", ".sql", ".md", ".yaml", ".yml", ".json"]);
+    // .example：config/strategies/default.yaml.example 是入库的策略样例，里面就有 spec 引用；
+    // .cjs：以后加的 CommonJS 脚本同理。漏了扩展名，那类文件里的引用就永远不被核对
+    const TEXT = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs", ".sql", ".md", ".yaml", ".yml", ".json", ".example"]);
     const found = new Set<string>();
     const walk = (dir: string): void => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {

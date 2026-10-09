@@ -143,6 +143,36 @@ describe("identifyMainlines —— 2026-07-27 主线级漏扫的根因回归测�
     expect(names).toEqual(["化学制药"]);
   });
 
+  /**
+   * 上一条 TopN = 3、板块也只有 3 个，"先筛后截"与"先截后筛"结果一样，顺序其实没被测到。
+   * 这里 TopN = 2 < 5 个板块，且排第 1、第 3 的都是 0 涨停：
+   *   先筛后截 → [白酒, 化学制药]（被筛掉的名额让给第 4 名）
+   *   先截后筛 → [白酒]（第 1 名占了名额又被筛掉，名额白丢）
+   */
+  it("先按涨停家数过滤、再截 TopN：高排名的 0 涨停板块不占名额", () => {
+    const v = makeView({
+      asOf: D,
+      sectors: {
+        [D]: [
+          rank("医疗服务", 5.0), rank("白酒", 4.0), rank("房产服务", 3.0),
+          rank("化学制药", 2.0), rank("旅游", 1.0),
+        ],
+      },
+      zt: {
+        [D]: [
+          ztRow(D, "600519", { sector: "白酒", lbc: 1 }),
+          ztRow(D, "600276", { sector: "化学制药", lbc: 1 }),
+          ztRow(D, "600196", { sector: "化学制药", lbc: 2 }),
+          ztRow(D, "600138", { sector: "旅游", lbc: 1 }),
+        ],
+      },
+    });
+    const r = identifyMainlines(v, D, { 板块涨幅榜TopN: 2 });
+    expect(r.mainlines.filter(m => m.source === "板块榜").map(m => m.name)).toEqual(["白酒", "化学制药"]);
+    expect(r.板块榜候选).toBe(5);
+    expect(r.板块榜筛掉).toBe(2);
+  });
+
   it("板块涨停下限=0 可恢复旧行为（涨幅榜照进，不做家数过滤）", () => {
     const names = identifyMainlines(view, D, { 板块涨幅榜TopN: 2, 板块涨停下限: 0 })
       .mainlines.filter(m => m.source === "板块榜").map(m => m.name);

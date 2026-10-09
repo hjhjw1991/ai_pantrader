@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkGraduation, runSwitchCycle, approveSwitch, rejectSwitch, rollbackSwitch,
-  autoSwitchAllowed, switchStatus, incumbentOf, GRADUATION, bonferroniT,
+  autoSwitchAllowed, switchStatus, incumbentOf, GRADUATION, bonferroniT, graduationBoard,
 } from "@/lib/shadow/switch";
 import { seedVariants, addVariant, retireVariant } from "@/lib/shadow/book";
 import { writeSlotsInText, bumpPatch } from "@/lib/strategy/loader";
@@ -58,8 +58,8 @@ function dayJitter(d: string): number {
   return (h / 1000 - 0.5) * 2.4;
 }
 
-/** 每个变体每天两笔实盘样本：日均值 = mean + 当日抖动，笔间再 ±0.5 */
-function seedLive(db: TempDb["db"], variant: string, days: string[], mean: number, lock = LOCK): void {
+/** 每个变体每天两笔实盘样本：日均值 = mean + 当日抖动 × amp，笔间再 ±0.5 */
+function seedLive(db: TempDb["db"], variant: string, days: string[], mean: number, lock = LOCK, amp = 1): void {
   const p = db.prepare(
     `INSERT INTO shadow_pred (id, variant_id, source, base_date, decided_on, code, account, trigger_px, size, gear, strategy_id, slot_lock, created_at)
      VALUES (?, ?, 'live', ?, ?, ?, '卫星', 10, 0.1, '中性', 'default', ?, 'x')`);
@@ -71,7 +71,7 @@ function seedLive(db: TempDb["db"], variant: string, days: string[], mean: numbe
   const js = days.map(dayJitter);
   const mj = js.reduce((a, b) => a + b, 0) / js.length;
   days.forEach((d, i) => {
-    const j = js[i] - mj;
+    const j = (js[i] - mj) * amp;
     for (const [code, off] of [["600001", 0.5], ["600002", -0.5]] as const) {
       const id = `${d}:${variant}:live:${code}`;
       p.run(id, variant, d, d, code, lock);
@@ -176,7 +176,7 @@ describe("毕业判定", () => {
     expect(g.failures.join()).toMatch(/对 0 检验/);
   });
 
-  it("回撤超过绝对上限 → 不毕业（在任者更深也不行）", () => {
+  it("回撤在绝对上限之内 → 不因回撤被拦", () => {
     const days = weekdays(60);
     seedLive(t.db, "baseline", days, -1);
     seedLive(t.db, "pricing", days, 1);
@@ -185,10 +185,84 @@ describe("毕业判定", () => {
     expect(g.passed).toBe(true);
   });
 
+  it("回撤超过绝对上限 → 不毕业（在任者更深也不行）", () => {
+    const days = weekdays(60);
+    seedLive(t.db, "baseline", days, -1);     // 在任者天天亏，累计回撤远深于挑战者
+    seedLive(t.db, "pricing", days, 1);
+    // 中途一笔 −40%：期望仍为正、t 仍显著，唯独回撤穿了 25% 的绝对上限
+    const d = days[30], id = `${d}:pricing:live:600003`;
+    t.db.prepare(
+      `INSERT INTO shadow_pred (id, variant_id, source, base_date, decided_on, code, account, trigger_px, size, gear, strategy_id, slot_lock, created_at)
+       VALUES (?, 'pricing', 'live', ?, ?, '600003', '卫星', 10, 0.1, '中性', 'default', ?, 'x')`).run(id, d, d, LOCK);
+    t.db.prepare(
+      `INSERT INTO shadow_outcome (pred_id, status, entry_date, entry_px, exit_date, exit_px, exit_reason, net_pct, settled_at)
+       VALUES (?, '已结算', ?, 10, ?, 6, '止损', -40, 'x')`).run(id, d, d);
+    const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+    expect(g.maxDrawdown!).toBeGreaterThan(GRADUATION.maxDrawdown);
+    expect(g.incumbentMaxDrawdown!).toBeGreaterThan(g.maxDrawdown!);   // 在任者更深
+    expect(g.passed).toBe(false);
+    expect(g.failures).toHaveLength(1);                                 // 只有回撤这一条拦住它
+    expect(g.failures[0]).toMatch(/超过绝对上限 25%/);
+  });
+
   it("Bonferroni：多个候选同场参评时门槛抬高", () => {
     expect(bonferroniT(1)).toBe(GRADUATION.minT);
     expect(bonferroniT(9)).toBeGreaterThan(bonferroniT(2));
     expect(bonferroniT(9)).toBeGreaterThan(2.7);   // 九个候选的标准校正门槛约 2.77
+  });
+
+  /**
+   * 榜单按 Bonferroni 收紧过，批准与夜间复核也必须用同一把尺子 ——
+   * 否则提案时只有 1 个候选（门槛 2.5），后来候选变多，批准时仍按 2.5 放行。
+   */
+  describe("批准 / 复核沿用榜单的 Bonferroni 门槛", () => {
+    const o = () => ({ path: file, now: "2026-02-10 22:30:00" });
+    const days = weekdays(60);
+    const others = () => (t.db.prepare("SELECT id FROM shadow_variant WHERE id NOT IN ('baseline', 'pricing')").all() as Array<{ id: string }>).map(r => r.id);
+    const setOthers = (st: string) => t.db.prepare(`UPDATE shadow_variant SET status = ? WHERE id NOT IN ('baseline', 'pricing')`).run(st);
+
+    /** 只剩一个挑战者时过线（t ≈ 2.66 ≥ 2.5），再把其余候选放回来 → k 变大，门槛抬到 ~2.9 */
+    function proposeThenWiden(): number {
+      seedLive(t.db, "baseline", days, 0);
+      seedLive(t.db, "pricing", days, 0.34);
+      setOthers("retired");
+      const g = checkGraduation(t.db, "pricing", "baseline", defaultSlotRegistry.lock());
+      expect(g.passed).toBe(true);
+      const k = others().length + 1;
+      expect(g.t!).toBeLessThan(bonferroniT(k));         // 夹具本身要落在 2.5 与 k 重门槛之间
+      const r = runSwitchCycle(t.db, o()) as any;
+      expect(r).toMatchObject({ action: "proposed", variant: "pricing" });
+      setOthers("active");
+      return r.id;
+    }
+
+    it("批准时候选变多 → 按 k 重门槛复核，不过线就作废", () => {
+      const id = proposeThenWiden();
+      expect(() => approveSwitch(t.db, id, "human", o())).toThrow(/多重检验/);
+      expect(switchStatus(t.db, o()).history[0].status).toBe("stale");
+      expect(readSlots().version).toBe(V0);
+    });
+
+    it("夜间复核待批提案同样按 k 重门槛", () => {
+      proposeThenWiden();
+      const r = runSwitchCycle(t.db, o());
+      expect(r).toMatchObject({ action: "stale" });
+      expect((r as any).reason).toMatch(/多重检验/);
+    });
+  });
+
+  it("排序按日度期望：合格者里期望高的排前面，即使它的 t 更低", () => {
+    const days = weekdays(60);
+    seedLive(t.db, "baseline", days, -1);
+    seedLive(t.db, "pricing", days, 1.5);                    // 期望低、波动小 → t 高
+    seedLive(t.db, "cycle", days, 2, LOCK, 3);               // 期望高、波动大 → t 低
+    const board = graduationBoard(t.db, "baseline", defaultSlotRegistry.lock());
+    const [a, b] = board;
+    expect([a.variant, b.variant]).toEqual(["cycle", "pricing"]);
+    expect(a.passed && b.passed).toBe(true);
+    expect(a.dailyMean!).toBeGreaterThan(b.dailyMean!);
+    expect(a.t!).toBeLessThan(b.t!);                          // 按 t 排就会反过来
+    expect(board.slice(2).every(g => !g.passed)).toBe(true);
   });
 
   it("只比共同的日子：挑战者多出来的日子不算", () => {

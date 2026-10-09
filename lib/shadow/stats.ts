@@ -102,20 +102,27 @@ export function summarize(ts: Trade[]): Summary {
  * 未触发的推荐记 0，不是跳过：那天挂单没成交，这笔机会就是没兑现
  * （等价于按预测数均分资金、没成交的那份资金闲置）。跳过它们等于宣称
  * "成交率不影响收益"，而挂单挂多低恰恰是靠成交率在起作用。
+ * 所以每天的数 = 已结算净收益之和 / 当天预测总数（含未触发）——
+ * 有成交也有未触发的日子，未触发的那几份照样占分母（2026-10-08 修正：
+ * 之前这种日子只平均已结算的几笔，把日度收益与 t 都抬高了）。
+ *
+ * 还没落定的（已结算但 netPct 为空、或其它非"已结算 / 未触发"的状态，如持有中）
+ * 既不进分子也不进分母：它的结果还不知道，记 0 会把还在路上的盈亏说成"没兑现"。
+ * 正常情况下这种行进不来 —— 待定的不落 shadow_outcome，switch 那边整天剔除有未结的日子；
+ * 这里只是防御。一天里全是未落定的，这天不出数。
  */
 export function dailyReturns(ts: Trade[]): number[] {
-  const byDay = new Map<string, number[]>();
+  const byDay = new Map<string, { sum: number; n: number }>();
   for (const t of ts) {
-    if (t.status === "已结算") {
-      if (t.netPct === null) continue;
-      if (!byDay.has(t.baseDate)) byDay.set(t.baseDate, []);
-      byDay.get(t.baseDate)!.push(t.netPct);
-    } else if (!byDay.has(t.baseDate)) {
-      byDay.set(t.baseDate, []);                     // 未触发：占位 0，别让这天消失
-    }
+    const settled = t.status === "已结算" && t.netPct !== null;
+    if (!settled && t.status !== "未触发") continue;   // 未落定：不计入当天
+    const d = byDay.get(t.baseDate) ?? { sum: 0, n: 0 };
+    if (settled) d.sum += t.netPct as number;          // 未触发：分子记 0，分母照算
+    d.n++;
+    byDay.set(t.baseDate, d);
   }
   return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([, xs]) => (xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length));
+    .map(([, d]) => d.sum / d.n);
 }
 
 /** Welch t：a 的均值减 b 的均值，除以 sqrt(va/na + vb/nb)（样本方差，n−1） */

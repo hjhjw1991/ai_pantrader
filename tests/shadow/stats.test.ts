@@ -100,6 +100,28 @@ describe("dailyReturns（按基准日合成的独立观测）", () => {
   });
 
   /**
+   * 2026-10-08 修正：有成交也有未触发的日子，之前只平均已结算的几笔，
+   * 未触发的那几份被静悄悄跳过 —— 日度收益和 t 都被抬高。
+   * 口径是"按预测数均分资金"，分母必须是当天全部预测。
+   */
+  it("同一天既有成交又有未触发：分母是当天全部预测数，未触发那份记 0", () => {
+    const miss = { ...tr(0), status: "未触发" as const, netPct: null, baseDate: "2026-03-01" };
+    const ts = [tr(6, { baseDate: "2026-03-01" }), tr(2, { baseDate: "2026-03-01" }), miss, miss];
+    expect(dailyReturns(ts)).toEqual([2]);              // (6 + 2 + 0 + 0) / 4，不是 (6 + 2) / 2
+  });
+
+  it("还没落定的（netPct 为空 / 非已结算非未触发）既不进分子也不进分母", () => {
+    const ts = [
+      tr(4, { baseDate: "2026-03-01" }),
+      { ...tr(0), status: "未触发" as const, netPct: null, baseDate: "2026-03-01" },
+      tr(0, { baseDate: "2026-03-01", netPct: null }),
+      { ...tr(0), status: "持有中" as any, netPct: null, baseDate: "2026-03-01" },
+      { ...tr(0), status: "持有中" as any, netPct: null, baseDate: "2026-03-02" },
+    ];
+    expect(dailyReturns(ts)).toEqual([2]);              // 3/02 全是未落定：不出数
+  });
+
+  /**
    * 这条是改口径的全部理由，不能被别的断言替代。
    * 同样这批样本：逐笔看 60 笔、日度看 30 天，样本量差一倍，
    * 而逐笔的标准误比日度小得多 —— 因为同日的两笔完全正相关，

@@ -50,6 +50,8 @@ function stubs(over: Record<string, StubValue> = {}): Record<string, StubValue> 
 
 /** 没有主线 → baseline 三档阈值择时器判为中性档 */
 const 中性stub = { 主线识别: { value: [], label: "无主线", confidence: 0.5 } };
+/** 主线还在、但盘面强度低于进攻线 → 中性档，且主线筛照常放行候选 */
+const 中性有主线stub = { 盘面强度: { value: 50, label: "中", confidence: 0.9 } };
 
 function run(over: Partial<StrategyEngineInput> = {}, cfgMutate: (y: string) => string = s => s, s: Record<string, StubValue> = {}) {
   const input: StrategyEngineInput = {
@@ -74,9 +76,13 @@ const withGate = (line: string) => (y: string) => y.replace("  防守触发:", `
 
 describe("准入闸门：不配就是不限制", () => {
   it("没写 开仓档位 → 中性档照样出候选（parity 的前提，改默认会毁掉对照组）", () => {
-    const card = run({}, s => s, 中性stub);
+    // 用"盘面强度不够"造中性档而不是"无主线"：无主线时主线筛本身就会清空候选，
+    // 那样"出了候选"这条断言永远成立不了，测试就退化成只看有没有告警
+    const card = run({}, s => s, 中性有主线stub);
     expect(card.env.gear).toBe("中性");
     expect(card.warnings.some(w => w.includes("准入闸门"))).toBe(false);
+    // 只断言"没有闸门告警"不够：候选被别的原因清空也满足它。不限制 = 中性档真的出了候选
+    expect(card.candidates.length).toBeGreaterThan(0);
   });
 });
 
