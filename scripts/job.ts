@@ -30,6 +30,7 @@ import { runPreopenPlan } from "@/lib/plan/preopen";
 import { runSignalWatch } from "@/lib/plan/watch";
 import { runWeeklyReview } from "@/lib/plan/review";
 import { runNightlyDerived } from "@/lib/plan/derived";
+import { flushPushes, readPushConfig } from "@/lib/ui/push";
 // CLI 不读 .env.local（只有 next 会读），这里补上，免得在默认目录上新建/操作一个空库
 import { loadCliEnv } from "@/lib/config";
 loadCliEnv();
@@ -110,6 +111,22 @@ if (argvName === "adjfix") {
   process.exit(0);
 }
 
+/**
+ * 退出前等在途推送落地。
+ *
+ * 推送是 fire-and-forget（pushOutbound 不返回 Promise），守护进程常驻无所谓，
+ * 但这里跑完就 process.exit —— 盘中信号、盘前计划在 `pnpm job` 里触发的推送
+ * 会被半路掐断：库里有通知，手机上没有。有上限地等：走代理失败还会直连重试一次，
+ * 所以给两倍单次超时再加一点余量；等不完也照退，不能让推送卡住 job。
+ */
+async function exitAfterPushes(code: number): Promise<never> {
+  try {
+    const t = readPushConfig().timeoutMs;
+    await flushPushes((Number.isFinite(t) && t > 0 ? t : 8000) * 2 + 1000);
+  } catch { /* 推送是增强，等它失败也照常退出 */ }
+  process.exit(code);
+}
+
 try {
   // 同 daemon：组装根负责把上层实现注进来
   const r = await runJob(name, {
@@ -122,11 +139,11 @@ try {
   if (slot !== null) finishSlot(db, date, name, slot, "done", r.stats);
   console.log(JSON.stringify(slot === null ? r : { ...r, slot, runner }));
   db.close();
-  process.exit(0);
+  await exitAfterPushes(0);
 } catch (e: any) {
   const msg = e?.message ?? String(e);
   if (slot !== null) finishSlot(db, date, name, slot, "failed", undefined, msg);
   console.error(JSON.stringify({ name, slot, error: msg }));
   db.close();
-  process.exit(1);
+  await exitAfterPushes(1);
 }

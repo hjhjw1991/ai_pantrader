@@ -74,6 +74,11 @@ export interface MoodSignal {
   body: string;
   /** 通知去重键：同一天同一件事只响一次 */
   dedupeKey: string;
+  /**
+   * 已经响过这个键的通知，本条就不必再响（更重的同类已覆盖它）。
+   * 例：critical 的"盘中情绪转弱"响过之后，同一天再来 warn 级的转弱是降级，不该再吵人。
+   */
+  supersededBy?: string;
 }
 
 export interface IntradayMood {
@@ -137,8 +142,31 @@ const TEMP_AVG_MEAN = 0.027, TEMP_AVG_SD = 1.017;
 /** 时点数少于这么多的快照是采集半途的产物，不参与统计 */
 const MIN_SAMPLE = 1000;
 
-/** 最后一个时点距今超过这么久就算陈旧（收盘后 / 未开盘） */
+/** 最后一个时点距今超过这么多**交易时间**就算陈旧（收盘后 / 未开盘）。午休不计，见 tradeClockMs */
 const STALE_MS = 15 * 60_000;
+
+/** 午休 11:30 ~ 13:00（上海挂钟，日内毫秒） */
+const LUNCH_START_MS = (11 * 60 + 30) * 60_000;
+const LUNCH_END_MS = 13 * 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+
+/**
+ * 把挂钟毫秒折算成"交易时钟"：午休那 90 分钟不走表。
+ *
+ * 为什么要折：快照只在交易时段采，午休整整 90 分钟没有新时点。按挂钟算的话
+ *   - 11:45 起情绪就被标成"陈旧"，整个午休界面都在说数据过期 —— 其实市场根本没动；
+ *   - 13:00 ~ 13:30 的"30 分钟窗口"会去跟 11:30 之前比（挂钟往前 30 分钟落在午休里，
+ *     取到的是 11:30 那根），等于拿 2 小时的跨度冒充 30 分钟，按 30 分钟校准的阈值全部失真。
+ * 折算后：午休内任意时刻都等同 11:30；13:00 之后整体往前挪 90 分钟，13:00 紧接 11:30。
+ */
+export function tradeClockMs(ms: number): number {
+  if (!Number.isFinite(ms)) return ms;
+  const dayStart = Math.floor(ms / DAY_MS) * DAY_MS;
+  const tod = ms - dayStart;
+  if (tod <= LUNCH_START_MS) return ms;
+  if (tod < LUNCH_END_MS) return dayStart + LUNCH_START_MS;
+  return ms - (LUNCH_END_MS - LUNCH_START_MS);
+}
 
 /**
  * 时间戳列归一到上海挂钟。库里两种口径并存（migration 006 之后是挂钟串，之前是 UTC ISO），
@@ -212,11 +240,11 @@ function nextDay(day: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** 序列里找 ts <= target 的最后一个时点 */
+/** 序列里找交易时钟 <= target 的最后一个时点（target 也是交易时钟） */
 function lastAtOrBefore(s: MoodPoint[], targetMs: number): MoodPoint | null {
   let hit: MoodPoint | null = null;
   for (const p of s) {
-    const m = tsMs(p.ts);
+    const m = tradeClockMs(tsMs(p.ts));
     if (!Number.isFinite(m) || m > targetMs) break;
     hit = p;
   }
@@ -245,14 +273,22 @@ function shiftSignal(d: { breadth: number; avgPct: number }, day: string): MoodS
   const better = (bd: number, av: number) => bd >= SHIFT_WARN_BREADTH || av >= SHIFT_WARN_AVG;
 
   if (worse(d.breadth, d.avgPct)) {
+    const crit = worseCrit(d.breadth, d.avgPct);
+    /**
+     * warn 与 critical 必须用**不同**的去重键。
+     * 以前共用 `mood:weak:${day}`：上午先响过一次 warn，下午真崩到 critical 时
+     * 被通知表的唯一索引当成"已通知过"静默吞掉 —— 升级恰恰是最该响的那一次。
+     * 反方向（critical 之后又来 warn）是降级，由 supersededBy 压掉。
+     */
     return {
       kind: "mood_shift",
-      level: worseCrit(d.breadth, d.avgPct) ? "critical" : "warn",
+      level: crit ? "critical" : "warn",
       title: "盘中情绪转弱",
       body:
         `30 分钟内上涨占比 ${fmtDelta(d.breadth)}、平均涨幅 ${fmtPct(d.avgPct)}。` +
         `持仓留意跌破日内低点，观察池推迟买入。`,
-      dedupeKey: `mood:weak:${day}`,
+      dedupeKey: crit ? `mood:weak:critical:${day}` : `mood:weak:${day}`,
+      ...(crit ? {} : { supersededBy: `mood:weak:critical:${day}` }),
     };
   }
   if (better(d.breadth, d.avgPct)) {
@@ -301,7 +337,8 @@ export function intradayMood(db: Db, asOf = shanghaiTs()): IntradayMood {
   }
 
   const nowMs = tsMs(now.ts);
-  const ago30 = Number.isFinite(nowMs) ? lastAtOrBefore(visible, nowMs - 30 * 60_000) : null;
+  // 30 分钟按交易时钟量：13:10 的"30 分钟前"是 11:10，而不是落在午休里的 12:40
+  const ago30 = Number.isFinite(nowMs) ? lastAtOrBefore(visible, tradeClockMs(nowMs) - 30 * 60_000) : null;
   const open = visible[0];
 
   const sub = (a: MoodPoint, b: MoodPoint) => ({
@@ -393,7 +430,8 @@ export function intradayMood(db: Db, asOf = shanghaiTs()): IntradayMood {
     });
   }
 
-  const ageMs = Number.isFinite(nowMs) ? Date.parse(`${asOf.slice(0, 10)}T${asOf.slice(11)}Z`) - nowMs : NaN;
+  // 陈旧同样按交易时钟：午休时最后一根停在 11:30 是正常的，不算过期
+  const ageMs = Number.isFinite(nowMs) ? tradeClockMs(asOfMs) - tradeClockMs(nowMs) : NaN;
 
   return {
     now, ago30, open,

@@ -53,9 +53,20 @@ export interface PositionView {
  * 用平均涨幅而不是指数涨幅：库里没有指数序列（日线采集只拉 6 位代码），
  * 而 quote_snapshot 是全市场 5887 只，直接算得出均值，不需要额外数据源。
  */
-function relStrength(pct: number | null | undefined, marketAvg: number | null): number | null {
-  if (marketAvg === null || pct === null || pct === undefined || !Number.isFinite(pct)) return null;
-  return pct - marketAvg;
+export function relStrength(
+  q: Pick<Quote, "ts" | "pct"> | null | undefined,
+  market: { ts: string; avgPct: number } | null | undefined,
+): number | null {
+  if (!q || !market) return null;
+  const pct = q.pct;
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  /**
+   * 必须是同一个交易日。latestQuotes 取的是**逐票**最新快照：停牌票今天没有快照，
+   * 拿到的是昨天（甚至更早）那根 —— 用昨天的涨幅去减今天的市场均值，
+   * 会凭空算出"跑赢/跑输"。日期对不上就如实给 null。
+   */
+  if (!q.ts || !market.ts || q.ts.slice(0, 10) !== market.ts.slice(0, 10)) return null;
+  return pct - market.avgPct;
 }
 
 export interface PositionsView {
@@ -122,7 +133,7 @@ export function positionsView(db: Db, cfg: StrategyConfig | null): PositionsView
       pnl,
       stopGapRatio:
         q && p.stopPx !== null && p.stopPx > 0 ? (q.price - p.stopPx) / p.stopPx : null,
-      vsMarket: relStrength(q?.pct, mood?.now?.avgPct ?? null),
+      vsMarket: relStrength(q, mood?.now),
     };
   });
 
@@ -229,7 +240,7 @@ export function watchpoolView(db: Db): WatchpoolView {
         dist: triggerDistance(q?.price ?? null, row.triggerPx),
         inconsistent:
           row.triggerPx !== null && row.stopPx !== null && row.stopPx >= row.triggerPx,
-        vsMarket: relStrength(q?.pct, mood?.now?.avgPct ?? null),
+        vsMarket: relStrength(q, mood?.now),
       };
     }),
   };

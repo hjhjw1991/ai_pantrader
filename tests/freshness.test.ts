@@ -207,6 +207,61 @@ describe("新鲜度守卫（端到端）", () => {
     expect(calls.exit).toBe(1);
   });
 
+  it("让位之后交班过程抛异常：也必须把锁拿回来，否则本进程无锁裸跑", async () => {
+    write("changed.ts", 1000);
+    const { calls, handle } = guardDeps({
+      spawn: () => 555,
+      alive: () => { throw new Error("EPERM"); },   // 让位之后才抛
+      lockPid: () => undefined,
+      lockPath: path.join(dir, "scheduler.pid"),
+      retake: () => true,
+    });
+
+    await sleep(150);
+    handle.stop();
+
+    expect(calls.release).toBeGreaterThan(0);
+    expect(calls.retake).toBe(calls.release);   // 每次让位都对应一次取回
+    expect(calls.stop).toBe(0);
+    expect(calls.exit).toBe(0);
+  });
+
+  it("让位后抛异常且锁已被别人接管：退出（有人在采）", async () => {
+    write("changed.ts", 1000);
+    const { calls, handle } = guardDeps({
+      spawn: () => 555,
+      alive: () => true,
+      lockPid: () => { throw new Error("读锁失败"); },
+      lockPath: path.join(dir, "scheduler.pid"),
+      retake: () => false,
+    });
+
+    await sleep(150);
+    handle.stop();
+
+    expect(calls.retake).toBe(1);
+    expect(calls.stop).toBe(1);
+    expect(calls.exit).toBe(1);
+  });
+
+  it("让位之前就抛异常：锁一直在手上，不需要也不该去抢锁", async () => {
+    write("changed.ts", 1000);
+    const { calls, handle } = guardDeps({
+      spawn: () => { throw new Error("spawn EAGAIN"); },
+      alive: () => true,
+      lockPid: () => undefined,
+      lockPath: path.join(dir, "scheduler.pid"),
+      retake: () => true,
+    });
+
+    await sleep(150);
+    handle.stop();
+
+    expect(calls.release).toBe(0);
+    expect(calls.retake).toBe(0);
+    expect(calls.exit).toBe(0);
+  });
+
   it("交班成功才停采集并退出，且不抢锁", async () => {
     write("changed.ts", 1000);
     const { calls, handle } = guardDeps({

@@ -1,9 +1,11 @@
 import { createHmac } from "node:crypto";
+import http from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   dispatchPush, feishuAtTag, feishuCardContent, feishuPayload, feishuSign, feishuText, isEnabled,
-  pushOutbound, readPushConfig, requestHttps, resetThrottle, secretFor,
-  shouldPush, throttled, wecomContent,
+  flushPushes, isPreSendError, pendingPushes, pushOutbound, PushPreSendError, readPushConfig,
+  requestHttps, resetThrottle, secretFor, shouldPush, throttled, trackPush, wecomContent,
 } from "@/lib/ui/push";
 import type { PushConfig, PushMessage, Transport } from "@/lib/ui/push";
 
@@ -353,7 +355,7 @@ describe("代理回退", () => {
     const calls: Array<string | null> = [];
     const io: Transport = async (_url, _opts, deps) => {
       calls.push(deps.proxy ?? null);
-      if (deps.proxy) throw new Error("代理超时");
+      if (deps.proxy) throw new PushPreSendError("代理连接超时");
       return { status: 200, body: '{"code":0}' };
     };
     const out = await dispatchPush(msg(), {
@@ -373,6 +375,50 @@ describe("代理回退", () => {
     expect(out[0].ok).toBe(false);
     expect(calls).toEqual([null]);
   });
+
+  /** 请求体发出去之前的三类失败：服务端一定没见过这条消息，换直连重发是安全的 */
+  for (const [label, err] of [
+    ["代理拒连", new PushPreSendError("代理连接失败：connect ECONNREFUSED 127.0.0.1:63722")],
+    ["CONNECT 非 200", new PushPreSendError("代理 CONNECT 返回 403")],
+    ["代理连接超时", new PushPreSendError("代理连接超时")],
+  ] as const) {
+    it(`${label}：直连重试一次`, async () => {
+      const calls: Array<string | null> = [];
+      const io: Transport = async (_u, _o, deps) => {
+        calls.push(deps.proxy ?? null);
+        if (deps.proxy) throw err;
+        return { status: 200, body: '{"code":0}' };
+      };
+      const out = await dispatchPush(msg(), {
+        config: cfg({ feishuUrls: [FEISHU], proxy: "http://127.0.0.1:63722" }), io,
+      });
+      expect(out[0].ok).toBe(true);
+      expect(calls).toEqual(["http://127.0.0.1:63722", null]);
+    });
+  }
+
+  /**
+   * 请求已经发出去、只是响应慢：服务端很可能已经收下了。
+   * 这时再直连发一次，手机上就是两条一模一样的消息 —— 宁可报失败。
+   */
+  for (const [label, err] of [
+    ["推送请求超时（请求已发出）", new Error("推送请求超时")],
+    ["连接被重置（请求已发出）", Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })],
+  ] as const) {
+    it(`${label}：不重试，避免重复消息`, async () => {
+      const calls: Array<string | null> = [];
+      const io: Transport = async (_u, _o, deps) => {
+        calls.push(deps.proxy ?? null);
+        throw err;
+      };
+      const out = await dispatchPush(msg(), {
+        config: cfg({ feishuUrls: [FEISHU], proxy: "http://127.0.0.1:63722" }), io,
+      });
+      expect(out[0].ok).toBe(false);
+      expect(out[0].error).toContain(err.message);
+      expect(calls).toEqual(["http://127.0.0.1:63722"]);
+    });
+  }
 
   it("收到响应就不重试——哪怕业务码是错的，否则用户会收到两条", async () => {
     const calls: Array<string | null> = [];
@@ -405,4 +451,117 @@ describe("requestHttps", () => {
       requestHttps("https://192.0.2.1:8443/x", { method: "GET", headers: {} }, { timeoutMs: 400 })
     ).rejects.toThrow();
   }, 5000);
+});
+
+/**
+ * requestHttps 走代理时的错误分类 —— 只用本机 127.0.0.1 上的假代理，不碰任何真实 webhook。
+ */
+describe("requestHttps 代理阶段", () => {
+  const TARGET = "https://open.feishu.cn/open-apis/bot/v2/hook/never-sent";
+
+  /** 起一个本机假代理；onConnect 决定怎么回 CONNECT */
+  async function fakeProxy(onConnect: (sock: Socket) => void) {
+    const server = http.createServer();
+    const sockets = new Set<Socket>();
+    server.on("connect", (_req, sock: Socket) => { sockets.add(sock); onConnect(sock); });
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>(r => {
+        for (const s of sockets) s.destroy();
+        server.close(() => r());
+      }),
+    };
+  }
+
+  it("代理端口拒连 → PushPreSendError（可以直连重发）", async () => {
+    // 先占一个端口再放掉，确保它此刻没人听
+    const p = await fakeProxy(() => {});
+    await p.close();
+    const err = await requestHttps(TARGET, { method: "POST", headers: {}, body: "{}" },
+      { proxy: p.url, timeoutMs: 2000 }).catch(e => e);
+    expect(isPreSendError(err)).toBe(true);
+  });
+
+  it("CONNECT 返回非 200 → PushPreSendError", async () => {
+    const p = await fakeProxy(sock => sock.end("HTTP/1.1 403 Forbidden\r\n\r\n"));
+    try {
+      const err = await requestHttps(TARGET, { method: "POST", headers: {}, body: "{}" },
+        { proxy: p.url, timeoutMs: 2000 }).catch(e => e);
+      expect(isPreSendError(err)).toBe(true);
+      expect(String(err.message)).toContain("403");
+    } finally { await p.close(); }
+  });
+
+  it("握手阶段超时 → PushPreSendError；隧道之后才通也绝不再发请求", async () => {
+    let tunnelBytes = 0;
+    const p = await fakeProxy(sock => {
+      sock.on("data", b => { tunnelBytes += b.length; });
+      sock.on("error", () => {});
+      // 晚于超时才放行隧道：若实现没检查 settled，会在这之后把 TLS/请求发进来
+      setTimeout(() => {
+        if (!sock.destroyed) sock.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      }, 300);
+    });
+    try {
+      const err = await requestHttps(TARGET, { method: "POST", headers: {}, body: "{}" },
+        { proxy: p.url, timeoutMs: 100 }).catch(e => e);
+      expect(isPreSendError(err)).toBe(true);
+      await new Promise(r => setTimeout(r, 500));
+      expect(tunnelBytes).toBe(0);
+    } finally { await p.close(); }
+  }, 5000);
+
+  it("不走代理时的超时 → 普通错误（不属于握手阶段）", async () => {
+    const err = await requestHttps("https://192.0.2.1:8443/x", { method: "GET", headers: {} },
+      { timeoutMs: 300 }).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(isPreSendError(err)).toBe(false);
+  }, 5000);
+});
+
+/**
+ * flushPushes：`pnpm job` 跑完就 process.exit，不等在途推送的话请求会被半路掐断。
+ */
+describe("flushPushes", () => {
+  const deferred = () => {
+    let resolve!: () => void, reject!: (e: Error) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  it("没有在途推送时立刻返回 true", async () => {
+    expect(await flushPushes(10)).toBe(true);
+  });
+
+  it("等到在途推送全部落地（成功或失败都算）", async () => {
+    const a = deferred(), b = deferred();
+    trackPush(a.promise);
+    trackPush(b.promise);
+    expect(pendingPushes()).toBe(2);
+    setTimeout(() => a.resolve(), 20);
+    setTimeout(() => b.reject(new Error("网络挂了")), 40);
+    expect(await flushPushes(2000)).toBe(true);
+    expect(pendingPushes()).toBe(0);
+  });
+
+  it("有上限：等不完就返回 false，不会卡住退出", async () => {
+    const a = deferred();
+    trackPush(a.promise);
+    const t0 = Date.now();
+    expect(await flushPushes(50)).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    a.resolve();
+    expect(await flushPushes(1000)).toBe(true);
+  });
+
+  it("等待期间新登记的推送也会一起等", async () => {
+    const a = deferred(), b = deferred();
+    trackPush(a.promise);
+    setTimeout(() => { trackPush(b.promise); a.resolve(); }, 10);
+    setTimeout(() => b.resolve(), 40);
+    expect(await flushPushes(2000)).toBe(true);
+    expect(pendingPushes()).toBe(0);
+  });
 });

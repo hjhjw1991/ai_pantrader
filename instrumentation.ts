@@ -10,6 +10,8 @@
  *
  * 与 `pnpm daemon` 共用同一个 scripts/daemon.ts，不存在两份实现。
  */
+import { closeDaemonLog, openDaemonLog, resolveDataDir } from "@/lib/data/daemon-log";
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   if (process.env.PANTRADER_NO_SCHEDULER === "1") {
@@ -24,15 +26,22 @@ export async function register(): Promise<void> {
   const path = process.getBuiltinModule("path");
 
   const script = path.join(process.cwd(), "scripts", "daemon.ts");
+  /**
+   * 输出落到 <dataDir>/logs/daemon.log，与 daemon.ts 交班拉起的接班进程同一个文件。
+   * 以前是 stdio:"ignore"：推送失败的 console.warn、启动即崩的报错全被吞掉，
+   * 手机收不到推送 / 采集没起来时一条线索都没有。
+   */
+  const logFd = openDaemonLog(resolveDataDir());
   // 用当前 node 可执行文件 + tsx loader，跨平台且不依赖 PATH 里有 pnpm
   const child = spawn(process.execPath, ["--import=tsx", script], {
     cwd: process.cwd(),
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     // Windows 上 detached 子进程默认会弹一个黑色控制台窗口
     windowsHide: true,
     env: { ...process.env, PANTRADER_RUNNER: "instrumentation" },
   });
+  closeDaemonLog(logFd);   // 子进程已拿到 dup 的那份
   child.on("error", e => console.error(`[候潮] 采集守护进程启动失败：${e.message}`));
   // detach：网页进程退出后采集继续跑
   child.unref();

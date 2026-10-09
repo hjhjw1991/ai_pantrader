@@ -237,8 +237,30 @@ export function secretFor(index: number, urls: string[], secrets: string[]): str
 
 interface ReqOpts { method: string; headers: Record<string, string>; body?: string }
 
+/**
+ * 请求体**还没发出去**之前就失败的错误：代理拒连、CONNECT 非 200、代理连接超时。
+ *
+ * 只有这类失败能安全地换直连重发 —— 服务端肯定没收到过这条消息。
+ * 反过来，请求已经发出、只是响应慢（"推送请求超时"），服务端很可能已经收下了，
+ * 这时再直连发一次，手机上就是两条一模一样的消息。
+ */
+export class PushPreSendError extends Error {
+  readonly preSend = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "PushPreSendError";
+  }
+}
+
+export function isPreSendError(e: unknown): boolean {
+  return e instanceof PushPreSendError || (e as { preSend?: unknown } | null)?.preSend === true;
+}
+
 /** 通过 HTTP CONNECT 隧道建立到目标的 TCP 连接。代理不支持 CONNECT 时会 reject。 */
-function connectViaProxy(proxyUrl: string, host: string, port: number, timeoutMs: number): Promise<Duplex> {
+function connectViaProxy(
+  proxyUrl: string, host: string, port: number, timeoutMs: number,
+  onReq?: (req: http.ClientRequest) => void
+): Promise<Duplex> {
   return new Promise((resolve, reject) => {
     const p = new URL(proxyUrl);
     const req = http.request({
@@ -249,16 +271,18 @@ function connectViaProxy(proxyUrl: string, host: string, port: number, timeoutMs
       headers: { Host: `${host}:${port}` },
       timeout: timeoutMs,
     });
+    onReq?.(req);
     req.once("connect", (res, socket) => {
       if (res.statusCode !== 200) {
         socket.destroy();
-        reject(new Error(`代理 CONNECT 返回 ${res.statusCode}`));
+        reject(new PushPreSendError(`代理 CONNECT 返回 ${res.statusCode}`));
         return;
       }
       resolve(socket);
     });
-    req.once("error", reject);
-    req.once("timeout", () => { req.destroy(new Error("代理连接超时")); });
+    // 这一阶段的任何错误（拒连、DNS、超时）都发生在请求体发出之前
+    req.once("error", (e) => reject(isPreSendError(e) ? e : new PushPreSendError(`代理连接失败：${(e as Error)?.message ?? e}`)));
+    req.once("timeout", () => { req.destroy(new PushPreSendError("代理连接超时")); });
     req.end();
   });
 }
@@ -281,6 +305,9 @@ export function requestHttps(
   return new Promise((resolve, reject) => {
     let settled = false;
     let req: http.ClientRequest | undefined;
+    let connectReq: http.ClientRequest | undefined;
+    /** 还在跟代理握手（请求体没发出去）。这时超时属于"可安全直连重发"的失败 */
+    let connecting = false;
 
     /**
      * 只有真正落地（成功 / 出错 / 超时）才清定时器。
@@ -296,12 +323,15 @@ export function requestHttps(
       clearTimeout(timer);
       if (err) {
         try { req?.destroy(); } catch { /* 已经关了就算了 */ }
+        try { connectReq?.destroy(new PushPreSendError("已放弃代理握手")); } catch { /* 同上 */ }
         reject(err);
       } else {
         resolve(val!);
       }
     };
-    const timer = setTimeout(() => settle(new Error("推送请求超时")), timeoutMs);
+    const timer = setTimeout(() => settle(connecting
+      ? new PushPreSendError("代理连接超时")
+      : new Error("推送请求超时")), timeoutMs);
 
     void (async () => {
       try {
@@ -309,9 +339,17 @@ export function requestHttps(
         const port = Number(u.port || 443);
         let createConnection: (() => Duplex) | undefined;
         if (deps.proxy) {
-          const raw = await connectViaProxy(deps.proxy, u.hostname, port, timeoutMs);
+          connecting = true;
+          const raw = await connectViaProxy(deps.proxy, u.hostname, port, timeoutMs, r => { connectReq = r; });
+          connecting = false;
+          /**
+           * 外层定时器可能已经在握手阶段落地（调用方已经拿到 reject、可能已经直连重发了）。
+           * 这时隧道才打通，绝不能再把请求发出去 —— 否则就是重复消息 + 泄漏的连接。
+           */
+          if (settled) { raw.destroy(); return; }
           createConnection = () => tls.connect({ socket: raw as any, servername: u.hostname });
         }
+        if (settled) return;
         req = https.request({
           host: u.hostname, port, path: `${u.pathname}${u.search}`,
           method: opts.method, headers: opts.headers,
@@ -341,14 +379,17 @@ export type Transport = (
 ) => Promise<{ status: number; body: string }>;
 
 /**
- * 走代理发一次；**网络层**失败就直连重试一次。
+ * 走代理发一次；**请求发出之前**就失败了才直连重试一次。
  *
  * 为什么需要它：本机的代理端口会漂移（实测一周内 63722 → 52420），
  * 而飞书和企业微信本来就是**直连可达**的。代理一挂，推送就静默失效——
  * 这恰恰是最坏的结果，因为"没收到"本身不产生任何信号。
  *
- * 只在拿到响应之前失败才重试：一旦收到响应（哪怕是 200 但业务错误码），
- * 说明链路是通的，重发只会让用户收到两条一样的消息。
+ * 只认 PushPreSendError（代理拒连 / CONNECT 非 200 / 代理连接超时）：
+ * 这几种情况服务端一定没见过这条消息，重发是安全的。
+ * 请求已经发出去之后的失败（"推送请求超时"、连接被重置……）一律不重试 ——
+ * 服务端可能已经收下了，只是响应慢，重发会让手机收到两条一样的消息。
+ * 宁可漏一条（日志里有记录），也不能刷屏。
  */
 async function requestWithFallback(
   url: string, opts: ReqOpts, cfg: PushConfig, io: Transport
@@ -356,7 +397,7 @@ async function requestWithFallback(
   try {
     return await io(url, opts, { proxy: cfg.proxy, timeoutMs: cfg.timeoutMs });
   } catch (e) {
-    if (!cfg.proxy) throw e;
+    if (!cfg.proxy || !isPreSendError(e)) throw e;
     return await io(url, opts, { proxy: null, timeoutMs: cfg.timeoutMs });
   }
 }
@@ -484,6 +525,9 @@ export async function dispatchPush(
   return results;
 }
 
+/** 还没落地的推送。短命进程（`pnpm job`）退出前要等它们，否则请求会被半路掐断。 */
+const pending = new Set<Promise<unknown>>();
+
 /**
  * 入口：写完库里的通知之后调一下。不返回 Promise，外部也不需要 await ——
  * 网络结果落在守护进程日志里。任何异常都在内部消化。
@@ -497,8 +541,41 @@ export function pushOutbound(m: PushMessage): void {
      * 守护进程日志里**什么都不留**——手机一直收不到时没有任何线索可查。
      * 走 stderr，采集守护进程的日志会一并收走。
      */
-    void dispatchPush(m, { config: cfg, log: (line) => console.warn(line) }).catch(() => {});
+    trackPush(dispatchPush(m, { config: cfg, log: (line) => console.warn(line) }));
   } catch {
     // 推送是增强：这里的任何异常都不该冒到调用方的采集/交易流程上
+  }
+}
+
+/** 登记一个在途推送；落地（无论成败）后自动注销。导出只为测试。 */
+export function trackPush(p: Promise<unknown>): void {
+  const t = p.then(() => {}, () => {}).finally(() => { pending.delete(t); });
+  pending.add(t);
+}
+
+/** 当前在途推送数（测试与日志用） */
+export function pendingPushes(): number {
+  return pending.size;
+}
+
+/**
+ * 等在途推送落地，最多等 timeoutMs。返回 true = 全部落地；false = 等到超时还有没完的。
+ *
+ * 给短命进程用：`pnpm job` 跑完任务马上 process.exit，fire-and-forget 的推送
+ * 会被直接杀掉 —— 通知写进了库，手机却永远收不到。永不 reject。
+ */
+export async function flushPushes(timeoutMs = 10_000): Promise<boolean> {
+  if (pending.size === 0) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+  // 等待期间可能又有新推送登记进来，循环到集合清空为止
+  const drain = (async () => {
+    while (pending.size > 0) await Promise.all([...pending]);
+    return true as const;
+  })();
+  try {
+    return await Promise.race([drain, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }

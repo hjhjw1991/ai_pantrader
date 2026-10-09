@@ -20,6 +20,28 @@ import { diffAndNotify, pushNotification } from "@/lib/ui/notify";
  * 失败不上抛：通知是增强，算不出来绝不能让采集这一轮变成失败。
  */
 export async function runSignalWatch(db: Db): Promise<{ notified: number; reason?: string }> {
+  /**
+   * 两段互不依赖：日线信号卡算不出来（策略配置缺失、卡片不可用）时，
+   * 盘中情绪照样要算 —— 以前这里提前 return，情绪通知就整段跳过了，
+   * 而情绪告警只依赖快照，跟策略配置一点关系都没有。
+   */
+  let notified = 0;
+  let reason: string | undefined;
+  try {
+    const r = cardNotify(db);
+    notified += r.notified;
+    reason = r.reason;
+  } catch (e) {
+    // 卡片这段出错不该挡住情绪那段
+    reason = `信号卡计算出错：${(e as Error)?.message ?? e}`;
+  }
+
+  const moodNotified = moodNotify(db);
+  return { notified: notified + moodNotified, ...(reason !== undefined ? { reason } : {}) };
+}
+
+/** 日线口径的信号卡：档位、候选、硬线告警的变化 */
+function cardNotify(db: Db): { notified: number; reason?: string } {
   const cfg = readStrategyConfig();
   if (!cfg.available) return { notified: 0, reason: `策略配置不可用：${cfg.reason}` };
 
@@ -33,11 +55,20 @@ export async function runSignalWatch(db: Db): Promise<{ notified: number; reason
   } catch {
     // 持仓算不出来不该挡住档位与候选的通知
   }
-  const notified = diffAndNotify(db, out.card, alerts).length;
+  return { notified: diffAndNotify(db, out.card, alerts).length };
+}
 
-  // ── 盘中情绪 ──
-  // 上面那张卡是日线口径，盘中永远是昨收的结论，突发转弱它不会有任何反应。
-  // 这里补上快照口径的情绪转变。失败不上抛：通知是增强。
+/** 通知表里是否已经有这个去重键 */
+function alreadyNotified(db: Db, dedupeKey: string): boolean {
+  return db.prepare(`SELECT 1 FROM notification WHERE dedupe_key = ? LIMIT 1`).get(dedupeKey) !== undefined;
+}
+
+/**
+ * 盘中情绪。
+ * 上面那张卡是日线口径，盘中永远是昨收的结论，突发转弱它不会有任何反应。
+ * 这里补上快照口径的情绪转变。失败不上抛：通知是增强。
+ */
+function moodNotify(db: Db): number {
   let moodNotified = 0;
   try {
     const mood = intradayMood(db, shanghaiTs());
@@ -45,6 +76,8 @@ export async function runSignalWatch(db: Db): Promise<{ notified: number; reason
       // info 级不弹："转强"与"过热"是让人知道，不是要求人做动作。
       // 通知的原则是"要求人做动作的才响"，弹多了连 critical 一起被无视
       if (s.level === "info") continue;
+      // 更重的同类今天已经响过（critical 的转弱之后再来 warn 的转弱）：降级不再吵人
+      if (s.supersededBy && alreadyNotified(db, s.supersededBy)) continue;
       if (pushNotification(db, {
         kind: `mood_${s.kind}`, severity: s.level,
         title: s.title, body: s.body, dedupeKey: s.dedupeKey,
@@ -53,6 +86,5 @@ export async function runSignalWatch(db: Db): Promise<{ notified: number; reason
   } catch {
     // 情绪算不出来不该挡住档位与候选的通知
   }
-
-  return { notified: notified + moodNotified };
+  return moodNotified;
 }

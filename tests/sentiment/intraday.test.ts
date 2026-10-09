@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeTempDb, insQuote, insSecurity, type TempDb } from "../pit/helpers";
-import { intradayMood, moodTemp, type MoodPoint } from "@/lib/sentiment/intraday";
+import { intradayMood, moodTemp, tradeClockMs, type MoodPoint } from "@/lib/sentiment/intraday";
 
 /**
  * 盘中情绪。
@@ -159,8 +159,25 @@ describe("盘中情绪 — 转变信号", () => {
     const s = m.signals.find(x => x.kind === "mood_shift" && x.title.includes("转弱"));
     expect(s).toBeDefined();
     expect(s!.level).toBe("critical");
-    // 同一天同一件事只留一条，否则每 5 分钟重复弹同一条
-    expect(s!.dedupeKey).toBe(`mood:weak:${DAY}`);
+    // 同一天同一件事只留一条，否则每 5 分钟重复弹同一条；critical 有自己的键
+    expect(s!.dedupeKey).toBe(`mood:weak:critical:${DAY}`);
+    expect(s!.supersededBy).toBeUndefined();
+    t.close();
+  });
+
+  it("warn → critical 升级不能被 warn 的去重键吞掉；critical 之后的 warn 由 supersededBy 压掉", () => {
+    const t = setup();
+    seedPoint(t.db, `${DAY} 10:00:00.000`, 0.60, 1, -1);
+    seedPoint(t.db, `${DAY} 10:30:00.000`, 0.50, 1, -1);   // −0.10：warn 档
+    const w = intradayMood(t.db, `${DAY} 10:31:00.000`).signals
+      .find(x => x.title === "盘中情绪转弱")!;
+    expect(w.level).toBe("warn");
+    seedPoint(t.db, `${DAY} 11:00:00.000`, 0.30, 1, -1);   // −0.20：critical 档
+    const c = intradayMood(t.db, `${DAY} 11:01:00.000`).signals
+      .find(x => x.title === "盘中情绪转弱")!;
+    expect(c.level).toBe("critical");
+    expect(c.dedupeKey).not.toBe(w.dedupeKey);
+    expect(w.supersededBy).toBe(c.dedupeKey);
     t.close();
   });
 
@@ -275,12 +292,62 @@ describe("盘中情绪 — 温度分与陈旧", () => {
     t.close();
   });
 
+  it("午休不算陈旧：11:30 最后一根，整个午休直到 13:15 都不该显示过期", () => {
+    const t = setup();
+    seedPoint(t.db, `${DAY} 11:30:00.000`, 0.5);
+    expect(intradayMood(t.db, `${DAY} 11:50:00.000`).stale).toBe(false);
+    expect(intradayMood(t.db, `${DAY} 12:45:00.000`).stale).toBe(false);
+    expect(intradayMood(t.db, `${DAY} 13:10:00.000`).stale).toBe(false);   // 交易时间才过 10 分钟
+    expect(intradayMood(t.db, `${DAY} 13:20:00.000`).stale).toBe(true);    // 下午开盘 20 分钟还没新快照
+    t.close();
+  });
+
   it("当天没有快照（休市）→ 整份为空，不拿昨天的数据冒充今天", () => {
     const t = setup();
     const m = intradayMood(t.db, `${DAY} 10:00:00.000`);
     expect(m.now).toBeNull();
     expect(m.temp).toBeNull();
     expect(m.signals).toHaveLength(0);
+    t.close();
+  });
+});
+
+describe("盘中情绪 — 午休", () => {
+  it("交易时钟：午休不走表，13:00 紧接 11:30", () => {
+    const ms = (hhmm: string) => Date.parse(`${DAY}T${hhmm}:00Z`);
+    expect(tradeClockMs(ms("10:00"))).toBe(ms("10:00"));
+    expect(tradeClockMs(ms("11:30"))).toBe(ms("11:30"));
+    expect(tradeClockMs(ms("12:15"))).toBe(ms("11:30"));
+    expect(tradeClockMs(ms("13:00"))).toBe(ms("11:30"));
+    expect(tradeClockMs(ms("13:30")) - tradeClockMs(ms("11:00"))).toBe(60 * 60_000);
+  });
+
+  it("13:00 ~ 13:30 的 30 分钟窗口按交易时间往回数，而不是拿 11:30 冒充 30 分钟前", () => {
+    const t = setup();
+    seedPoint(t.db, `${DAY} 10:40:00.000`, 0.70, 1, -1);
+    seedPoint(t.db, `${DAY} 11:00:00.000`, 0.66, 1, -1);
+    seedPoint(t.db, `${DAY} 11:30:00.000`, 0.62, 1, -1);
+    seedPoint(t.db, `${DAY} 13:10:00.000`, 0.60, 1, -1);
+    const m = intradayMood(t.db, `${DAY} 13:11:00.000`);
+    // 13:10 往回 30 个交易分钟 = 11:10 → 取到 11:00 那根
+    expect(m.ago30!.ts.startsWith(`${DAY} 11:00`)).toBe(true);
+    expect(m.delta30!.breadth).toBeCloseTo(-0.06, 6);
+
+    const at13 = intradayMood(t.db, `${DAY} 13:00:30.000`);
+    // 13:00 之前最后一根是 11:30 → 再往回 30 个交易分钟是 11:00
+    expect(at13.now!.ts.startsWith(`${DAY} 11:30`)).toBe(true);
+    expect(at13.ago30!.ts.startsWith(`${DAY} 11:00`)).toBe(true);
+    t.close();
+  });
+
+  it("下午开盘不久、凑不满 30 个交易分钟 → 窗口为空，不拿上午更早的点放大位移", () => {
+    const t = setup();
+    seedPoint(t.db, `${DAY} 11:20:00.000`, 0.62, 1, -1);
+    seedPoint(t.db, `${DAY} 11:30:00.000`, 0.62, 1, -1);
+    seedPoint(t.db, `${DAY} 13:05:00.000`, 0.55, 1, -1);
+    const m = intradayMood(t.db, `${DAY} 13:06:00.000`);
+    // 13:05 → 交易时钟 11:35，往回 30 分钟 = 11:05，之前没有点 → 窗口为空
+    expect(m.ago30).toBeNull();
     t.close();
   });
 });

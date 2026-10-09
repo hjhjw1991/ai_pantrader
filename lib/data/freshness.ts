@@ -200,10 +200,26 @@ export function startFreshnessGuard(
   let lastAttempt: number | null = null;
   let running = false;
 
+  /**
+   * 交班没成功、锁又已经让出去了：把锁拿回来继续采；拿不回来说明别的活进程接管了，退出。
+   * 让位之后**任何**失败路径都必须走这里 —— 包括 handoverTo 自己抛异常。
+   * 漏掉的话，本进程照常采集却不持锁，下一个拉起的进程以为没人在采，两个一起拉快照。
+   */
+  const recoverLock = (): void => {
+    if (deps.retakeLock()) return;   // 锁拿回来了，我继续采
+    // 锁被别的活进程接管了：采集有人做，我退出不算丢数据
+    deps.log("交班失败且锁已被别的进程接管，本进程退出");
+    deps.stop();
+    clearInterval(timer);
+    deps.exit();
+  };
+
   const timer = setInterval(() => {
     // 上一轮交班还没走完：不要并发 spawn，也不要并发判断退出
     if (running) return;
     running = true;
+    /** 本轮是否已经让出锁 —— 决定出错时要不要把锁拿回来 */
+    let released = false;
     void (async () => {
       try {
         if (deps.busy()) return;
@@ -216,7 +232,7 @@ export function startFreshnessGuard(
 
         const r = await handoverTo({
           spawn: deps.spawn,
-          releaseLock: deps.releaseLock,
+          releaseLock: () => { released = true; deps.releaseLock(); },
           lockPid: deps.lockPid ?? (() => readLockPid(deps.lockPath)),
           alive: deps.alive ?? isAlive,
           sleep: deps.sleep,
@@ -225,12 +241,8 @@ export function startFreshnessGuard(
         }, deps.graceMs, deps.pollMs, deps.verifyMs);
 
         if (!r.ok) {
-          if (deps.retakeLock()) return;   // 锁拿回来了，我继续采
-          // 锁被别的活进程接管了：采集有人做，我退出不算丢数据
-          deps.log("交班失败且锁已被别的进程接管，本进程退出");
-          deps.stop();
-          clearInterval(timer);
-          deps.exit();
+          // spawn-failed 时根本没让位，retakeLock 是对自己已持有的锁再取一次，同样返回 true
+          recoverLock();
           return;
         }
 
@@ -240,6 +252,11 @@ export function startFreshnessGuard(
         deps.exit();
       } catch (e) {
         deps.log(`新鲜度守卫出错：${(e as Error).message}`);
+        if (released) {
+          try { recoverLock(); } catch (e2) {
+            deps.log(`新鲜度守卫取回锁出错：${(e2 as Error).message}`);
+          }
+        }
       } finally {
         running = false;
       }

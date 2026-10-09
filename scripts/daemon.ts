@@ -19,7 +19,6 @@
  * 就等这一轮 job 跑完、交班重启（见文件末尾的 startFreshnessGuard）。
  * 另外启动时先做一次写侧自愈，把上一次冻结进程留下的坏行爬起来。
  */
-import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { getConfig } from "@/lib/config";
@@ -28,6 +27,7 @@ import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import { startAutostart, stopAutostart } from "@/lib/data/autostart";
 import { startFreshnessGuard } from "@/lib/data/freshness";
+import { closeDaemonLog, openDaemonLog } from "@/lib/data/daemon-log";
 import { currentPlatform } from "@/lib/platform/keepawake";
 import { acquireLock, releaseLock } from "@/lib/platform/singleton";
 import { runPreopenPlan } from "@/lib/plan/preopen";
@@ -99,12 +99,8 @@ process.on("exit", () => releaseLock(lockPath));
  */
 function spawnSuccessor(): number | undefined {
   const argv = [...process.execArgv, ...process.argv.slice(1)];
-  const logPath = path.join(getConfig().dataDir, "logs", "daemon.log");
-  let fd: number | "ignore" = "ignore";
-  try {
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fd = fs.openSync(logPath, "a");
-  } catch { /* 打不开日志也得起进程，退回 ignore */ }
+  // 打不开日志也得起进程：openDaemonLog 会退回 ignore
+  const fd = openDaemonLog(getConfig().dataDir);
 
   const child = spawn(process.execPath, argv, {
     cwd: process.cwd(), detached: true, windowsHide: true,
@@ -112,7 +108,7 @@ function spawnSuccessor(): number | undefined {
     env: { ...process.env, PANTRADER_RUNNER: process.env.PANTRADER_RUNNER ?? "manual" },
   });
   child.unref();
-  if (typeof fd === "number") { try { fs.closeSync(fd); } catch { /* 已 dup 给子进程 */ } }
+  closeDaemonLog(fd);   // 已 dup 给子进程，父进程这份可以关了
   return child.pid;
 }
 
