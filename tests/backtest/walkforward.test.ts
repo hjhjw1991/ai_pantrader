@@ -101,10 +101,12 @@ describe("样本外不过就是不过：结构上不给回调样本内的机会"
     //   stitchEquity            —— 纯函数，只拼净值
     //   suggestAggregatedPlan   —— 只吃交易日数量，碰不到收益
     //   analyzeParamStability   —— 只读 bestParams（已被冻结的窗口），不提供重挑参数的入口
+    //   aggregatedVerdict       —— 只读聚合结果，没有 override
+    //   walkForwardExitCode     —— 只把两个裁决折成退出码
     expect(Object.keys(wf).sort()).toEqual([
-      "IN_SAMPLE_RATIO", "analyzeParamStability", "planWalkForward", "runWalkForward",
+      "IN_SAMPLE_RATIO", "aggregatedVerdict", "analyzeParamStability", "planWalkForward", "runWalkForward",
       "runWalkForwardAggregated", "stitchEquity", "suggestAggregatedPlan",
-      "summarizeWalkForward", "walkForwardVerdict",
+      "summarizeWalkForward", "walkForwardExitCode", "walkForwardVerdict",
     ]);
   });
 

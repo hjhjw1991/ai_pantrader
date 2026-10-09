@@ -25,6 +25,15 @@ export interface WalkForwardPlanOptions {
   /** 滚动步长，默认 = 测试段长度，使各窗口的样本外区间互不重叠 */
   stepDays?: number;
   inSampleRatio?: number;
+  /**
+   * 训练段的绝对天数。给了就**优先于 inSampleRatio**，测试段 = windowDays − trainDays。
+   *
+   * 为什么要有它：suggestAggregatedPlan 给的是"训练 252 / 测试 63、步长 63"，
+   * 而 planWalkForward 只认比例，会把 315 天重新按 7:3 切成 221/94 ——
+   * 测试段 94 天、步长 63 天，相邻样本外重叠 31 天，拼接时同一天被复利两次
+   * （实测 1065 个交易日拼出 1116 天）。按天数传进来，测试段就等于步长，不再重叠。
+   */
+  trainDays?: number;
 }
 
 export interface WalkForwardSplit {
@@ -55,7 +64,7 @@ export function planWalkForward(days: string[], o: WalkForwardPlanOptions): Walk
   const ratio = o.inSampleRatio ?? IN_SAMPLE_RATIO;
   // 用 round 不用 floor：360*0.7 在浮点里是 251.99999999999997，floor 会切出 251/109，
   // 7:3 就悄悄歪了。切分比例这种"人说得出口的数"不该被浮点误差改写
-  const trainLen = Math.round(o.windowDays * ratio);
+  const trainLen = o.trainDays !== undefined ? Math.round(o.trainDays) : Math.round(o.windowDays * ratio);
   const testLen = o.windowDays - trainLen;
   const step = o.stepDays ?? testLen;
   if (trainLen <= 0 || testLen <= 0 || step <= 0) return [];
@@ -385,6 +394,11 @@ export function stitchEquity(segments: EquityPoint[][]): EquityPoint[] {
     if (!Number.isFinite(base) || base <= 0) continue;
 
     for (let i = 1; i < seg.length; i++) {
+      // 兜底：已经拼进曲线的日期不再计第二次。各段样本外本该互不重叠（见 planWalkForward 的 trainDays），
+      // 但切法一旦配错（步长 < 测试段），重叠那几天的收益会被复利两次、曲线凭空变长 ——
+      // 这里只认先到的那一段，后一段从它第一个新日期开始接
+      const last = out.length > 0 ? out[out.length - 1].date : null;
+      if (last !== null && seg[i].date <= last) continue;
       const prev = seg[i - 1].equity;
       const cur = seg[i].equity;
       if (!Number.isFinite(prev) || prev <= 0 || !Number.isFinite(cur)) continue;
@@ -442,7 +456,7 @@ export function runWalkForwardAggregated(
  */
 export function suggestAggregatedPlan(
   totalDays: number, o: { trainDays?: number; testDays?: number } = {}
-): { windowDays: number; stepDays: number; segments: number; oosDays: number } | null {
+): { windowDays: number; trainDays: number; testDays: number; stepDays: number; segments: number; oosDays: number } | null {
   const train = o.trainDays ?? MIN_SAMPLE_DAYS;      // 训练至少一年
   const test = o.testDays ?? Math.round(MIN_SAMPLE_DAYS / 4);   // 一季度
   const windowDays = train + test;
@@ -455,5 +469,47 @@ export function suggestAggregatedPlan(
   // 而退化的表现是 Calmar 记 0，看起来像策略不行。
   const oosDays = segments * (test - 1);
   if (oosDays < MIN_SAMPLE_DAYS) return null;
-  return { windowDays, stepDays: test, segments, oosDays };
+  // trainDays/testDays 必须一起交给 planWalkForward：只给 windowDays 它会按 7:3 重切，
+  // 测试段变成 94 天而步长还是 63 天，样本外互相重叠
+  return { windowDays, trainDays: train, testDays: test, stepDays: test, segments, oosDays };
+}
+
+export interface AggregatedVerdict {
+  pass: boolean;
+  /** 拼接后仍退化（不足一年 / 笔数不足 / 零回撤）：测不出，判不过 */
+  undecidable: boolean;
+  calmar: number;
+  oosDays: number;
+  reasons: string[];
+}
+
+/**
+ * 聚合样本外裁决：拼接曲线上的 Calmar 达标、且没被判退化才算过。
+ * 和 walkForwardVerdict 同一条达标线，同样没有 override —— 不过就是不过。
+ */
+export function aggregatedVerdict(
+  agg: Pick<AggregatedOos, "metrics" | "degeneracy" | "oosDays" | "segments">,
+  o: Pick<VerdictOptions, "minCalmar"> = {}
+): AggregatedVerdict {
+  const minCalmar = o.minCalmar ?? 1;
+  const calmar = agg.metrics.calmar;
+  const reasons: string[] = [];
+  const undecidable = agg.segments === 0 || agg.degeneracy.length > 0 || agg.oosDays < MIN_SAMPLE_DAYS;
+  if (agg.segments === 0) reasons.push("没有任何聚合段：交易日不足，判不过（没测过 ≠ 通过）");
+  if (agg.oosDays < MIN_SAMPLE_DAYS) reasons.push(`聚合样本外只有 ${agg.oosDays} 天 < ${MIN_SAMPLE_DAYS}，测不出结论`);
+  if (agg.degeneracy.length > 0) reasons.push(`拼接曲线被判退化：${agg.degeneracy.join("；")}`);
+  if (!undecidable && calmar < minCalmar) reasons.push(`聚合样本外 Calmar ${calmar.toFixed(2)} < ${minCalmar}`);
+  return { pass: !undecidable && calmar >= minCalmar, undecidable, calmar, oosDays: agg.oosDays, reasons };
+}
+
+/**
+ * 脚本退出码。给了 --aggregated 就**以聚合裁决为准**：
+ * 那时单窗口样本外只有一个季度，必然退化、必然"不通过"，
+ * 拿它当门槛等于永远红 —— 而聚合裁决不过时也必须红，不能只打印不拦。
+ */
+export function walkForwardExitCode(
+  perWindow: { pass: boolean }, aggregated: { pass: boolean } | null
+): 0 | 1 {
+  if (aggregated !== null) return aggregated.pass ? 0 : 1;
+  return perWindow.pass ? 0 : 1;
 }

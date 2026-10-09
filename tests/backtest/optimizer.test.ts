@@ -143,3 +143,12 @@ describe("退化结果不许被当成寻优成果", () => {
     expect(r.warnings.join(" ")).toContain("无效");
   });
 });
+
+describe("只评估了一个点时不报选择偏差", () => {
+  it("单点网格：没有挑选动作，不给自相矛盾的'试了 1 次送的'警告", () => {
+    const r = optimize({ grid: { a: [1] }, evaluate: () => metricsWith(1.2) });
+    expect(r.selection.trials).toBe(1);
+    expect(r.selection.overfitSuspected).toBe(false);
+    expect(r.warnings.join(" ")).not.toContain("选择偏差");
+  });
+});

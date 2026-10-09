@@ -166,7 +166,34 @@ describe("断点续跑：判定与跑测分开", () => {
     const net = (m: number) => (m === 0 ? 0.3 : m === 1 ? 0.1 : m === 2 ? 0.02 : -0.05);
     const pts = costStress(base, runner(net), [0, 1, 2, 3]).points;
     const shuffled = [pts[3], pts[1], pts[0], pts[2]].map((p) => JSON.parse(JSON.stringify(p)) as typeof p);
-    expect(evaluateCostStress(shuffled).verdict).toBe("fragile");
+    const r = evaluateCostStress(shuffled);
+    expect(r.verdict).toBe("fragile");
+    // 光看 verdict 会因为凑巧蒙对：归零点和最高档必须按排好序的档位算
+    expect(r.breakevenMultiplier).toBeCloseTo(2 + 0.02 / 0.07, 3);
+    expect(r.points.map((p) => p.level.multiplier)).toEqual([0, 1, 2, 3]);
+    expect(r.frictionless?.level.multiplier).toBe(0);
+  });
+
+  it("续跑追加的档位排在旧档后面：全盈利、已测到 ×3 → 稳健，不是脆弱", () => {
+    const net = (m: number) => (m === 0 ? 0.3 : m === 1 ? 0.2 : m === 1.5 ? 0.15 : 0.05);
+    const pts = costStress(base, runner(net), [0, 1, 1.5, 3]).points;
+    // 落盘顺序 [0, 1, 3, 1.5]：先跑了 0/1/3，崩了，续跑补了 1.5
+    const resumed = [pts[0], pts[1], pts[3], pts[2]].map((p) => JSON.parse(JSON.stringify(p)) as typeof p);
+    const r = evaluateCostStress(resumed);
+    expect(r.breakevenMultiplier).toBeNull();
+    expect(r.neverBreaks).toBe(true);
+    expect(r.verdict).toBe("robust");
+    expect(r.note).toContain("×3");
+  });
+
+  it("续跑追加的档位：[0,1,3(-5%),2(+4%)] 归零点在 2~3 之间插值 ≈2.44", () => {
+    const net = (m: number) => (m === 0 ? 0.3 : m === 1 ? 0.1 : m === 2 ? 0.04 : -0.05);
+    const pts = costStress(base, runner(net), [0, 1, 2, 3]).points;
+    const resumed = [pts[0], pts[1], pts[3], pts[2]].map((p) => JSON.parse(JSON.stringify(p)) as typeof p);
+    const r = evaluateCostStress(resumed);
+    // 乱序时会在 1→3 之间插出 2.33，这是错的
+    expect(r.breakevenMultiplier).toBeCloseTo(2 + 0.04 / 0.09, 3);
+    expect(r.verdict).toBe("fragile");
   });
 
   it("缺了现行那一档就判不出，不会因为已有加压档就糊出一个结论", () => {

@@ -40,6 +40,9 @@ describe("选择偏差判定", () => {
     expect(r.trials).toBe(1);
     expect(r.chanceCeiling).toBe(1.5);
     expect(r.deflated).toBe(0);
+    // deflated=0 是"没挑过"，不是"被运气解释掉" —— 不能报嫌疑（否则界面标红、optimizer 自相矛盾）
+    expect(r.overfitSuspected).toBe(false);
+    expect(r.note).toMatch(/无选择偏差/);
   });
 
   it("真信号：最优点远超运气能给的高度 → 不报", () => {

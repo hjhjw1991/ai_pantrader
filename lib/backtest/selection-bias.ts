@@ -32,7 +32,7 @@ export interface SelectionBias {
   chanceCeiling: number;
   /** 最优点扣掉运气额度后还剩多少。≤ 0 意味着成绩能被"试了很多次"解释掉 */
   deflated: number;
-  /** deflated ≤ 0：成绩没有超过运气能给的高度 */
+  /** deflated ≤ 0：成绩没有超过运气能给的高度。trials ≤ 1 时恒为 false（没挑过，谈不上） */
   overfitSuspected: boolean;
   /** 人话版本，直接给界面显示 */
   note: string;
@@ -92,7 +92,9 @@ export function selectionBias(calmars: readonly number[]): SelectionBias {
   const best = Math.max(...xs);
   const chanceCeiling = mean + sd * expectedMaxSigma(trials);
   const deflated = clean(best - chanceCeiling);
-  const overfitSuspected = deflated <= 0;
+  // 只试一个组合时没有"挑"这个动作，deflated 恒为 0 是定义使然，不是嫌疑 ——
+  // 判成 true 会让界面标红、optimizer 报一句"试了 1 次送的"，自相矛盾
+  const overfitSuspected = trials > 1 && deflated <= 0;
 
   const note = trials === 1
     ? "只试了 1 个组合，无选择偏差可减"

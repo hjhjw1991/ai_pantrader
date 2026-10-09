@@ -169,9 +169,11 @@ export function evaluateCostStress(points: CostStressPoint[]): Omit<CostStressRe
     .sort((a, b) => a.level.multiplier - b.level.multiplier);
 
   const baseline = pts.find((p) => p.level.multiplier === 1) ?? null;
-  const frictionless = points.find((p) => p.level.multiplier === 0) ?? null;
-  const { at, neverBreaks } = breakeven(points);
-  const maxM = points.length > 0 ? points[points.length - 1].level.multiplier : 0;
+  // 下面一律用排好序的 pts，不能碰入参 points：续跑时新档追加在旧档之后，
+  // 入参的顺序是乱的，拿它找归零点、取最高档会判错（曾把全盈利判成脆弱）
+  const frictionless = pts.find((p) => p.level.multiplier === 0) ?? null;
+  const { at, neverBreaks } = breakeven(pts);
+  const maxM = pts.length > 0 ? pts[pts.length - 1].level.multiplier : 0;
 
   /**
    * 成本吃掉的比例 = 1 − 现行净收益 / 零摩擦收益。
@@ -184,14 +186,14 @@ export function evaluateCostStress(points: CostStressPoint[]): Omit<CostStressRe
       ? r4(1 - baseline.totalReturn / frictionless.totalReturn)
       : null;
 
-  const degeneratedLevels = points.filter((p) => p.degenerated).map((p) => p.level.multiplier);
+  const degeneratedLevels = pts.filter((p) => p.degenerated).map((p) => p.level.multiplier);
 
   const notes: string[] = [];
   let verdict: CostVerdict;
 
-  if (points.length < 2) {
+  if (pts.length < 2) {
     verdict = "undecidable";
-    notes.push(`只有 ${points.length} 个成本档位，判不出归零点 —— 至少要两档，其中含现行成本那一档`);
+    notes.push(`只有 ${pts.length} 个成本档位，判不出归零点 —— 至少要两档，其中含现行成本那一档`);
   } else if (frictionless !== null && frictionless.totalReturn <= 0) {
     // 零摩擦都不赚钱：这时候说"成本压垮了策略"是甩锅，问题在策略本身
     verdict = "unprofitable";

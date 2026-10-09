@@ -6,6 +6,9 @@
  *   npx tsx scripts/backtest-walkforward.ts --from 2023-01-01 --to 2026-09-30
  *   npx tsx scripts/backtest-walkforward.ts --grid exit.stop=-0.08,-0.10,-0.12 --grid entry.topN=3,5
  *   npx tsx scripts/backtest-walkforward.ts --aggregated --json out/wf.json
+ *   npx tsx scripts/backtest-walkforward.ts --window-days 315 --train-days 252   # 步长默认 = 测试段
+ *
+ * 退出码：不给 --aggregated 时跟单窗口裁决；给了就跟聚合裁决（单窗口一个季度必然退化，不能当门槛）。
  *
  * 为什么需要这个脚本：walk-forward 的全套实现（7:3 切分、样本外裁决、样本内外落差、
  * 参数稳定性、聚合样本外）**写完了却没有一个入口**，只活在测试里 ——
@@ -35,6 +38,7 @@ import { optimize, gridPoints, type ParamGrid } from "@/lib/backtest/optimizer";
 import {
   planWalkForward, runWalkForward, runWalkForwardAggregated,
   walkForwardVerdict, summarizeWalkForward, analyzeParamStability, suggestAggregatedPlan,
+  aggregatedVerdict, walkForwardExitCode, type AggregatedVerdict,
 } from "@/lib/backtest/walkforward";
 import { MIN_SAMPLE_DAYS } from "@/lib/backtest/metrics";
 import { createV2Engine, defaultSlotRegistry } from "@/lib/strategy/v2";
@@ -142,8 +146,21 @@ const days = view.tradingDays(range.from, range.to);
 const totalDays = days.length;
 const suggested = suggestAggregatedPlan(totalDays);
 const windowDays = Number(arg("window-days") ?? suggested?.windowDays ?? MIN_SAMPLE_DAYS * 2);
-const stepDays = Number(arg("step-days") ?? suggested?.stepDays ?? Math.round(MIN_SAMPLE_DAYS / 4));
-const splits = planWalkForward(days, { windowDays, stepDays });
+/**
+ * 训练段天数。没手动改窗口就沿用建议切法的"训练 252 / 测试 63"，
+ * 否则 planWalkForward 会把 315 天按 7:3 重切成 221/94 —— 测试段比步长长 31 天，
+ * 聚合时重叠日被复利两次（实测 1065 个交易日拼出 1116 天）。
+ * 手动给了 --window-days 又没给 --train-days，就退回 7:3。
+ */
+const trainArg = arg("train-days");
+const trainDays: number | undefined = trainArg !== null
+  ? Number(trainArg)
+  : arg("window-days") === null && suggested !== null ? suggested.trainDays : undefined;
+const trainLen = trainDays ?? Math.round(windowDays * 0.7);
+const testLen = windowDays - trainLen;
+// 步长默认 = 测试段长度，样本外首尾相接、互不重叠；只有显式 --step-days 才可能偏离
+const stepDays = Number(arg("step-days") ?? testLen);
+const splits = planWalkForward(days, { windowDays, stepDays, trainDays });
 
 console.log(`区间 ${range.from} → ${range.to}，${totalDays} 个交易日`);
 if (Object.keys(grid).length === 0) {
@@ -154,9 +171,15 @@ if (Object.keys(grid).length === 0) {
   );
 }
 console.log(
-  `切法：窗口 ${windowDays} 天（训练 ${Math.round(windowDays * 0.7)} / 测试 ${windowDays - Math.round(windowDays * 0.7)}）、` +
+  `切法：窗口 ${windowDays} 天（训练 ${trainLen} / 测试 ${testLen}）、` +
   `步长 ${stepDays} 天 → ${splits.length} 个窗口；每窗口寻优 ${gridSize} 个组合`
 );
+if (stepDays < testLen) {
+  console.warn(
+    `注意：步长 ${stepDays} < 测试段 ${testLen}，相邻窗口的样本外重叠 ${testLen - stepDays} 天。` +
+    `单窗口裁决会重复计这些天；--aggregated 拼接时只认先到的那段（重叠日不复利两次）。`
+  );
+}
 if (splits.length === 0) {
   console.error(
     `\n凑不出一个完整窗口：${totalDays} 个交易日 < 窗口 ${windowDays} 天。` +
@@ -213,14 +236,14 @@ const optimizeFn = (record: boolean) => (train: { from: string; to: string }) =>
 };
 
 const wfOptions = {
-  windowDays, stepDays,
+  windowDays, stepDays, trainDays,
   optimize: optimizeFn(true),
   evaluate: (params: Record<string, unknown>, test: { from: string; to: string }) =>
     runOnce(test.from, test.to, params, generatedAt).metrics,
 };
 
 const aggOptions = {
-  windowDays, stepDays,
+  windowDays, stepDays, trainDays,
   optimize: optimizeFn(false),
   // 聚合要净值曲线与逐笔：只有拼成一条连续曲线，指标才够 252 天不退化
   evaluate: (params: Record<string, unknown>, test: { from: string; to: string }) =>
@@ -258,9 +281,11 @@ for (const a of stability.axes) {
   console.log(`  · ${a.axis}：${a.values.map((v) => JSON.stringify(v)).join(" → ")}`);
 }
 
+let aggVerdict: AggregatedVerdict | null = null;
 if (has("aggregated")) {
   console.log("\n── 聚合样本外（每段样本外净值拼成一条曲线）──");
   const agg = runWalkForwardAggregated(days, aggOptions);
+  aggVerdict = aggregatedVerdict(agg);
   console.log(
     `  ${agg.segments} 段拼接 → ${agg.oosDays} 个样本外交易日` +
     `（阈值 ${MIN_SAMPLE_DAYS}），Calmar ${agg.metrics.calmar.toFixed(3)}`
@@ -269,9 +294,11 @@ if (has("aggregated")) {
   if (agg.segmentCalmars.length > 0) {
     console.log(`  各段 Calmar：${agg.segmentCalmars.map((c) => c.toFixed(2)).join("、")}`);
   }
+  console.log(`判定：${aggVerdict.pass ? "通过" : "不通过"}${aggVerdict.undecidable ? "（测不出结论）" : ""}（退出码以此为准）`);
+  for (const r of aggVerdict.reasons) console.log(`  · ${r}`);
 } else if (suggested !== null && suggested.oosDays >= MIN_SAMPLE_DAYS) {
   console.log(
-    `\n提示：单窗口样本外只有 ${windowDays - Math.round(windowDays * 0.7)} 天，` +
+    `\n提示：单窗口样本外只有 ${testLen} 天，` +
     `不足 ${MIN_SAMPLE_DAYS} 天会被判退化（Calmar 记 0）。` +
     `加 --aggregated 把各段拼成 ${suggested.oosDays} 天再判，代价是每个窗口多跑一遍。`
   );
@@ -282,13 +309,13 @@ if (out !== null) {
   const abs = resolve(out);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, JSON.stringify({
-    range, windowDays, stepDays, grid,
+    range, windowDays, stepDays, trainDays: trainLen, testDays: testLen, grid,
     generatedAt,
-    windows, verdict, decay, stability,
+    windows, verdict, decay, stability, aggregatedVerdict: aggVerdict,
   }, null, 2), "utf8");
   console.log(`\n已写出 ${abs}`);
 }
 
 // 不通过就是失败退出：让"跑过 walk-forward"这件事能在脚本/CI 里当门槛用，
-// 而不是"看一眼输出、自己决定信不信"
-process.exit(verdict.pass ? 0 : 1);
+// 而不是"看一眼输出、自己决定信不信"。给了 --aggregated 就以聚合裁决为准（见 walkForwardExitCode）
+process.exit(walkForwardExitCode(verdict, aggVerdict));

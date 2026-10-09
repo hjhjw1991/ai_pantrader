@@ -10,9 +10,9 @@
  *
  *   **基准必须以策略的交易日为 x 轴。**
  *
- *   指数序列常常比策略净值长 —— 实测那份 2025-09→2026-09 的报告，
- *   区间内指数有 248 个交易日而策略只有 231 个点，多出来的 17 天
- *   正好是策略的数据缺口日（覆盖率 93.1% 缺的就是它们）。
+ *   指数序列常常比策略净值长 —— 区间内指数自己的交易日往往比策略的净值点多出十几天，
+ *   多出来的那些天正好是策略的数据缺口日（覆盖率不到 100% 缺的就是它们）。
+ *   具体差几天随区间与采集进度变，以报告里写出的 availableDays / 丢弃天数为准。
  *   若各画各的日历，两条线在同一张图上是错位的，而错位**看起来完全正常**：
  *   峰值对不上、拐点差几天，读者只会觉得"策略在某段跑输了"，不会想到是轴不同。
  *   所以这里逐点按策略的日期取基准收盘，多出来的那些天一律丢弃，
@@ -42,6 +42,12 @@ export interface BenchmarkSeries {
   missingDays: number;
   /** 区间内基准自己有多少个交易日（比策略多的部分已丢弃） */
   availableDays: number;
+  /**
+   * 策略首日没有基准数据时，基准从哪一天起算（第一个两边都有数据的交易日）。
+   * 此时基准归一到策略**当天**的净值，之前的点记 null（计入 missingDays）。
+   * 与策略首日对齐时不出现这个字段。
+   */
+  alignedFrom?: string;
 }
 
 export interface BenchmarkStats {
@@ -88,15 +94,23 @@ export function benchmarkName(code: string): string {
  * 两者在正常情况下是同一天，但策略净值首日才是这份回测真正的起算点。
  */
 export function loadBenchmark(db: Db, code: string, equity: readonly EquityPoint[]): BenchmarkSeries | null {
-  if (equity.length < 2) return null;
-  if (!isKnownBenchmark(code)) return null;
+  const r = alignBenchmark(db, code, equity);
+  return typeof r === "string" ? null : r;
+}
+
+/** 取不成时返回原因（字符串），而不是一个笼统的 null —— 原因要原样写进报告 */
+function alignBenchmark(db: Db, code: string, equity: readonly EquityPoint[]): BenchmarkSeries | string {
+  if (equity.length < 2) return "净值点不足 2 个，无法作对比";
+  if (!isKnownBenchmark(code)) return `${code} 不是已采集日线的指数`;
 
   const from = equity[0]!.date;
   const to = equity[equity.length - 1]!.date;
   const rows = db.prepare(
     `SELECT date, c FROM kline_daily WHERE code = ? AND date BETWEEN ? AND ? ORDER BY date`
   ).all(code, from, to) as Array<{ date: string; c: number }>;
-  if (rows.length < 2) return null;
+  if (rows.length < 2) {
+    return `区间 ${from}~${to} 内没有 ${benchmarkName(code)} 的日线，或不足两天（只有 ${rows.length} 天）`;
+  }
 
   const closeAt = new Map<string, number>();
   for (const r of rows) closeAt.set(r.date, r.c);
@@ -104,9 +118,18 @@ export function loadBenchmark(db: Db, code: string, equity: readonly EquityPoint
   // 基准用自己的日历数出来的天数，仅用于报告说明"丢了多少天"
   const availableDays = rows.length;
 
-  const base = equity[0]!.equity;
-  const firstClose = closeAt.get(from);
-  if (firstClose === undefined || !(firstClose > 0)) return null;
+  // 起算点 = 第一个两边都有数据的交易日。策略首日恰好缺指数（我们的指数数据缺了那天）
+  // 不该让整块基准消失 —— 从第一个共同日起算，前面那几天如实记 null
+  const k = equity.findIndex((p) => {
+    const c = closeAt.get(p.date);
+    return c !== undefined && c > 0;
+  });
+  if (k < 0) {
+    return `区间 ${from}~${to} 内有 ${rows.length} 天 ${benchmarkName(code)} 日线，但与策略的交易日没有一天重合`;
+  }
+  const base = equity[k]!.equity;
+  const firstClose = closeAt.get(equity[k]!.date)!;
+  if (!(base > 0)) return `策略在基准起算日 ${equity[k]!.date} 的净值非正，无法归一`;
 
   const out: Array<number | null> = [];
   let missingDays = 0;
@@ -115,7 +138,9 @@ export function loadBenchmark(db: Db, code: string, equity: readonly EquityPoint
     if (c === undefined || !(c > 0)) { out.push(null); missingDays++; continue; }
     out.push((base * c) / firstClose);
   }
-  return { code, name: benchmarkName(code), equity: out, missingDays, availableDays };
+  const series: BenchmarkSeries = { code, name: benchmarkName(code), equity: out, missingDays, availableDays };
+  if (k > 0) series.alignedFrom = equity[k]!.date;
+  return series;
 }
 
 /** 统计前的配对：只保留策略与基准在同一天都有收益的那些天 */
@@ -162,10 +187,14 @@ export function benchmarkStats(
   const { rp, rb, benchSeries } = pairReturns(equity, bench);
   if (benchSeries.length < 2) return null;
 
-  const first = equity[0]!.equity;
-  const last = equity[equity.length - 1]!.equity;
+  // 策略一侧的区间收益/年化与基准用**同一个起点**：基准从第一个非 null 点起算，
+  // 策略也从那天起算 —— 否则"超额"是两段不同区间的收益相减
+  const k = bench.findIndex((v) => v !== null);
+  const stratSeg = k > 0 ? equity.slice(k) : equity;
+  const first = stratSeg[0]!.equity;
+  const last = stratSeg[stratSeg.length - 1]!.equity;
   const stratTotal = first > 0 ? last / first - 1 : null;
-  const stratAnnual = annualiseOf(equity);
+  const stratAnnual = annualiseOf(stratSeg);
 
   const benchTotal = benchSeries.length >= 2
     ? benchSeries[benchSeries.length - 1]!.equity / benchSeries[0]!.equity - 1
@@ -218,10 +247,8 @@ export function loadBenchmarkWithStats(
   if (equity.length < 2) {
     return { ok: false, reason: "净值点不足 2 个，无法作对比" };
   }
-  const series = loadBenchmark(db, code, equity);
-  if (series === null) {
-    return { ok: false, reason: `区间 ${equity[0]!.date}~${equity[equity.length - 1]!.date} 内没有 ${benchmarkName(code)} 的日线，或不足两天` };
-  }
+  const series = alignBenchmark(db, code, equity);
+  if (typeof series === "string") return { ok: false, reason: series };
   const stats = benchmarkStats(equity, series.equity);
   if (stats === null) {
     return { ok: false, reason: `${benchmarkName(code)} 在该区间内可用数据不足，无法统计` };

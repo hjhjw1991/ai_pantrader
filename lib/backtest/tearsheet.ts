@@ -356,7 +356,8 @@ function benchmarkBlock(
   const dropped = bm.series.availableDays - (bm.series.equity.length - bm.series.missingDays);
 
   const cells = [
-    cell("基准区间收益", pct(s.benchTotal), `${esc(bm.series.name)} 买入持有`, tone(s.benchTotal)),
+    // cell() 自己会转义 hint，这里再 esc 一次会把 "&" 印成 "&amp;amp;"
+    cell("基准区间收益", pct(s.benchTotal), `${bm.series.name} 买入持有`, tone(s.benchTotal)),
     cell("基准年化", pct(s.benchAnnual), "同一套折算口径", tone(s.benchAnnual)),
     cell("基准最大回撤", pct(s.benchMaxDD), "", "down"),
     cell("超额（区间）", pct(s.excessTotal), "策略 − 基准", tone(s.excessTotal)),
@@ -370,6 +371,9 @@ function benchmarkBlock(
   ].join("\n  ");
 
   const caveats: string[] = [];
+  if (bm.series.alignedFrom !== undefined) {
+    caveats.push(`策略首日没有基准数据，基准从第一个共同交易日 ${bm.series.alignedFrom} 起算、归一到策略当天的净值；对比统计同样从这天算起`);
+  }
   if (dropped > 0) {
     caveats.push(`区间内基准自己有 ${bm.series.availableDays} 个交易日，其中 ${dropped} 天是策略的数据缺口日，已一并丢弃`);
   }

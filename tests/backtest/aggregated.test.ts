@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
-  runWalkForwardAggregated, stitchEquity, suggestAggregatedPlan,
+  aggregatedVerdict, planWalkForward, runWalkForwardAggregated, stitchEquity, suggestAggregatedPlan,
+  walkForwardExitCode,
 } from "@/lib/backtest/walkforward";
 import { MIN_SAMPLE_DAYS, computeMetrics } from "@/lib/backtest/metrics";
 import type { EquityPoint } from "@/lib/contracts";
@@ -81,7 +82,7 @@ describe("runWalkForwardAggregated", () => {
     return runWalkForwardAggregated(days, {
       windowDays: plan.windowDays,
       stepDays: plan.stepDays,
-      inSampleRatio: plan.windowDays === 315 ? 252 / 315 : 0.7,
+      trainDays: plan.trainDays,
       optimize: () => ({ params: { x: 1 } }),
       evaluate: (_p, _t, testDays) => {
         const equity = seg(testDays, dailyRet, 1);
@@ -126,7 +127,7 @@ describe("runWalkForwardAggregated", () => {
     const seenTrainEnds: string[] = [];
     const seenTestStarts: string[] = [];
     runWalkForwardAggregated(days, {
-      windowDays: plan.windowDays, stepDays: plan.stepDays, inSampleRatio: 252 / 315,
+      windowDays: plan.windowDays, stepDays: plan.stepDays, trainDays: plan.trainDays,
       optimize: (train) => { seenTrainEnds.push(train.to); return { params: {} }; },
       evaluate: (_p, test, testDays) => {
         seenTestStarts.push(test.from);
@@ -138,5 +139,108 @@ describe("runWalkForwardAggregated", () => {
     for (let i = 0; i < seenTrainEnds.length; i++) {
       expect(seenTrainEnds[i] < seenTestStarts[i]).toBe(true);
     }
+  });
+});
+
+describe("建议切法必须原样落到 planWalkForward（不许被 7:3 重切）", () => {
+  it("训练 252 / 测试 63：测试段 = 步长，相邻样本外首尾相接、互不重叠", () => {
+    const days = mkDays(1065);
+    const plan = suggestAggregatedPlan(days.length)!;
+    expect(plan.trainDays).toBe(252);
+    expect(plan.testDays).toBe(63);
+    const splits = planWalkForward(days, {
+      windowDays: plan.windowDays, stepDays: plan.stepDays, trainDays: plan.trainDays,
+    });
+    expect(splits).toHaveLength(plan.segments);
+    for (const s of splits) {
+      expect(s.trainDays).toHaveLength(252);
+      expect(s.testDays).toHaveLength(plan.stepDays);
+    }
+    for (let i = 1; i < splits.length; i++) {
+      // 下一段样本外从上一段最后一天的下一天开始
+      expect(splits[i].test.from > splits[i - 1].test.to).toBe(true);
+      expect(days.indexOf(splits[i].test.from)).toBe(days.indexOf(splits[i - 1].test.to) + 1);
+    }
+  });
+
+  it("不给 trainDays 时仍按比例切（旧行为不变），这正是重叠的来源", () => {
+    const days = mkDays(1065);
+    const s = planWalkForward(days, { windowDays: 315, stepDays: 63 });
+    expect(s[0].testDays.length).toBe(315 - Math.round(315 * 0.7)); // 94 > 63 → 重叠
+  });
+
+  it("按建议切法跑聚合：拼接长度 = 承诺的 oosDays，且不超过区间本身", () => {
+    const days = mkDays(1065);
+    const plan = suggestAggregatedPlan(days.length)!;
+    const r = runWalkForwardAggregated(days, {
+      windowDays: plan.windowDays, stepDays: plan.stepDays, trainDays: plan.trainDays,
+      optimize: () => ({ params: {} }),
+      evaluate: (_p, _t, testDays) => {
+        const equity = seg(testDays, 0.001, 1);
+        return { metrics: computeMetrics({ equity, closed: [] }), equity, closed: [] };
+      },
+    });
+    expect(r.oosDays).toBe(plan.oosDays);
+    expect(r.oosDays).toBeLessThanOrEqual(days.length - plan.trainDays);
+    expect(new Set(r.equity.map((p) => p.date)).size).toBe(r.equity.length);
+  });
+});
+
+describe("stitchEquity 兜底：重叠日期不复利两次", () => {
+  it("两段重叠 2 天：重叠日只认先到的那段，日期严格递增", () => {
+    const d = mkDays(8);
+    const a = seg(d.slice(0, 5), 0.01, 1);       // d0..d4
+    const b = seg(d.slice(3, 8), 0.01, 100);     // d3..d7，与 a 重叠 d3、d4
+    const out = stitchEquity([a, b]);
+    const dates = out.map((p) => p.date);
+    expect(dates).toEqual(d.slice(1, 8));
+    for (let i = 1; i < dates.length; i++) expect(dates[i] > dates[i - 1]).toBe(true);
+    // d1..d7 共 7 个日收益，每天 +1%：重叠日没被多乘
+    expect(out[out.length - 1].equity).toBeCloseTo(1.01 ** 7, 10);
+  });
+
+  it("后一段完全落在已覆盖区间内：整段跳过", () => {
+    const d = mkDays(6);
+    const a = seg(d, 0.01, 1);
+    const b = seg(d.slice(1, 4), 0.05, 1);
+    const out = stitchEquity([a, b]);
+    expect(out).toEqual(stitchEquity([a]));
+  });
+});
+
+describe("聚合裁决与退出码", () => {
+  const m = (calmar: number) => ({
+    calmar, annualReturn: 0.2, maxDrawdown: 0.1, sharpe: 1, winRate: 0.5, profitFactor: 1.5,
+    trades: 40, avgHoldDays: 3, triggerRate: null, buyDecisions: 40, buyFilled: 40,
+  });
+
+  it("非退化且 Calmar 达标 → 通过", () => {
+    const v = aggregatedVerdict({ metrics: m(1.5), degeneracy: [], oosDays: 300, segments: 5 });
+    expect(v.pass).toBe(true);
+    expect(v.undecidable).toBe(false);
+  });
+
+  it("Calmar 不达标 → 不通过", () => {
+    const v = aggregatedVerdict({ metrics: m(0.6), degeneracy: [], oosDays: 300, segments: 5 });
+    expect(v.pass).toBe(false);
+    expect(v.reasons.join(" ")).toContain("0.60");
+  });
+
+  it("拼完仍退化 / 天数不足 → 测不出，判不过", () => {
+    expect(aggregatedVerdict({ metrics: m(0), degeneracy: ["零回撤"], oosDays: 300, segments: 5 }).undecidable).toBe(true);
+    const short = aggregatedVerdict({ metrics: m(3), degeneracy: [], oosDays: MIN_SAMPLE_DAYS - 1, segments: 3 });
+    expect(short.pass).toBe(false);
+    expect(short.undecidable).toBe(true);
+  });
+
+  it("没给 --aggregated：退出码跟单窗口裁决", () => {
+    expect(walkForwardExitCode({ pass: true }, null)).toBe(0);
+    expect(walkForwardExitCode({ pass: false }, null)).toBe(1);
+  });
+
+  it("给了 --aggregated：退出码跟聚合裁决 —— 聚合不过必须非 0，即使单窗口过了", () => {
+    expect(walkForwardExitCode({ pass: true }, { pass: false })).toBe(1);
+    // 单窗口一个季度必然退化判不过，聚合过了才是能用的门槛
+    expect(walkForwardExitCode({ pass: false }, { pass: true })).toBe(0);
   });
 });
