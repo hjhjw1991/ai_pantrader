@@ -264,3 +264,68 @@ describe("成本与影子盘同口径", () => {
     expect(mine.netPct).toBeCloseTo(theirs.netPct!, 10);
   });
 });
+
+/* ---------------------- 一字跌停顺延：与结算逐笔一致 ---------------------- */
+
+/**
+ * 审计时复现过的两处分岔，外加 maxDefer 的边界。
+ * 早些版本一字跌停只"不走"、第二天重判一遍；结算则是"记下昨天就该走的理由，今天开盘走"。
+ */
+describe("一字跌停顺延与 settleShadow 一致", () => {
+  const cases: Array<{
+    name: string; bars: DailyBar[]; stop: number | null; maxDefer?: number;
+    want: { status: string; reason?: string; netPct?: number; exitDate?: string };
+  }> = [
+    {
+      name: "期满日（第 5 天）一字跌停 → 次日开盘按期满走，不是次日收盘",
+      bars: [bar("c", 0, 10, 10.2, 9.8, 10), bar("c", 1, 10, 10.1, 9.9, 10), bar("c", 2, 10, 10.1, 9.9, 10),
+        bar("c", 3, 10, 10.2, 9.9, 10.1), bar("c", 4, 9.9, 9.9, 9.9, 9.9), bar("c", 5, 9.6, 10.3, 9.5, 9.9)],
+      stop: 9,
+      want: { status: "已结算", reason: "期满", netPct: -4, exitDate: D(5) },
+    },
+    {
+      name: "一字跌停当天已破止损、次日高开回到止损上方 → 次日开盘止损，不是拿到期满",
+      bars: [bar("c", 0, 10, 10.2, 9.8, 10), bar("c", 1, 8.9, 8.9, 8.9, 8.9), bar("c", 2, 9.5, 9.8, 9.3, 9.7),
+        bar("c", 3, 9.7, 9.8, 9.6, 9.7), bar("c", 4, 9.7, 9.8, 9.6, 9.7)],
+      stop: 9,
+      want: { status: "已结算", reason: "止损", netPct: -5, exitDate: D(2) },
+    },
+    {
+      name: "maxDefer 边界：最后可判定下标 = 到期−1+maxDefer，不多推一根",
+      bars: [bar("c", 0, 10, 10.2, 9.8, 10), bar("c", 1, 10, 10.1, 9.9, 10), bar("c", 2, 10, 10.1, 9.9, 10),
+        bar("c", 3, 10, 10.2, 9.9, 10.1), bar("c", 4, 9.9, 9.9, 9.9, 9.9), bar("c", 5, 9.5, 9.5, 9.5, 9.5),
+        bar("c", 6, 9.4, 9.8, 9.3, 9.6)],
+      stop: 9, maxDefer: 1,
+      want: { status: "待定" },
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const md = c.maxDefer === undefined ? {} : { maxDefer: c.maxDefer };
+      const mine = simulateExit(现行, {
+        path: scalePath(c.bars, 0), entryPx: 10, planStopPx: c.stop, planTargetPx: null, ...NO, ...md,
+      });
+      const theirs = settleShadow({ triggerPx: 10, stopPx: c.stop, targetPx: null }, c.bars, { horizon: 5, ...NO, ...md });
+      // 先钉住结算本身的答案，防止两边一起错还"一致"
+      expect(theirs.status).toBe(c.want.status);
+      expect(mine.status).toBe(theirs.status);
+      if (theirs.status !== "已结算") return;
+      expect(theirs.exitReason).toBe(c.want.reason);
+      expect(theirs.exitDate).toBe(c.want.exitDate);
+      expect(theirs.netPct).toBeCloseTo(c.want.netPct!, 6);
+      expect(c.bars[mine.exitIdx!].date).toBe(theirs.exitDate);
+      expect(mine.reason).toBe(theirs.exitReason);
+      expect(mine.netPct).toBe(theirs.netPct);
+    });
+  }
+
+  it("decideToday 走的是同一段顺延逻辑", () => {
+    const path = scalePath(cases[1].bars.slice(0, 3), 0);
+    const d = decideToday(现行, { path, entryPx: 10, planStopPx: 9, planTargetPx: null, ...NO });
+    expect(d.走).toBe(true);
+    expect(d.reason).toBe("止损");
+    expect(d.onDate).toBe(D(2));
+    expect(d.px).toBeCloseTo(9.5, 10);
+  });
+});

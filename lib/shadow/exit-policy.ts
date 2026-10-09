@@ -16,7 +16,8 @@
  *   T+1：成交当天不能卖，最早第 2 个交易日
  *   跳空：开盘就越线，挂单在开盘成交
  *   同日同时碰到止损与目标 → 算止损（日线看不出先后，取保守）
- *   一字跌停：卖不出去，顺延
+ *   一字跌停：卖不出去。若当天本该离场，记下原因，顺延到下一个不是一字跌停的交易日**按开盘价**出
+ *            （settleShadow 同一口径：不是"顺延后重新判一遍"，而是"昨天就该走、今天开盘走"）
  */
 /** 一根已经换算到成交日价格尺度的日线 */
 export interface PathBar { date: string; o: number; h: number; l: number; c: number; adjFactor: number }
@@ -69,6 +70,15 @@ export interface ExitState {
    * 早些版本在这里少算一天，期满日整体后移一根，自检 4637 笔里错了 3918 笔。
    */
   held: number;
+  /**
+   * 一字跌停当天"本该离场"的原因，下一个能卖的交易日按开盘价出。
+   *
+   * 与 settleShadow 的 `deferred` 同义。早些版本一字跌停只返回"不走"、第二天重新判一遍，
+   * 于是两种情形与结算分岔：期满日一字跌停（结算次日开盘走、模拟次日收盘走），
+   * 以及一字跌停已破止损、次日高开回到止损上方（结算开盘止损、模拟拿到期满）。
+   * 由 stepExit 在一字跌停日写入，只写一次。
+   */
+  deferred: ExitReason | null;
 }
 
 /** 建初始状态。planStopPx / planTargetPx 必须已换算到成交日的价格尺度 */
@@ -83,24 +93,36 @@ export function newExitState(p: ExitPolicy, entryPx: number, planStopPx: number 
     stopLvl: stopAbs,
     targetPx: p.目标 === null ? planTargetPx : entryPx * (1 + p.目标 / 100),
     held: 1,
+    deferred: null,
   };
 }
 
+export type ExitReason = "止损" | "目标" | "破均线" | "时间止损" | "期满";
+
 export type ExitDecision =
   | { 走: false }
-  | { 走: true; px: number; reason: "止损" | "目标" | "破均线" | "时间止损" | "期满" };
+  | { 走: true; px: number; reason: ExitReason };
 
 /**
  * 推进一天。
  *
- * @param bars 截至今日的日线，**含今日**，顺序升序；长度需 ≥ n（均线要够）
- * @param prevC 昨日收盘（同一尺度）；用于判一字跌停。成交日的推进不需要传
+ * 一字跌停日会改写 `st.deferred`（只写一次）——这是 stepExit 唯一会碰状态的地方，
+ * 因为"本该今天走"只有今天判得出来，而成交要等到下一个能卖的交易日。
+ *
+ * @param prevC 昨日收盘（同一尺度）；用于判一字跌停
+ * @param barsSoFar 截至**昨日**的日线（升序，同一尺度），**不含今日** ——
+ *   调用方（decideToday / simulateExit）都是判定完今天之后才把今天 push 进去。
+ *   破均线因此取的是"今日收盘 vs 截至昨日的 N 日均线"。
  */
 export function stepExit(p: ExitPolicy, st: ExitState, today: PathBar, prevC: number, barsSoFar: readonly PathBar[]): ExitDecision {
-  // 一字跌停：挂了卖单也成交不了
-  if (Math.abs(today.h - today.l) < 1e-9 && today.c < prevC) return { 走: false };
-
   const { stopLvl, targetPx } = st;
+
+  // 一字跌停：挂了卖单也成交不了。今天本该走的话记下原因，下一个能卖的日子开盘出
+  if (Math.abs(today.h - today.l) < 1e-9 && today.c < prevC) {
+    if (st.deferred === null) st.deferred = wouldExitOnLockedDay(p, st, today, barsSoFar);
+    return { 走: false };
+  }
+  if (st.deferred !== null) return { 走: true, px: today.o, reason: st.deferred };
 
   /**
    * 跳空：开盘就在线的另一侧，实际成交在**开盘价**，不是那条线。
@@ -134,6 +156,27 @@ export function stepExit(p: ExitPolicy, st: ExitState, today: PathBar, prevC: nu
   return { 走: false };
 }
 
+/**
+ * 一字跌停日"本该"以什么理由离场。与 settleShadow 同序：先看止损，再看收盘类规则。
+ * 目标价不看 —— 跌停日碰不到目标（settleShadow 也不看）。
+ * 破均线 / 时间止损是 settleShadow 没有的规则，按与 stepExit 相同的条件顺延，
+ * 默认政策下它们为 null，不影响与结算的逐笔一致。
+ */
+function wouldExitOnLockedDay(p: ExitPolicy, st: ExitState, today: PathBar, barsSoFar: readonly PathBar[]): ExitReason | null {
+  if (st.stopLvl !== null && today.l <= st.stopLvl) return "止损";
+  if (p.破均线 !== null) {
+    const n = p.破均线;
+    if (barsSoFar.length >= n) {
+      const ma = barsSoFar.slice(barsSoFar.length - n).reduce((a, b) => a + b.c, 0) / n;
+      if (today.c < ma) return "破均线";
+    }
+  }
+  const pnl = st.entry > 0 ? (today.c / st.entry - 1) * 100 : 0;
+  if (p.时间止损 !== null && st.held >= p.时间止损.第几日 && pnl <= p.时间止损.低于) return "时间止损";
+  if (st.held >= p.到期) return "期满";
+  return null;
+}
+
 /** 一天结束后更新状态：抬峰值、按峰值重算移动止损。必须在 stepExit 判定之后调用，不改 held */
 export function advanceExit(p: ExitPolicy, st: ExitState, today: PathBar): void {
   if (today.h > st.peak) st.peak = today.h;
@@ -163,7 +206,10 @@ export interface SimOpts {
   planTargetPx: number | null;
   slippage: number;
   feeRate: number;
-  /** 一字跌停最多顺延几根，超了算走不了 */
+  /**
+   * 一字跌停最多顺延几根，超了算走不了。
+   * 与 settleShadow 同口径：最后一根可判定的下标 = 到期 − 1 + maxDefer（成交日下标 0）。
+   */
   maxDefer?: number;
 }
 
@@ -214,17 +260,21 @@ export function decideToday(p: ExitPolicy, o: SimOpts & { 盘中?: boolean }): T
 }
 
 /**
- * 从一个政策对象里剔除需要持有天数、但拿不到 openDate 的规则。
+ * 从一个政策对象里剔除需要持有天数、或需要"建仓以来那段路径"、但拿不到 openDate 的规则。
  *
  * 缺 openDate 就当"第 1 天"是最危险的默认：时间止损会永远不触发，
  * 而卡片上一切如常，看不出它没生效。这里把规则关掉并把名字报上去，
  * 由调用方写进卡片的 warning。
+ *
+ * 移动止损也在此列：它的峰值要从建仓日起算，拿不到建仓日就只能拿建仓之前的高点当峰值，
+ * 那会凭空抬出一条止损线、在建仓前的走势上判清仓。破均线只看"今天收盘 vs 均线"，不需要建仓日。
  */
 export function dropRulesNeedingAge(p: ExitPolicy): { pol: ExitPolicy; dropped: string[] } {
   const dropped: string[] = [];
   const out = { ...p };
   if (out.到期 !== null && Number.isFinite(out.到期) && out.到期 < Number.MAX_SAFE_INTEGER) { dropped.push("持有上限"); out.到期 = Number.MAX_SAFE_INTEGER; }
   if (out.时间止损 !== null) { dropped.push("时间止损"); out.时间止损 = null; }
+  if (out.移动止损 !== null) { dropped.push("移动止损"); out.移动止损 = null; }
   return { pol: out, dropped };
 }
 
@@ -261,9 +311,10 @@ export function simulateExit(p: ExitPolicy, o: SimOpts): SimResult {
   }
   const st = newExitState(p, o.entryPx, o.planStopPx, o.planTargetPx);
   const seen: PathBar[] = [...(o.prior ?? []), path[0]];
-  const last = (o.maxDefer ?? 10);
+  // settleShadow: lastIdx = horizon − 1 + maxDefer。早些版本写成 到期 + maxDefer，多推一根
+  const lastIdx = p.到期 - 1 + (o.maxDefer ?? 10);
   for (let i = 1; i < path.length; i++) {
-    if (i > p.到期 + last) break;
+    if (i > lastIdx) break;
     const b = path[i];
     st.held = i + 1; // 含当日的持有天数：成交日 = 1
     const d = stepExit(p, st, b, path[i - 1].c, seen);
@@ -277,7 +328,8 @@ export function simulateExit(p: ExitPolicy, o: SimOpts): SimResult {
     }
     advanceExit(p, st, b);
   }
-  return { status: "待定", netPct: null, exitIdx: null, reason: null, held: null, note: "持有期还没走完" };
+  const note = st.deferred !== null ? `一字跌停卖不出，顺延（${st.deferred}）` : "持有期还没走完";
+  return { status: "待定", netPct: null, exitIdx: null, reason: null, held: null, note };
 }
 
 /**

@@ -354,8 +354,10 @@ export function* replaySteps(o: RunBacktestOptions): Generator<ReplayProgress, R
     // 5. 最后才调策略。它只拿到当日视图，产出的决策挂到下一个可回放日
     const card = o.strategy({
       view, config: o.config, phase,
+      // openDate 要传：离场槽里按持有天数/建仓以来路径判的规则（持有上限、时间止损、移动止损）
+      // 缺了它会被关掉并告警 —— 回测里不传，等于这些规则在回测里从来没生效过
       positions: [...positions.values()].map((p) => ({
-        account: p.account, code: p.code, cost: p.cost, qty: p.qty, stopPx: p.stopPx,
+        account: p.account, code: p.code, cost: p.cost, qty: p.qty, stopPx: p.stopPx, openDate: p.openDate,
       })),
     });
     if (card.candidates.length > 0) candidateDays++;

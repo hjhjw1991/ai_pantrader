@@ -40,11 +40,15 @@ function run(db: ReturnType<typeof openDb>, tag: string) {
   if (r.failed.length) console.log("   失败明细:", r.failed.slice(0,3).map(f=>`${f.variant}: ${f.error}`).join(" | "));
   return r;
 }
+/**
+ * 比对的是 shadow_pred 里**策略算出来的**每一列。rr_ratio / gear 也在内：
+ * 盈亏比来自定价、档位来自择时，二者偷看未来时 trigger/stop/size 可能恰好不变。
+ */
 const rowsOf = (db: ReturnType<typeof openDb>) =>
-  (db.prepare(`SELECT variant_id, code, trigger_px, stop_px, target_px, size, score, stage
+  (db.prepare(`SELECT variant_id, code, trigger_px, stop_px, target_px, rr_ratio, size, score, gear, stage
      FROM shadow_pred WHERE source='replay' AND base_date=? AND variant_id LIKE '%#probe'
      ORDER BY variant_id, code`).all(D) as any[])
-   .map(r => [r.variant_id, r.code, r.trigger_px, r.stop_px, r.target_px, r.size, r.score, r.stage].join("|"));
+   .map(r => [r.variant_id, r.code, r.trigger_px, r.stop_px, r.target_px, r.rr_ratio, r.size, r.score, r.gear, r.stage].join("|"));
 
 run(main, "主库（全量）");
 const a = rowsOf(main);
@@ -62,7 +66,13 @@ const b = rowsOf(scratch);
 scratch.close();
 
 console.log(`\n基准日 ${D}：主库 ${a.length} 行 / 副本 ${b.length} 行`);
-if (a.length !== b.length) {
+if (a.length === 0 && b.length === 0) {
+  // 两边都没出候选 = 什么都没比到。打 ✓ 等于把"没跑起来"（变体全失败、副本缺数据、基准日不是交易日）
+  // 报成"没有未来函数"
+  console.log(">>> 两边都是 0 行：没有可比对的输出，不能据此判定无未来函数 ✗（换一个有候选的基准日）");
+  process.exitCode = 1;
+} else if (a.length !== b.length) {
+  process.exitCode = 1;
   console.log(">>> 行数不同 ✗");
   const sa = new Set(a), sb = new Set(b);
   for (const x of a.filter(v=>!sb.has(v)).slice(0,8)) console.log("  仅主库:", x);
@@ -71,4 +81,5 @@ if (a.length !== b.length) {
   let diff = 0;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { if (diff < 8) console.log(`  第${i}行 主库[${a[i]}] 副本[${b[i]}]`); diff++; }
   console.log(diff === 0 ? ">>> 未检出未来函数：全流水线输出逐字段一致 ✓" : `>>> 检出 ${diff} 处不一致 ✗`);
+  if (diff > 0) process.exitCode = 1;
 }

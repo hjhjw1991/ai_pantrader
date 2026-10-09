@@ -166,13 +166,51 @@ describe("缺建仓日", () => {
     expect(card.warnings.some(w => w.includes("缺建仓日") && w.includes("持有上限"))).toBe(true);
   });
 
-  it("不需要天数的规则不受影响：破缺建仓日也能用", () => {
-    const card = run(
-      { 离场器: { 用: "路径纪律", 参数: { 目标: 3 } } },
-      { openDate: null },
-    );
-    // 目标/止损归账户纪律，本槽没有任何不需要天数的线可用 → 仍然持有，且不误报
+  /**
+   * 缺建仓日时只能判今天那一根，不许在历史上回放。
+   * 早些版本 `from = openDate ?? ""` 让整段 250 根都成了"持有路径"，
+   * 下面这段走势在 07-30 破过一次 MA3 —— 那是建仓前的事，却会让今天清仓。
+   */
+  function runWith(closes: number[], cost: number, params: Record<string, number>): SignalCard {
+    const b = series("600183", DAYS, closes)
+      .map(x => ({ ...x, o: x.c, h: x.c * 1.004, l: x.c * 0.996, vol: 1e6 }));
+    return createV2Engine({
+      registry: stubRegistry(stubs()),
+      slots: createSlotRegistry([...BASELINE_SLOTS, 离场器_路径纪律]),
+    })({
+      ...input({ slots: { 离场器: { 用: "路径纪律", 参数: params } }, pos: { openDate: null, cost } }),
+      view: makeView({
+        asOf: `${TODAY} 15:05:00`, tradingDays: DAYS,
+        securities: [sec("600183", "主板")],
+        bars: { "600183": b },
+        quotes: { "600183": quote("600183", closes[8]!) },
+      }),
+    });
+  }
+
+  it("破均线不会在建仓前的历史K线上触发", () => {
+    // 07-30 收 10.2 < MA3(10, 10.5, 11)=10.5 —— 历史上破过；今天 11.2 > MA3(10.6, 10.8, 11.0)
+    const card = runWith([10, 10.5, 11, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4], 11, { 破均线: 3 });
+    const h = card.holdings[0]!;
+    expect(h.action).toBe("持有");
+    expect(h.thesis).toContain("缺建仓日");
+    expect(h.thesis).not.toContain("破均线（");
+  });
+
+  it("破均线不需要建仓日：今天收盘跌破照样清仓", () => {
+    // 今天 10.5 < MA3(10.6, 10.8, 11.0)=10.8
+    const card = runWith([10, 10.5, 11, 10.2, 10.4, 10.6, 10.8, 11.0, 10.5, 10.4], 10.6, { 破均线: 3 });
+    const h = card.holdings[0]!;
+    expect(h.action).toBe("清仓");
+    expect(h.thesis).toContain("破均线");
+    expect(h.thesis).toContain(TODAY);
+  });
+
+  it("移动止损要从建仓日起算峰值：缺建仓日时关掉并告警", () => {
+    // 历史高点 11 → 回撤 3% 的线 10.67；今天 10.5 在线下。不关掉的话会拿建仓前的高点凭空止损
+    const card = runWith([10, 10.5, 11, 10.2, 10.4, 10.6, 10.8, 10.6, 10.5, 10.4], 10.6, { 移动止损起: 1, 移动止损回撤: 3 });
     expect(card.holdings[0]!.action).toBe("持有");
+    expect(card.warnings.some(w => w.includes("缺建仓日") && w.includes("移动止损"))).toBe(true);
   });
 });
 

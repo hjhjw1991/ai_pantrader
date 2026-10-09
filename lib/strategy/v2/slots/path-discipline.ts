@@ -102,25 +102,45 @@ export const 离场器_路径纪律: ExitSlot = {
     const bars = ctx.view.dailyBars(position.code, 250);
     if (bars.length === 0) return tag("无日线，无法判定");
 
-    const from = position.openDate ?? "";
-    const i = bars.findIndex(b => b.date >= from);
-    const pathRaw = i < 0 ? [] : bars.slice(i);
-    if (pathRaw.length === 0) return tag(`建仓日 ${from} 之后还没有K线`);
-    const path: PathBar[] = scalePath(pathRaw, 0);
+    /**
+     * 缺建仓日：**只判今天这一根**，不在历史上回放。
+     *
+     * 早些版本写的是 `from = openDate ?? ""`，空串让 findIndex 落在第 0 根，
+     * 于是 250 根建仓之前的K线全被当成持有路径 —— 破均线会在建仓前的某根K线上"触发"并清仓。
+     * 这里改成：路径 = [昨日, 今日]，昨日之前的K线只作为均线窗口（prior）。
+     * 需要建仓路径的规则（持有上限、时间止损、移动止损）已在上面被 dropRulesNeedingAge 关掉并告警，
+     * 剩下能跑的只有破均线，而它本来就只看"今天收盘 vs 均线"。
+     */
+    let i: number;
+    if (missingAge) {
+      if (bars.length < 2) return tag("缺建仓日且K线不足两根，无法判定");
+      i = bars.length - 2;
+    } else {
+      const from = position.openDate as string;
+      i = bars.findIndex(b => b.date >= from);
+      if (i < 0) return tag(`建仓日 ${from} 之后还没有K线`);
+    }
+    // 整段换算到路径首根的尺度；首根之前的K线喂给 prior —— 与评测脚本 (x2-exit-policy) 同口径，
+    // 不喂的话破均线在建仓后头 N 天凑不齐窗口，评测里触发的线实盘不触发
+    const scaled: PathBar[] = scalePath(bars, i);
+    const prior = scaled.slice(0, i);
+    const path = scaled.slice(i);
 
     const d = decideToday(eff, {
-      path, entryPx: cost,
+      path, prior, entryPx: cost,
       // 止损/目标归账户纪律，这里传 null —— 本槽只跑自己那几条线
       planStopPx: null, planTargetPx: null,
       slippage: 0, feeRate: 0,
       ...(ctx.phase === "盘中" ? { 盘中: true } : {}),
     });
 
+    if (!d.走 && missingAge) return tag("缺建仓日，只判了今日的破均线，未触发");
     if (!d.走) return tag(`已持有 ${d.held} 个交易日，未触发任何线条`);
     return {
       ...base,
       action: "清仓", size: 0, triggerPx: null, stopPx: null,
-      thesis: `${base.thesis}；路径纪律清仓：${d.reason}（第 ${d.held} 个交易日` +
+      // 缺建仓日时 d.held 只是"路径里第几根"，不是持有天数，不写进去免得被当真
+      thesis: `${base.thesis}；路径纪律清仓：${d.reason}（${missingAge ? "缺建仓日，仅判今日" : `第 ${d.held} 个交易日`}` +
         `${d.onDate === null ? "" : ` · ${d.onDate}`}${d.px === null ? "" : ` @${d.px.toFixed(2)}`}）`,
     };
   },

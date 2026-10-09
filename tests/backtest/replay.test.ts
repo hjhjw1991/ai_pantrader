@@ -278,3 +278,15 @@ describe("报告封装", () => {
     expect(v.dailyBars("600000", 10).map((b) => b.date)).toEqual([D[0], D[1]]);
   });
 });
+
+describe("持仓带建仓日交给策略", () => {
+  it("openDate = 成交日；离场槽的天数类规则靠它，不传就被关掉", () => {
+    const seen: Array<StrategyEngineInput["positions"]> = [];
+    const strat = buyOnceStrategy();
+    run({ strategy: (input) => { seen.push(input.positions); return strat(input); } });
+    // D2 开盘成交，D2 收盘起策略看到这笔持仓
+    const after = seen.filter(p => p.length > 0);
+    expect(after.length).toBeGreaterThan(0);
+    for (const ps of after) expect(ps[0]!.openDate).toBe(D[2]);
+  });
+});

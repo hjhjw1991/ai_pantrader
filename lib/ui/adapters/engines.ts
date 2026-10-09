@@ -75,6 +75,8 @@ export function todaySignalCard(
       cost: p.cost,
       qty: p.qty,
       stopPx: p.stopPx,
+      // 离场槽的持有上限 / 时间止损 / 移动止损都靠它；不传就被关掉并告警
+      openDate: p.openDate,
     }));
     // 代码→行业 映射走输入注入（视图是冻结契约，见 StrategyEngineInput.sectorOf 的说明）
     const sm = sectorMap(db);
@@ -146,7 +148,8 @@ export interface BacktestRunInput {
  * 一次回测"跑哪套东西"。三者都不给 = 跑当前生效的 YAML。
  *
  * strategyId + strategyVersion → 跑 strategy 表里那份**历史快照**（比"参数改了之后好不好"）
- * variantId                    → 在当前 YAML 上盖一层影子盘组合的槽位（比"换套打法好不好"）
+ * variantId                    → 用影子盘组合的槽位替换 YAML 的 `槽位:`（比"换套打法好不好"），
+ *                                未声明的槽落回 BASELINE —— 与影子盘同一口径，见 applyVariantSlots
  *
  * 两个可以同时给：先落到指定的历史快照，再盖槽位。
  */
@@ -163,15 +166,20 @@ export interface ResolvedTarget {
 }
 
 /**
- * 把一套槽位搭配盖到配置上，返回**新**配置。
+ * 把一套槽位搭配换到配置上，返回**新**配置。
  *
- * 整槽替换，不是逐键合并：变体给的是每个槽的完整选择（`用` + `参数`），
- * 逐键合并会产出"新识别器 + 旧参数"这种没人定义过的第三种打法，
- * 而它跑出来的成绩会被当成那个变体的成绩记下来。
+ * 变体的槽位**整段替换** YAML 的 `槽位:`，变体没声明的槽落回 BASELINE，而不是落回 YAML 当前写的槽。
+ * 这是影子盘的口径（lib/shadow/book.ts：`slotConfig: v.slots` 作为显式入参，
+ * 引擎里 `sc.X ?? BASELINE_CHOICE.X`，YAML 的 `槽位:` 被整段忽略）。
+ * 早些版本这里是 `{...YAML槽位, ...变体槽位}`：影子盘切换把某套槽位写进 YAML 之后，
+ * 回测里的 "baseline" 变体（slot_config = {}）跑的就成了切换后的那套，
+ * 而影子盘里的 baseline 仍是 BASELINE —— 同名的两条成绩说的是两种打法。
+ *
+ * 也因此是整槽替换，不是逐键合并：逐键合并会产出"新识别器 + 旧参数"这种没人定义过的第三种打法。
  */
 export function applyVariantSlots(config: StrategyConfig, slots: SlotConfig): StrategyConfig {
   const next = JSON.parse(JSON.stringify(config)) as StrategyConfig;
-  next.槽位 = { ...(config.槽位 ?? {}), ...slots };
+  next.槽位 = JSON.parse(JSON.stringify(slots)) as SlotConfig;
   return next;
 }
 
@@ -184,9 +192,11 @@ export function applyVariantSlots(config: StrategyConfig, slots: SlotConfig): St
  */
 export function resolveBacktestTarget(
   db: Db,
-  t: BacktestTarget
+  t: BacktestTarget,
+  /** 测试注入：当前生效配置从哪来。缺省读 YAML（实文件被 gitignore，新克隆里没有） */
+  readCurrent: () => ReturnType<typeof readStrategyConfig> = readStrategyConfig
 ): { ok: true; target: ResolvedTarget } | { ok: false; reason: string } {
-  const cur = readStrategyConfig();
+  const cur = readCurrent();
   if (!cur.available) return { ok: false, reason: cur.reason };
 
   let config = cur.config;
