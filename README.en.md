@@ -116,7 +116,7 @@ Pages refresh themselves every 60 seconds, plus an SSE push — gear changes, ne
 | 08:50 | `selfcheck` | Gap scan + coverage | ✅ |
 | 09:00 | `preopen` | Sync trading calendar | ✅ |
 | 09:15 | `plan` | Pre-open battle plan: run the strategy, push today's candidates | ❌ |
-| 09:35–11:30 / 13:00–14:55, every 5 min | `intraday` | Whole-market snapshot + watchlist minute bars | ❌ |
+| 09:35–11:30 / 13:00–14:55, every 5 min | `intraday` | Whole-market snapshot + minute bars for watchlist ∪ holdings ∪ today's plan (cap 120) | ❌ |
 | 15:05 | `close` | Closing snapshot + limit-up pool | ❌ |
 | 18:40 | `post` | Dragon-tiger list + broker seats | ✅ |
 | 22:00 | `night` | Full daily bars + gap backfill + dragon-tiger label refresh + ledger reconciliation | ✅ |

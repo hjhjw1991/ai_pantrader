@@ -21,6 +21,7 @@ import { collectMargin } from "@/lib/data/collectors/margin";
 import { collectMutual } from "@/lib/data/collectors/mutual";
 import { collectHolderChanges } from "@/lib/data/collectors/holder-change";
 import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
+import { watchPool } from "@/lib/data/watch-pool";
 import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { getMeta, setMeta, systemStartDate } from "@/lib/data/meta";
@@ -184,19 +185,13 @@ export function lhbRefreshDates(db: Db, since: string, today: string): string[] 
 }
 
 /**
- * 关注池。M0 阶段观察池尚未建表，先取快照中出现过的前 50 只做占位。
- * M1 引入 watchpool 表后替换这里。
+ * 关注池 = 自选 ∪ 持仓 ∪ 今日计划点名的票。
+ *
+ * 早先这里是 M0 占位（security 表前 50 只），而那一批实测是 000001~000059 的
+ * 深市老票，混着 PT金田A / 国华退 / 新都退 —— 多半只有 240 根就再也取不到数；
+ * 而自选、持仓、今日候选**一只都不在里面**。分钟线不可回补，采错了就是白采。
+ * 判据与上限在 lib/data/watch-pool.ts（那边有测试）。
  */
-function watchCodes(db: Db): string[] {
-  // 只取有日线序列的在市票。快照里含退市/PT 代码（000003 之类），
-  // 它们在新浪没有分钟序列，抓了纯浪费请求，还会污染缺口统计
-  return db.prepare(
-    `SELECT s.code FROM security s
-      WHERE s.delist_date IS NULL AND s.first_bar_date IS NOT NULL
-        AND EXISTS (SELECT 1 FROM quote_snapshot q WHERE q.code = s.code)
-      ORDER BY s.code LIMIT 50`
-  ).all().map((r: any) => r.code);
-}
 
 /**
  * 判定一次 job 的真实成败。
@@ -308,9 +303,16 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
         onProgress === undefined ? undefined : p => onProgress({ phase: "snapshot", ...p }));
       stats.snapshotWritten = snap.written;
       stats.snapshotFailedBatches = snap.failedBatches;
-      const wc = watchCodes(db);
-      if (wc.length) {
-        const min = await collectWatchMinute(db, clients.sina, wc, 5);
+      const pool = watchPool(db, date);
+      // 各来源的数量进 stats：池子空的时候要能看出是"没自选"还是"今天没候选"，
+      // 否则"分钟线没采"这一个现象会同时指向三四种原因，查不出来
+      stats.minutePool = pool.codes.length;
+      stats.minutePoolWatch = pool.fromWatch;
+      stats.minutePoolHeld = pool.fromHeld;
+      stats.minutePoolPlan = pool.fromPlan;
+      stats.minutePoolTruncated = pool.truncated;
+      if (pool.codes.length) {
+        const min = await collectWatchMinute(db, clients.sina, pool.codes, 5);
         stats.minuteWritten = min.written;
         stats.minuteFailed = min.failed.length;
         stats.minuteNoData = min.noData.length;
