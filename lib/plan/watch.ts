@@ -5,6 +5,7 @@ import { todaySignalCard } from "@/lib/ui/adapters/engines";
 import { positionsView } from "@/lib/ui/views";
 import { intradayMood } from "@/lib/sentiment/intraday";
 import { diffAndNotify, pushNotification } from "@/lib/ui/notify";
+import { syncIntradayWatch, type IntradayWatchSync } from "@/lib/data/intraday-watch";
 
 /**
  * 盘中信号盯守：每轮采集之后重算信号卡，与上次比对，把**需要人做动作的变化**写成通知。
@@ -19,7 +20,9 @@ import { diffAndNotify, pushNotification } from "@/lib/ui/notify";
  *
  * 失败不上抛：通知是增强，算不出来绝不能让采集这一轮变成失败。
  */
-export async function runSignalWatch(db: Db): Promise<{ notified: number; reason?: string }> {
+export async function runSignalWatch(
+  db: Db
+): Promise<{ notified: number; reason?: string; watch?: IntradayWatchSync }> {
   /**
    * 两段互不依赖：日线信号卡算不出来（策略配置缺失、卡片不可用）时，
    * 盘中情绪照样要算 —— 以前这里提前 return，情绪通知就整段跳过了，
@@ -27,26 +30,56 @@ export async function runSignalWatch(db: Db): Promise<{ notified: number; reason
    */
   let notified = 0;
   let reason: string | undefined;
+  let watch: IntradayWatchSync | undefined;
   try {
     const r = cardNotify(db);
     notified += r.notified;
     reason = r.reason;
+    watch = r.watch;
   } catch (e) {
     // 卡片这段出错不该挡住情绪那段
     reason = `信号卡计算出错：${(e as Error)?.message ?? e}`;
   }
 
   const moodNotified = moodNotify(db);
-  return { notified: notified + moodNotified, ...(reason !== undefined ? { reason } : {}) };
+  return {
+    notified: notified + moodNotified,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(watch !== undefined ? { watch } : {}),
+  };
 }
 
 /** 日线口径的信号卡：档位、候选、硬线告警的变化 */
-function cardNotify(db: Db): { notified: number; reason?: string } {
+function cardNotify(db: Db): { notified: number; reason?: string; watch?: IntradayWatchSync } {
   const cfg = readStrategyConfig();
   if (!cfg.available) return { notified: 0, reason: `策略配置不可用：${cfg.reason}` };
 
-  const out = todaySignalCard(db, shanghaiTs(), cfg.config);
+  const ts = shanghaiTs();
+  const out = todaySignalCard(db, ts, cfg.config);
   if (!out.available) return { notified: 0, reason: out.reason };
+
+  /**
+   * 顺手把"这一轮还在候选池里的票"抄给采集层 —— 这是唯一一处每 5 分钟
+   * 真算过候选的地方，另起一次引擎跑一遍纯属浪费（作战台实测 2~8 秒）。
+   *
+   * 卡片算不出来时传 null：那不是"今天没有候选"，是"不知道"。把不知道
+   * 当成空，一次引擎报错就会清空盯守名单，那一整段盘中分钟线就永久没了。
+   *
+   * 落在 signalWatch 里而不是采集之前，是因为候选要拿这一轮刚写进去的快照算。
+   * 代价是新候选从下一轮才开始采（约 5 分钟），但新浪一次返回最近 240 根
+   * （约 5 个交易日），当天更早的分钟线会一并带回来，所以不会有洞。
+   */
+  let watch: IntradayWatchSync | undefined;
+  let reason: string | undefined;
+  try {
+    const r = syncIntradayWatch(db, {
+      date: ts.slice(0, 10), ts, candidates: out.card.candidates,
+    });
+    if (r !== null) watch = r;
+  } catch (e) {
+    // 名单写不进去不该让这一轮的通知停掉
+    reason = `盘中盯守名单更新失败：${(e as Error)?.message ?? e}`;
+  }
 
   // 硬线告警数从持仓视图来：破止损/破灾难位是 critical 级，必须响
   let alerts = 0;
@@ -55,7 +88,11 @@ function cardNotify(db: Db): { notified: number; reason?: string } {
   } catch {
     // 持仓算不出来不该挡住档位与候选的通知
   }
-  return { notified: diffAndNotify(db, out.card, alerts).length };
+  return {
+    notified: diffAndNotify(db, out.card, alerts).length,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(watch !== undefined ? { watch } : {}),
+  };
 }
 
 /** 通知表里是否已经有这个去重键 */

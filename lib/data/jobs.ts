@@ -22,6 +22,7 @@ import { collectMutual } from "@/lib/data/collectors/mutual";
 import { collectHolderChanges } from "@/lib/data/collectors/holder-change";
 import { collectAdjustFactors } from "@/lib/data/collectors/adjust-factor";
 import { watchPool } from "@/lib/data/watch-pool";
+import type { IntradayWatchSync } from "@/lib/data/intraday-watch";
 import { buildPeriodBars } from "@/lib/data/collectors/kline-period";
 import { backfillRecoverable } from "@/lib/data/backfill";
 import { getMeta, setMeta, systemStartDate } from "@/lib/data/meta";
@@ -102,7 +103,9 @@ export interface JobDeps {
    * 盘中信号盯守，同样由组装根注入（理由见 planPreopen）。
    * 每轮盘中采集之后重算信号卡并与上次比对，产生档位切换 / 新候选 / 硬线告警通知。
    */
-  signalWatch?: (db: Db) => Promise<{ notified: number; reason?: string }>;
+  signalWatch?: (db: Db) => Promise<{
+    notified: number; reason?: string; watch?: IntradayWatchSync;
+  }>;
   /**
    * 周复盘，同样由组装根注入（理由见 planPreopen）。
    * 对账之后跑，把这一周的触发率 / 胜率 / 盈亏比汇成一条通知。
@@ -309,6 +312,7 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       stats.minutePool = pool.codes.length;
       stats.minutePoolWatch = pool.fromWatch;
       stats.minutePoolHeld = pool.fromHeld;
+      stats.minutePoolIntraday = pool.fromIntraday;
       stats.minutePoolPlan = pool.fromPlan;
       stats.minutePoolTruncated = pool.truncated;
       if (pool.codes.length) {
@@ -344,6 +348,14 @@ export async function runJob(name: JobName, deps: JobDeps): Promise<JobResult> {
       if (signalWatch !== undefined) {
         const w = await signalWatch(db);
         stats.notified = w.notified;
+        // 这一轮更新盯守名单的结果：下一轮池子里的"盘中候选"就是它。
+        // 与上面的 minutePool* 分开记 —— 那组是本轮实际采的，这组是本轮刚判的
+        if (w.watch !== undefined) {
+          stats.intradayWatchSeen = w.watch.seen;
+          stats.intradayWatchEntered = w.watch.entered;
+          stats.intradayWatchRevived = w.watch.revived;
+          stats.intradayWatchDropped = w.watch.dropped;
+        }
       }
       break;
     }
