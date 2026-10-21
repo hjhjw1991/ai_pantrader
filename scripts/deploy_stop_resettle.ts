@@ -26,13 +26,14 @@ console.log("[deploy] opened =", (db as unknown as { name: string }).name ?? res
 
 const rows = db.prepare(
   `SELECT p.id, p.code, p.action, p.eval_horizon, p.stop_px,
-          o.verdict, o.actual_pct, o.entry_px, o.entry_date
+          o.verdict, o.actual_pct, o.mae_pct, o.entry_px, o.entry_date
    FROM prediction p JOIN outcome o ON o.pred_id = p.id
    WHERE o.verdict != '作废' AND o.dirty_reason IS NULL AND o.entry_px IS NOT NULL
    ORDER BY p.id`
 ).all() as Array<{
   id: string; code: string; action: string; eval_horizon: number; stop_px: number | null;
-  verdict: string; actual_pct: number | null; entry_px: number; entry_date: string;
+  verdict: string; actual_pct: number | null; mae_pct: number | null;
+  entry_px: number; entry_date: string;
 }>;
 console.log(`[deploy] 候选（已成交、非脏非作废）${rows.length} 行`);
 

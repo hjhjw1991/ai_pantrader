@@ -214,6 +214,7 @@ pnpm db:import <f.ptbak> merge newer
 | `pnpm run job <name>` | 手动跑一个 job：`selfcheck` `preopen` `plan` `intraday` `close` `post` `night` |
 | `pnpm run backfill <job> --at <时刻>` | 补历史数据：`--at` 是"当作几点"，runJob 里所有日期都由它推出来，补哪一趟就认领那一天那一个时点。`2026-10-08` 或 `2026-10-08T22:00:00+08:00`（不带时区按上海挂钟解释）。`night` 可加 `--derived=light`（只建情绪与代理截面，不结算影子盘、不动策略文件）/ `=skip`。源上没有历史接口的 job（`close` `intraday` `plan`）补到非今天会被拦下，确认源上仍挂着那天的现场才加 `--force` |
 | `pnpm run parity [天数]` | v1↔v2 引擎对照：真实因子跑最近 N 个交易日，逐字段比信号卡。不一致即退出码非 0 |
+| `pnpm factor:eval` | 因子评估：把落库的因子读数跑成横截面 IC / IR / t / 判读，加分组检验的各组均值与头部超额（A 股不能做空，只有多头那一段能兑现）。`--horizon=5` 只看某个周期，`--groups=5` 定分组数。样本不足 30 条一律报「样本不足」，不给可用性结论 |
 | `pnpm backtest:tearsheet` | 把回测存档导出成一份自包含 HTML（净值/回撤/月度收益/基准对比）。`--list` 列存档，`--latest` 取最新，`--id <id>` 指定，`--bench sh000300` 换基准，`--no-bench` 不比 |
 | `pnpm backtest:walkforward` | 滚动样本外验证：训练段寻优 → 测试段只评估一次 → 出裁决、样本内外落差、参数稳定性。`--plan` 先看要跑多少次回测，`--grid 路径=v1,v2` 指定寻优网格，`--aggregated` 把各段样本外拼成一条曲线再判（算力翻倍）。样本外不通过退出码非 0 |
 | `pnpm backtest:cost-stress` | 成本压力测试：把滑点与费用按倍数加压，**每档一次完整回测**（不外推——滑点改变成交价→净值→仓位→手数取整，路径整个变了），给出「成本涨到几倍净收益归零」与成本吃掉的收益比例。`--plan` 只看计划，`--levels 0,1,1.5,2,3` 定档位（`×0` 是零摩擦上限），`--save` 把现行那一档存进存档，`--strict` 让脆弱也判失败。现行成本下不赚钱退出码非 0 |
