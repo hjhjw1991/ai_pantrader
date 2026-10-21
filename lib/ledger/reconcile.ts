@@ -1,5 +1,5 @@
 import type { Db } from "@/lib/db";
-import type { Action, ErrorType, Outcome, Prediction, Verdict } from "@/lib/contracts";
+import type { Action, ErrorType, Outcome, Phase, Prediction, Verdict } from "@/lib/contracts";
 import {
   dateOf, EVAL_HORIZONS, PRED_COLS, round, toPrediction, type EvalHorizon, type LedgerFilter, type PredictionRow,
 } from "@/lib/ledger/query";
@@ -113,7 +113,13 @@ function tradingDayOnOrBefore(db: Db, date: string): string | null {
  * 就是把未来价当成了决策价，会系统性地把胜率算高。
  * 这也让 D1 与龙虎榜 d1_chg 的口径一致：上榜日为基准，次日为 D1。
  */
-export function baseTradingDay(db: Db, p: Prediction): string | null {
+/**
+ * 入参取结构化子集而不是整个 Prediction：落台账那一侧（plan/record）要在
+ * **写入之前**用同一套算法算出成交日，判断这批还来不来得及 ——
+ * 那里手上只有一个 ts 和 phase，还没有 Prediction 对象。
+ * 成交日算法必须只有一份，两边各写一遍就会在某个 phase 上悄悄分叉。
+ */
+export function baseTradingDay(db: Db, p: { ts: string; phase: Phase }): string | null {
   const d = dateOf(p.ts);
   if (p.phase === "盘后") return tradingDayOnOrBefore(db, d);
   const prev = db.prepare(

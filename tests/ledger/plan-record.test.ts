@@ -82,6 +82,29 @@ describe("plan/record 落台账", () => {
     expect(rows.every(x => x.pred_id === planPredictionId("2026-08-04", "s1", "300502", "买入"))).toBe(true);
   });
 
+  /**
+   * 晚跑（守护进程没起来 / 机器睡过头）出来的计划，成交日当天的 09:25 早已过去，
+   * 那批票根本买不到。记进去 reconcile 只会整批判"作废"：不进统计、占掉批次，
+   * 还让界面上看着像真出过票 —— 实测 10-08/09 两批就是这样变出 14 条僵尸行的。
+   */
+  it("决策晚于成交日 09:25 集合竞价 → 整批不进台账，且不伪造 ts 绕过", () => {
+    const r = recordPlan(db, card(), "2026-08-04", "2026-08-04T13:39:00+08:00");
+    expect(r.recorded).toBe(0);
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain("09:25");
+    expect((db.prepare("SELECT COUNT(*) n FROM prediction").get() as any).n).toBe(0);
+  });
+
+  /**
+   * 这条是上面那条的分界：成交日算法若写成"now >= 当天 09:25"，盘后计划会被
+   * 整批误杀（15:30 当然晚于 09:25）。盘后的成交日是**次日**，所以不算晚。
+   */
+  it("盘后计划不受影响：成交日是次日，15:30 决策不算晚", () => {
+    const r = recordPlan(db, card({ phase: "盘后" }), "2026-08-04", "2026-08-04T15:30:00+08:00");
+    expect(r.recorded).toBe(2);
+    expect(r.skipped).toBe(false);
+  });
+
   it("id 由内容推导，一天一批", () => {
     recordPlan(db, card(), "2026-08-04", "2026-08-04T09:15:00+08:00");
     recordPlan(db, card(), "2026-08-04", "2026-08-04T09:15:00+08:00");

@@ -2,8 +2,9 @@ import type { Db } from "@/lib/db";
 import { entryTypeOf, type Candidate, type EnvAssessment, type Prediction, type SignalCard } from "@/lib/contracts";
 import type { FactorResult } from "@/lib/contracts/factor";
 import { recordPredictions } from "@/lib/ledger/record";
-import { tradingDayOffset } from "@/lib/ledger/reconcile";
-import { addDays } from "@/lib/data/clock";
+import { baseTradingDay, TRIGGER_WINDOW_DAYS, tradingDayOffset } from "@/lib/ledger/reconcile";
+// isLateDecision / toShanghaiWall 来自 clock（reconcile 也是从那儿引的），不在 reconcile 导出里
+import { addDays, isLateDecision, toShanghaiWall } from "@/lib/data/clock";
 import type { EvalHorizon } from "@/lib/ledger/query";
 
 /**
@@ -239,6 +240,28 @@ export function recordPlan(
       reason: `${date} 已记过一批（策略 ${card.strategyId}），台账只追加不改写`,
     };
   }
+  /**
+   * 决策已过集合竞价 → 这批推荐不可执行，整批不记。
+   *
+   * 守护进程没起来 / 机器睡过头时，补跑出来的 ts 是真实的晚点，于是成交日就是
+   * 当天、而当天的 09:25 早已过去 —— 记进去 reconcile 会整批判"作废"：
+   * 既不进任何统计、又占掉当天批次，还让"今天出了 N 条推荐"在界面上看着像真出过票。
+   * 实测 2026-10-08/09 两批（13:39 / 12:10 生成）就是这样变成 14 条僵尸行的，
+   * 并把"作废率"这个弱点指标抬到虚高，误导了复盘结论。
+   *
+   * **不把 ts 硬写成 09:15 来绕过**：那时段根本没做决策，写成 09:15 是撒谎，
+   * 而且会把一批根本没发生过的交易混进统计 —— 胜率会被它们带偏。
+   * 成交日算法复用 baseTradingDay，不在这里另立一套。
+   */
+  const base = baseTradingDay(db, { ts, phase: card.phase });
+  const fillDay = base === null ? null : tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
+  if (fillDay !== null && isLateDecision(ts, fillDay)) {
+    return {
+      recorded: 0, skipped: true, ids: [], alreadyRecorded: false,
+      reason: `决策时点 ${toShanghaiWall(ts)} 晚于成交日 ${fillDay} 09:25 集合竞价，本批不可执行（不伪造 ts），整批不进台账`,
+    };
+  }
+
   const validUntil = planValidUntil(db, date, horizon);
   const preds = planPredictions(card, date, ts, horizon, validUntil, strategyVersion);
   if (preds.length === 0) return { recorded: 0, skipped: false, ids: [], validUntil };
