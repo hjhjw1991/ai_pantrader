@@ -208,6 +208,12 @@ export interface EntryFill {
   triggered: boolean;
   px: number;
   date: string;
+  /**
+   * 这笔成交是「按基准日收盘价成交」。
+   * 真 表示该成交价是当日的**最后一笔**，当日整根 K 线都发生在建仓之前 ——
+   * 算 MFE/MAE 时必须从次日算起，否则建仓前的涨跌会被记成持仓期间的偏移。
+   */
+  atClose: boolean;
 }
 
 /**
@@ -235,7 +241,7 @@ export function resolveEntry(
   db: Db, p: Prediction, base: string, basePx: ResolvedPx
 ): EntryFill | null {
   if (p.triggerPx == null) {
-    return { triggered: true, px: basePx.px, date: base };
+    return { triggered: true, px: basePx.px, date: base, atClose: true };
   }
   const dir = directionOf(p.action);
   const end = tradingDayOffset(db, base, TRIGGER_WINDOW_DAYS);
@@ -273,18 +279,31 @@ export function resolveEntry(
          AND h IS NOT NULL AND l IS NOT NULL LIMIT 1`
     ).get(p.code, base, end);
     if (!any) return null;
-    return { triggered: false, px: 0, date: end };
+    return { triggered: false, px: 0, date: end, atClose: false };
   }
   // 开盘价缺失（极少见的脏行）就退回用触发价，不猜
   const open = row.o;
   const px = open == null ? p.triggerPx
     : dir === "看跌" || breakout ? Math.max(open, p.triggerPx) : Math.min(open, p.triggerPx);
-  return { triggered: true, px, date: row.date };
+  // 限价/触价成交发生在当日盘中，当日剩下的走势确实还在持仓期内 → atClose=false
+  return { triggered: true, px, date: row.date, atClose: false };
 }
 
 export interface Excursion {
   mfePct: number | null;
   maePct: number | null;
+}
+
+/**
+ * 区间末日的替代高低价。
+ *
+ * 离场当日的价格不能整根 K 线都算：止损离场之后，当天剩下的走势跟你没关系了。
+ * 由调用方按执行口径给当日只确知发生过的最高/最低价（见 resolveStop 的注释）。
+ */
+export interface RangeTail {
+  date: string;
+  hi: number | null;
+  lo: number | null;
 }
 
 /**
@@ -296,19 +315,27 @@ export interface Excursion {
  *
  * 方向按 direction 取：看跌的推荐，价格跌才是有利偏移。
  * 用 h/l 而不是收盘：盘中摸到就是真摸到了，止损被打掉不会因为尾盘拉回而撤销。
+ *
+ * 传了 tail 就只取 tail 之前的整根 K 线，tail 当日改用调用方给的高低 ——
+ * 止损当天的最高价多半发生在破位之后，算进 MFE 等于把"离场后才涨到的价"记成自己的盈利。
  */
 export function excursion(
-  db: Db, code: string, dir: Direction, entryPx: number, from: string, to: string
+  db: Db, code: string, dir: Direction, entryPx: number, from: string, to: string, tail?: RangeTail
 ): Excursion {
   if (entryPx <= 0) return { mfePct: null, maePct: null };
+  const bound = tail ? tail.date : to;
+  const cmp = tail ? "<" : "<=";
   const r = db.prepare(
     `SELECT MAX(h) AS hi, MIN(l) AS lo FROM kline_daily
-     WHERE code = ? AND date >= ? AND date <= ? AND h IS NOT NULL AND l IS NOT NULL`
-  ).get(code, from, to) as { hi: number | null; lo: number | null } | undefined;
-  if (!r || r.hi == null || r.lo == null) return { mfePct: null, maePct: null };
+     WHERE code = ? AND date >= ? AND date ${cmp} ? AND h IS NOT NULL AND l IS NOT NULL`
+  ).get(code, from, bound) as { hi: number | null; lo: number | null } | undefined;
 
-  const up = ((r.hi - entryPx) / entryPx) * 100;
-  const down = ((r.lo - entryPx) / entryPx) * 100;
+  const hi = Math.max(r?.hi ?? Number.NEGATIVE_INFINITY, tail?.hi ?? Number.NEGATIVE_INFINITY);
+  const lo = Math.min(r?.lo ?? Number.POSITIVE_INFINITY, tail?.lo ?? Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return { mfePct: null, maePct: null };
+
+  const up = ((hi - entryPx) / entryPx) * 100;
+  const down = ((lo - entryPx) / entryPx) * 100;
   // 看跌时有利方向是往下，两个数对调并翻号
   const [fav, adv] = dir === "看跌" ? [-down, -up] : [up, down];
   // 有利偏移不为负、不利偏移不为正：区间含成交当日，成交价必落在 [lo, hi] 内，
@@ -316,9 +343,55 @@ export function excursion(
   return { mfePct: round(Math.max(fav, 0), 6), maePct: round(Math.min(adv, 0), 6) };
 }
 
+/** 离场方式：持有到 horizon 末收盘，还是中途被止损打出来 */
+export type ExitKind = "期满" | "止损";
+
+export interface ExitFill {
+  kind: ExitKind;
+  px: number;
+  date: string;
+  source: PriceSource;
+}
+
+export interface StopHit {
+  date: string;
+  /** 离场成交价：跳空低开到止损之下 → 开盘价；盘中破位 → 挂单在止损价成交 */
+  px: number;
+  /** 是否跳空（开盘价就已经在止损之下）。跳空时只能按开盘价卖，拿不到止损价那个价 */
+  gap: boolean;
+  /** 破位当日开盘价。截断 MFE 用：当天只确知开盘价在破位之前出现过 */
+  open: number | null;
+}
+
+/**
+ * 止损离场口径，与影子盘 lib/shadow/settle.ts 逐条对齐：
+ *   跳空（开盘价已 ≤ 止损价）→ 只能以开盘价卖出，成交价 = 开盘价
+ *   盘中破位           → 挂单在止损价成交，成交价 = 止损价
+ *
+ * 两套账本必须同一口径，否则"实盘 vs 回测"的差里混着一个纯口径差，
+ * 复盘会把它当成执行损耗、去调根本不该调的参数。
+ *
+ * 区间含 from（含 to）。起点由调用方按成交方式给，见 settleOne 里的 holdFrom：
+ * 盘中成交 → 成交当日就在持仓期内；收盘价成交 → 当日整根 K 线都在建仓之前，从次日起。
+ */
+export function resolveStop(
+  db: Db, code: string, stopPx: number, from: string, to: string
+): StopHit | null {
+  const row = db.prepare(
+    `SELECT date, o FROM kline_daily WHERE code = ? AND date >= ? AND date <= ?
+       AND l IS NOT NULL AND l <= ? ORDER BY date LIMIT 1`
+  ).get(code, from, to, stopPx) as { date: string; o: number | null } | undefined;
+  if (!row) return null;
+  const gap = row.o != null && row.o <= stopPx;
+  return { date: row.date, px: gap ? (row.o as number) : stopPx, gap, open: row.o };
+}
+
 export interface SettleFacts {
   base: ResolvedPx;
-  exit: ResolvedPx;
+  /** horizon 末的收盘价（及来源）。止损离场时它不是离场价，只留着做参照 */
+  horizonClose: ResolvedPx;
+  /** 真正的离场：期满收盘，或破止损离场 */
+  exit: ExitFill;
   horizonEnd: string;
   /** 成交情况。未触发时 entry.triggered=false，后面所有盈亏数都为 null */
   entry: EntryFill;
@@ -403,25 +476,54 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
       : { ...head, ok: false, reason: "无触发窗口价", detail: `${base}~${end} 无日线（停牌或数据缺口），判不了到没到买点` };
   }
 
+  /**
+   * 止损只对「已经成了仓位」且「方向看涨」的推荐成立。
+   *
+   *   没成交 → 压根没有仓位，谈不上被止损打出来；
+   *   看跌（减仓/清仓）→ 止损价是那份**多头**仓位的下方风控线，价格往下走正是
+   *     这个判断想要的方向，把它判成"止损"等于把赚钱说成亏钱。
+   *     归因模块（attribution.ts）也只按 isLong 用 stopBreached，两边必须一致。
+   *
+   * 破止损就用止损口径离场，不再按 horizon 末收盘 ——
+   * 一边记账"这条有止损"、一边按"硬扛到期满"算盈亏，是把两个互不相容的假设
+   * 缝在同一个数里：最坏的那批样本会被记成一路扛到底的巨亏，
+   * 于是策略看上去"止损位设得没用"，而真相是账本压根没执行过止损。
+   * 反过来，改完之后的数字才配叫"带纪律执行的期望收益"。
+   */
+  /**
+   * 持仓期起点。止损区间与 MFE/MAE **共用**这一个起点 —— 两件事问的是同一个问题
+   * （"建仓之后价格走到过哪"），各算一个起点就会在某个成交方式上悄悄分叉。
+   *
+   *   收盘价成交（无 triggerPx）：成交价是当日最后一笔，当日整根 K 线都在建仓之前，
+   *     从次日起算。否则建仓前的回撤会被记成持仓期回撤，止损位建议被系统性放宽。
+   *   盘中成交（限价 / 触价）：成交之后的走势确实还在持仓期内，成交当日算进来。
+   *     日线给不出当日"先破位还是先成交"的先后，一律按成交后破位处理 ——
+   *     这是偏严的一边，而偏严只是少算一点盈利，偏松会把没发生的亏损记成纪律失效。
+   */
+  const holdFrom = entry.atClose ? tradingDayOffset(db, entry.date, 1) : entry.date;
+  const stop = entry.triggered && direction === "看涨" && p.stopPx != null && holdFrom !== null
+    ? resolveStop(db, p.code, p.stopPx, holdFrom, horizonEnd)
+    : null;
+  const stopBreached = stop !== null;
+  const stopBreachDate = stop?.date ?? null;
+
+  const exitFill: ExitFill = stop
+    ? { kind: "止损", px: stop.px, date: stop.date, source: "kline_daily" }
+    : { kind: "期满", px: exitPx.px, date: horizonEnd, source: exitPx.source };
+
   // 价格没够到推荐的买点 —— 这笔推荐从未成为一个仓位，没有盈亏可算。
   // 它仍然要结算、要落库：未触发本身就是复盘要统计的结果之一
   // （买点定得够不到，和选股选错了，是两种病）。
   const actualPct = entry.triggered
-    ? round(((exitPx.px - entry.px) / entry.px) * 100, 6)
+    ? round(((exitFill.px - entry.px) / entry.px) * 100, 6)
     : null;
-  const excur = entry.triggered
-    ? excursion(db, p.code, direction, entry.px, entry.date, horizonEnd)
+  const excur = entry.triggered && holdFrom !== null
+    ? excursion(
+        db, p.code, direction, entry.px, holdFrom, horizonEnd,
+        // 止损当天不取整根 K 线：只确知开盘价在破位前出现过，之后的高低与你无关
+        stop ? { date: stop.date, hi: stop.open, lo: stop.px } : undefined
+      )
     : { mfePct: null, maePct: null };
-
-  // 破止损：看区间内最低价，不看收盘 —— 盘中破位就已经触发纪律
-  let stopBreached = false, stopBreachDate: string | null = null;
-  if (p.stopPx != null) {
-    const row = db.prepare(
-      `SELECT date FROM kline_daily WHERE code = ? AND date > ? AND date <= ?
-         AND l IS NOT NULL AND l <= ? ORDER BY date LIMIT 1`
-    ).get(p.code, base, horizonEnd, p.stopPx) as { date: string } | undefined;
-    if (row) { stopBreached = true; stopBreachDate = row.date; }
-  }
 
   const label = lhbLabelPct(db, p.code, base, p.evalHorizon);
   // 复权/停牌脏数据：actual_pct 因复权因子写坏或长期停牌复牌会失真（典型 5 日涨 1000%+），
@@ -436,7 +538,7 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   const effectiveVerdict: Verdict = dirtyReason ? "中性" : verdict;
 
   const facts: SettleFacts = {
-    base: basePx, exit: exitPx, horizonEnd, entry, excursion: excur,
+    base: basePx, horizonClose: exitPx, exit: exitFill, horizonEnd, entry, excursion: excur,
     actualPct, direction, bandPct, stopBreached, stopBreachDate, lhbLabelPct: label,
   };
 
@@ -448,7 +550,8 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   } else {
     const sign = (actualPct as number) >= 0 ? "+" : "";
     attribution =
-      `D${p.evalHorizon} 成交 ${entry.date} ${round(entry.px, 4)} → ${horizonEnd} ${exitPx.px}(${exitPx.source})` +
+      `D${p.evalHorizon} 成交 ${entry.date} ${round(entry.px, 4)} → ${exitFill.date} ` +
+      `${round(exitFill.px, 4)}(${exitFill.kind}/${exitFill.source})` +
       ` = ${sign}${(actualPct as number).toFixed(2)}%，${direction}／中性带 ±${bandPct}% → ${effectiveVerdict}`;
     if (excur.mfePct != null && excur.maePct != null) {
       attribution += `；区间最大有利 +${excur.mfePct.toFixed(2)}% / 最大不利 ${excur.maePct.toFixed(2)}%`;
@@ -462,7 +565,11 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
       attribution += `；⚠与龙虎榜 d${p.evalHorizon}_chg ${label.toFixed(2)}% 背离`;
     }
   }
-  if (stopBreached) attribution += `；${stopBreachDate} 破止损 ${p.stopPx}`;
+  if (stopBreached && stop !== null) {
+    attribution += `；${stopBreachDate} 破止损 ${p.stopPx}` + (stop.gap
+      ? `（跳空低开已在线下，按开盘价 ${round(stop.px, 4)} 离场）`
+      : `，按止损价 ${round(stop.px, 4)} 离场，不再按 ${horizonEnd} 收盘 ${round(exitPx.px, 4)} 计`);
+  }
 
   const extra = opts.attribute?.(p, facts, effectiveVerdict) ?? null;
   const outcome: Outcome = {
@@ -563,6 +670,59 @@ export function markDirtySettled(db: Db, now: string = new Date().toISOString())
   return n;
 }
 
+function sameNum(a: number | null, b: number | null): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return Math.abs(a - b) < 1e-9;
+}
+
+/**
+ * 把已结算、但区间内破过止损的老行按止损口径重结。
+ *
+ * 台账只追加不改写 —— 这是第三个例外，理由与另两个同源：那些行的 actual_pct 是按
+ * "硬扛到 horizon 末"算出来的，而同一条推荐明确写了止损价，两个数不能同时成立。
+ * 留着旧数，"带纪律执行的期望收益"这个指标从第一天起就是假的。
+ *
+ * 幂等：重结的输入（entry_px / entry_date / stop_px / horizon）都是落库时就固定的，
+ * 重跑必然算出同一个值 —— 与库里一致就跳过。所以 settled_at 不会每次跑都跳，
+ * 已经结对的错因也不会被反复清空。
+ *
+ * 脏数据行不动：它的 actual_pct 因复权跳变失真，重算出来同样失真，
+ * 而且它本来就不进任何分母（NOT_DIRTY）。
+ *
+ * 重结会顺带把 error_type 清空、去掉旧的错因后缀：错因是对着旧事实归的，
+ * 事实变了还留着它，等于给新数配旧解释。空的错因由随后的 attributeSettled 补回来。
+ */
+export function resettleStoppedOut(db: Db, now: string = new Date().toISOString()): number {
+  const rows = db.prepare(
+    `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
+      WHERE o.verdict != '作废' AND o.dirty_reason IS NULL AND o.entry_px IS NOT NULL`
+  ).all() as PredictionRow[];
+  const up = db.prepare(
+    `UPDATE outcome SET verdict = ?, actual_pct = ?, mfe_pct = ?, mae_pct = ?,
+       attribution = ?, error_type = NULL, settled_at = ?
+     WHERE pred_id = ? AND dirty_reason IS NULL AND verdict != '作废'`
+  );
+  const cur = db.prepare(
+    "SELECT actual_pct, mfe_pct, mae_pct FROM outcome WHERE pred_id = ?"
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const p = toPrediction(r);
+      const att = settleOne(db, p, { now });
+      if (!att.ok || !att.outcome || att.facts?.stopBreached !== true) continue;
+      const o = att.outcome;
+      const old = cur.get(p.id) as
+        { actual_pct: number | null; mfe_pct: number | null; mae_pct: number | null } | undefined;
+      if (!old) continue;
+      if (sameNum(old.actual_pct, o.actualPct) && sameNum(old.mfe_pct, o.mfePct)
+        && sameNum(old.mae_pct, o.maePct)) continue;
+      n += up.run(o.verdict, o.actualPct, o.mfePct, o.maePct, o.attribution, o.settledAt, p.id).changes;
+    }
+  })();
+  return n;
+}
+
 export interface ReconcileReport {
   asOf: string;
   /** 本次扫到的到期未结算条数 */
@@ -571,6 +731,8 @@ export interface ReconcileReport {
   revoided: number;
   /** 本次把已结算老行标脏（复权/停牌跳变）的条数 */
   redirtied: number;
+  /** 本次把已结算老行按止损口径重结的条数 */
+  restopped: number;
   settled: Outcome[];
   /** 拿不到价 / 日历不够，留着下次再来。必须报出来，不能沉默 */
   skipped: SettleAttempt[];
@@ -584,6 +746,7 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
   const asOf = opts.asOf ?? shanghaiToday();
   const revoided = voidLateSettled(db, opts.now);
   const redirtied = markDirtySettled(db, opts.now);
+  const restopped = resettleStoppedOut(db, opts.now);
   const pending = listPendingPredictions(db, asOf, opts.filter ?? {}, opts.limit);
 
   const settled: Outcome[] = [];
@@ -605,5 +768,5 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
     );
     if (info.changes > 0) settled.push(o);
   }
-  return { asOf, scanned: pending.length, revoided, redirtied, settled, skipped };
+  return { asOf, scanned: pending.length, revoided, redirtied, restopped, settled, skipped };
 }
