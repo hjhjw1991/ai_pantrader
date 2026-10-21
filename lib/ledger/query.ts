@@ -83,6 +83,13 @@ export const PRED_COLS =
 export const NOT_VOID = ` AND o.verdict != '作废'`;
 
 /**
+ * 统计口径：复权/停牌跳变的脏数据（outcome.dirty_reason 非空）不当可信结果。
+ * 胜率、复盘、仪表盘里每一条 JOIN outcome 的统计查询都要接上它（别名固定为 o），
+ * 与 NOT_VOID 同理 —— 脏 actual_pct 进分母会把胜率/盈亏比撑到失真。
+ */
+export const NOT_DIRTY = ` AND o.dirty_reason IS NULL`;
+
+/**
  * 行 → 契约。
  *
  * 注意 004 迁移里 account/gear/size/thesis 允许 NULL，而契约要求非空。

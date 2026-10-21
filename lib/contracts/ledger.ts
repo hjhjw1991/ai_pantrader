@@ -82,6 +82,14 @@ export interface Outcome {
    * 等于给策略换了一道它没做过的题。未触发时为 null：没有仓位就没有盈亏。
    */
   actualPct: number | null;
+  /**
+   * 复权/停牌跳变标脏原因。
+   *
+   * actual_pct 因复权因子写坏或长期停牌后复牌，会出现「5 日涨 1000%+」这类不可能值，
+   * 直接进胜率/盈亏比会把数字撑到毫无意义。reconcile 识别后在这里记原因，
+   * 统计层（NOT_DIRTY）排除这些行；actual_pct 仍保留真实失真值，方便人眼核查。
+   */
+  dirtyReason?: string | null;
   errorType: ErrorType | null;
   /** 归因说明，人看的 */
   attribution: string;

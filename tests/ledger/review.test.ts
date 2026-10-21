@@ -4,7 +4,7 @@ import { reconcile, resolveEntry, excursion, TRIGGER_WINDOW_DAYS } from "@/lib/l
 import { recordPrediction } from "@/lib/ledger/record";
 import { review, MIN_SAMPLE, WIN_RATE_TARGET } from "@/lib/ledger/review";
 import { winRate } from "@/lib/ledger/winrate";
-import { cleanup, mkPred, seedCalendar, seedDaily, tmpDb, weekdays } from "./helpers";
+import { cleanup, insertPredRow, mkPred, seedCalendar, seedDaily, tmpDb, weekdays } from "./helpers";
 
 let db: Db, dir: string, days: string[];
 beforeEach(() => {
@@ -206,6 +206,27 @@ describe("ledger/review 三关分开报", () => {
     expect(s.winRate).toBeCloseTo(20 / 32, 6);   // 62.5%
     expect(s.verdict).toContain("达标");
     expect(s.verdict).not.toContain("未达标");
+  });
+
+  it("复权脏数据（dirty_reason 非空）不进盈亏比与期望值", () => {
+    seedWin(db, "w1", 12);   // +20%
+    seedWin(db, "w2", 11);   // +10%
+    seedWin(db, "l1", 9);    // -10%
+    reconcile(db, { asOf: "2026-08-11" });
+
+    // 一条 5 日涨 200% 的脏数据：reconcile 会自动标脏，不应污染盈亏比
+    seedDaily(db, "Xd1", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, c: 10, h: 10.1, l: 9.9 },
+      { date: "2026-08-10", c: 30, h: 30, l: 30 },
+    ]);
+    recordPrediction(db, mkPred({ id: "d1", code: "Xd1", triggerPx: 10, evalHorizon: 5, validUntil: "2026-08-10" }));
+    reconcile(db, { asOf: "2026-08-11" });
+
+    const s = review(db);
+    expect(s.avgWinPct).toBeCloseTo(15, 4);   // 仍是 w1/w2 的均值，不含 d1 的 200%
+    expect(s.avgLossPct).toBeCloseTo(-10, 4);
+    expect(s.payoffRatio).toBeCloseTo(1.5, 4); // 盈亏比不被脏数据撑高
   });
 
   it("胜率达标但触发率很低时要点破：那个胜率是纸上的", () => {

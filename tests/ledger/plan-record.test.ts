@@ -118,4 +118,27 @@ describe("plan/record 落台账", () => {
     const r = recordPlan(db, card({ candidates: [], holdings: [] }), "2026-08-04", "2026-08-04T09:15:00+08:00");
     expect(r).toMatchObject({ recorded: 0, skipped: false });
   });
+
+  it("买入无账户止损价时自动兜底 -8%，thesis 标注；已有止损不覆盖、持有不兜底", () => {
+    const buy = planPredictions(
+      card({ candidates: [{ code: "300502", name: "300502", action: "买入", account: "卫星" as const,
+        triggerPx: 100, stopPx: null, size: 0.1, thesis: "测试", passedFilters: [], factors: [], score: 1 }], holdings: [] }),
+      "2026-08-04", "2026-08-04T09:15:00+08:00", 5, "2026-08-11");
+    expect(buy).toHaveLength(1);
+    expect(buy[0].stopPx).toBeCloseTo(92, 6);            // 100 * (1 - 0.08)
+    expect(buy[0].thesis).toContain("默认 -8% 兜底");
+
+    const withStop = planPredictions(
+      card({ candidates: [{ code: "300502", name: "300502", action: "买入", account: "卫星" as const,
+        triggerPx: 100, stopPx: 95, size: 0.1, thesis: "测试", passedFilters: [], factors: [], score: 1 }], holdings: [] }),
+      "2026-08-04", "2026-08-04T09:15:00+08:00", 5, "2026-08-11");
+    expect(withStop[0].stopPx).toBe(95);                 // 已有止损不覆盖
+    expect(withStop[0].thesis).not.toContain("兜底");
+
+    const hold = planPredictions(
+      card({ candidates: [], holdings: [{ code: "600519", name: "600519", action: "持有", account: "卫星" as const,
+        triggerPx: 100, stopPx: null, size: 0.1, thesis: "测试", passedFilters: [], factors: [], score: 1 }] }),
+      "2026-08-04", "2026-08-04T09:15:00+08:00", 5, "2026-08-11");
+    expect(hold[0].stopPx).toBeNull();                   // 非开仓不兜底
+  });
 });

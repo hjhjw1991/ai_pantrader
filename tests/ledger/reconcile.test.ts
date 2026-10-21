@@ -6,11 +6,12 @@ import {
   directionOf,
   lhbLabelPct,
   reconcile,
+  markDirtySettled,
   settleOne,
   tradingDayOffset,
 } from "@/lib/ledger/reconcile";
 import { recordPrediction } from "@/lib/ledger/record";
-import { cleanup, mkPred, seedCalendar, seedDaily, seedSnapshot, tmpDb, weekdays } from "./helpers";
+import { cleanup, insertOutcomeRow, insertPredRow, mkPred, seedCalendar, seedDaily, seedSnapshot, tmpDb, weekdays } from "./helpers";
 
 let db: Db, dir: string, days: string[];
 beforeEach(() => {
@@ -127,6 +128,43 @@ describe("ledger/reconcile 结算", () => {
     expect(second.settled).toEqual([]);
     expect(second.scanned).toBe(0);
     expect(db.prepare("SELECT * FROM outcome").all()).toEqual(snap);
+  });
+
+  it("复权脏数据（涨跌幅超连板理论上限）被隔离：降级中性、不进胜率分母、actual_pct 保留", () => {
+    // 5 日涨 200%，远超 DIRTY_CAP[5]=160，疑似复权跳变
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", c: 10.1, l: 9.9 },
+      { date: "2026-08-10", c: 30 },
+    ]);
+    recordPrediction(db, mkPred({ id: "dirty1", evalHorizon: 5, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    expect(rep.settled[0].actualPct).toBeCloseTo(200, 6);
+    expect(rep.settled[0].verdict).toBe("中性");
+    expect(rep.settled[0].dirtyReason).not.toBeNull();
+
+    const row = db.prepare("SELECT * FROM outcome WHERE pred_id='dirty1'").get() as any;
+    expect(row.verdict).toBe("中性");
+    expect(row.dirty_reason).not.toBeNull();
+    expect(row.actual_pct).toBeCloseTo(200, 6);   // 真实失真值保留，让人眼核查
+  });
+
+  it("markDirtySettled 把已结算的脏数据老行就地标脏，且幂等", () => {
+    insertPredRow(db, mkPred({ id: "old1", evalHorizon: 5, validUntil: "2026-08-10" }));
+    insertOutcomeRow(db, "old1", "命中", 200);
+
+    const n = markDirtySettled(db);
+    expect(n).toBe(1);
+    const row = db.prepare("SELECT * FROM outcome WHERE pred_id='old1'").get() as any;
+    expect(row.verdict).toBe("中性");
+    expect(row.dirty_reason).not.toBeNull();
+    expect(row.actual_pct).toBeCloseTo(200, 6);
+
+    // 二次跑幂等：已标脏的不再动
+    expect(markDirtySettled(db)).toBe(0);
+    expect(db.prepare("SELECT verdict FROM outcome WHERE pred_id='old1'").get()).toMatchObject({ verdict: "中性" });
   });
 
   it("减仓/清仓是看跌方向：跌了算命中，涨了算偏差", () => {

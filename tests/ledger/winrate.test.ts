@@ -80,4 +80,18 @@ describe("ledger/winrate", () => {
     expect(s).toMatchObject({ total: 0, hit: 0, rate: 0 });
     expect(s.ab.comparable).toBe(false);
   });
+
+  it("复权脏数据（dirty_reason 非空）不进胜率分母与计数 —— 否则被撑高", () => {
+    seedSettled(db, 10, { idPrefix: "a", hits: 6, advisorInfluenced: false });
+    // 一条已标脏的假命中：actual_pct 失真（如 5 日涨 200%），已被隔离
+    insertPredRow(db, mkPred({ id: "d1" }));
+    insertOutcomeRow(db, "d1", "命中", 200);
+    db.prepare("UPDATE outcome SET dirty_reason='测试标脏' WHERE pred_id='d1'").run();
+
+    const s = winRate(db);
+    expect(s.settled).toBe(10);          // 11 - 1 脏 = 10
+    expect(s.total).toBe(10);            // 脏的不进分母
+    expect(s.hit).toBe(6);               // 脏的命中不算
+    expect(s.rate).toBeCloseTo(0.6, 6);  // 不被脏数据推高
+  });
 });

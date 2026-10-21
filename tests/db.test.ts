@@ -85,6 +85,14 @@ describe("db", () => {
     db.close();
   });
 
+  it("031 outcome 加了 dirty_reason 列，复权脏数据可标脏隔离", () => {
+    const db = openDb(path.join(dir, "t.db"));
+    runMigrations(db);
+    const cols = db.prepare(`PRAGMA table_info(outcome)`).all().map((r: any) => r.name);
+    expect(cols).toContain("dirty_reason");
+    db.close();
+  });
+
   it("028 升级老库：live 的 decided_at 回填 created_at，replay 回填基准日 15:05；entry_type 一律 低吸", () => {
     const db = openDb(path.join(dir, "t.db"));
     // 先只跑到 027，模拟升级前的老库

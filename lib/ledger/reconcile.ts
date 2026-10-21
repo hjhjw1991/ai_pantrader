@@ -37,6 +37,37 @@ export function directionOf(action: Action): Direction {
 }
 
 /**
+ * 复权/停牌跳变判据。返回标脏原因，非脏返回 null。
+ *
+ * 判据 1（最可靠）：与龙虎榜 dX_chg 标签背离 > 2pp。龙虎榜标签是交易所给的真实后续
+ *   涨跌幅，系统算的 actual_pct 和它差这么多，几乎只能是复权/停牌问题
+ *   （reconcile 自己的注释也这么写）。覆盖上榜票。
+ * 判据 2（兜底，长 horizon 偏松）：|actual_pct| 超过该 horizon 的连板理论上限。
+ *   按主板 10% / 科创 20% 涨停估算连板极限并留余量，真实涨跌幅永远到不了，
+ *   能兜住没上榜却复权跳变的票（如历史实测的 5 日涨 1000%+）。30 日这类长 horizon
+ *   连板极限本身就极高，主要靠判据 1 交叉验证，判据 2 只拦最离谱的。
+ */
+export const DIRTY_CAP: Record<EvalHorizon, number> = {
+  1: 25, 5: 160, 10: 530, 20: 900, 30: 1200,
+};
+
+export function isDirtyOutcome(
+  actualPct: number | null,
+  evalHorizon: EvalHorizon,
+  lhbLabelPct: number | null,
+): string | null {
+  if (actualPct == null) return null;
+  if (lhbLabelPct != null && Math.abs(actualPct - lhbLabelPct) > 2) {
+    return `复权/停牌背离：系统算 ${actualPct.toFixed(2)}% 与龙虎榜 d${evalHorizon}_chg ${lhbLabelPct.toFixed(2)}% 背离 > 2pp`;
+  }
+  const cap = DIRTY_CAP[evalHorizon];
+  if (Math.abs(actualPct) > cap) {
+    return `涨跌幅 ${actualPct.toFixed(2)}% 超 ${evalHorizon} 日连板理论上限 ${cap}%，疑似复权跳变`;
+  }
+  return null;
+}
+
+/**
  * 中性带：带内不算对也不算错。
  *
  * 取 1.5% × sqrt(horizon) —— 波动随时间开根号放大，用固定阈值会让 D1 太松、D30 太紧。
@@ -371,9 +402,6 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   const excur = entry.triggered
     ? excursion(db, p.code, direction, entry.px, entry.date, horizonEnd)
     : { mfePct: null, maePct: null };
-  const verdict: Verdict = entry.triggered
-    ? verdictOf(direction, actualPct as number, bandPct)
-    : "未触发";
 
   // 破止损：看区间内最低价，不看收盘 —— 盘中破位就已经触发纪律
   let stopBreached = false, stopBreachDate: string | null = null;
@@ -386,6 +414,17 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   }
 
   const label = lhbLabelPct(db, p.code, base, p.evalHorizon);
+  // 复权/停牌脏数据：actual_pct 因复权因子写坏或长期停牌复牌会失真（典型 5 日涨 1000%+），
+  // 进胜率/盈亏比会把它撑到失真。识别出来后隔离 —— 不可信，降级为中性、不进任何统计分母，
+  // 但 actual_pct 仍保留真实失真值让人眼核查（见 Outcome.dirtyReason）。
+  const dirtyReason = entry.triggered ? isDirtyOutcome(actualPct, p.evalHorizon, label) : null;
+
+  const verdict: Verdict = entry.triggered
+    ? verdictOf(direction, actualPct as number, bandPct)
+    : "未触发";
+  // 脏数据不篡改"判定"语义，但落库与统计用有效判定：脏 → 中性（排除）
+  const effectiveVerdict: Verdict = dirtyReason ? "中性" : verdict;
+
   const facts: SettleFacts = {
     base: basePx, exit: exitPx, horizonEnd, entry, excursion: excur,
     actualPct, direction, bandPct, stopBreached, stopBreachDate, lhbLabelPct: label,
@@ -400,22 +439,27 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
     const sign = (actualPct as number) >= 0 ? "+" : "";
     attribution =
       `D${p.evalHorizon} 成交 ${entry.date} ${round(entry.px, 4)} → ${horizonEnd} ${exitPx.px}(${exitPx.source})` +
-      ` = ${sign}${(actualPct as number).toFixed(2)}%，${direction}／中性带 ±${bandPct}% → ${verdict}`;
+      ` = ${sign}${(actualPct as number).toFixed(2)}%，${direction}／中性带 ±${bandPct}% → ${effectiveVerdict}`;
     if (excur.mfePct != null && excur.maePct != null) {
       attribution += `；区间最大有利 +${excur.mfePct.toFixed(2)}% / 最大不利 ${excur.maePct.toFixed(2)}%`;
     }
   }
   if (entry.triggered && label != null && Math.abs(label - (actualPct as number)) > 2) {
-    // 背离通常意味着复权/停牌，报出来让人看，不自动改判
-    attribution += `；⚠与龙虎榜 d${p.evalHorizon}_chg ${label.toFixed(2)}% 背离`;
+    if (dirtyReason) {
+      attribution += `；复权脏数据已隔离，不进胜率/盈亏比（${dirtyReason}）`;
+    } else {
+      // 背离通常意味着复权/停牌，报出来让人看，不自动改判
+      attribution += `；⚠与龙虎榜 d${p.evalHorizon}_chg ${label.toFixed(2)}% 背离`;
+    }
   }
   if (stopBreached) attribution += `；${stopBreachDate} 破止损 ${p.stopPx}`;
 
-  const extra = opts.attribute?.(p, facts, verdict) ?? null;
+  const extra = opts.attribute?.(p, facts, effectiveVerdict) ?? null;
   const outcome: Outcome = {
     predId: p.id,
-    verdict,
+    verdict: effectiveVerdict,
     actualPct,
+    dirtyReason: dirtyReason ?? null,
     errorType: extra?.errorType ?? null,
     attribution: extra ? `${attribution}｜${extra.attribution}` : attribution,
     settledAt: opts.now ?? new Date().toISOString(),
@@ -470,12 +514,53 @@ export function voidLateSettled(db: Db, now: string = new Date().toISOString()):
   return n;
 }
 
+/**
+ * 把已结算、但属于复权/停牌脏数据的老行就地标脏。
+ *
+ * 台账只追加不改写 —— 这是唯一的例外，理由：那些结算的 actual_pct 本身就是错的
+ * （复权因子写坏或长期停牌复牌），而用户 2026-10-21 选定把它们隔离。判据只有一份
+ * （settleOne 里同一个 isDirtyOutcome），每次对账开跑先扫一遍：幂等，已标脏的不再碰；
+ * 跑过一次就修好了历史。
+ *
+ * 与 voidLateSettled 不同：这里**保留** actual_pct 真实失真值（让人眼核查），只把它
+ * 降级为中性、填上 dirty_reason，让它不进任何统计分母。
+ */
+export function markDirtySettled(db: Db, now: string = new Date().toISOString()): number {
+  const rows = db.prepare(
+    `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
+      WHERE o.dirty_reason IS NULL AND o.verdict != '作废'`
+  ).all() as PredictionRow[];
+  const up = db.prepare(
+    `UPDATE outcome SET verdict = '中性', dirty_reason = ?,
+       attribution = COALESCE(attribution, '') || ?
+     WHERE pred_id = ? AND dirty_reason IS NULL`
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const p = toPrediction(r);
+      const base = baseTradingDay(db, p);
+      if (base === null) continue;
+      const label = lhbLabelPct(db, p.code, base, p.evalHorizon);
+      const o = db.prepare("SELECT actual_pct FROM outcome WHERE pred_id = ?").get(p.id) as
+        { actual_pct: number | null } | undefined;
+      if (!o) continue;
+      const reason = isDirtyOutcome(o.actual_pct, p.evalHorizon, label);
+      if (reason == null) continue;
+      n += up.run(reason, `；复权脏数据已隔离，不进胜率/盈亏比（${reason}）`, p.id).changes;
+    }
+  })();
+  return n;
+}
+
 export interface ReconcileReport {
   asOf: string;
   /** 本次扫到的到期未结算条数 */
   scanned: number;
   /** 本次把已结算老行改判作废的条数（新结算出的作废在 settled 里，verdict = 作废） */
   revoided: number;
+  /** 本次把已结算老行标脏（复权/停牌跳变）的条数 */
+  redirtied: number;
   settled: Outcome[];
   /** 拿不到价 / 日历不够，留着下次再来。必须报出来，不能沉默 */
   skipped: SettleAttempt[];
@@ -488,14 +573,15 @@ export interface ReconcileReport {
 export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport {
   const asOf = opts.asOf ?? shanghaiToday();
   const revoided = voidLateSettled(db, opts.now);
+  const redirtied = markDirtySettled(db, opts.now);
   const pending = listPendingPredictions(db, asOf, opts.filter ?? {}, opts.limit);
 
   const settled: Outcome[] = [];
   const skipped: SettleAttempt[] = [];
   const stmt = db.prepare(
     `INSERT INTO outcome (pred_id, verdict, actual_pct, error_type, attribution, settled_at,
-       triggered, entry_px, entry_date, mfe_pct, mae_pct)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pred_id) DO NOTHING`
+       triggered, entry_px, entry_date, mfe_pct, mae_pct, dirty_reason)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pred_id) DO NOTHING`
   );
 
   for (const p of pending) {
@@ -505,9 +591,9 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
     const info = stmt.run(
       o.predId, o.verdict, o.actualPct, o.errorType, o.attribution, o.settledAt,
       o.triggered == null ? null : o.triggered ? 1 : 0,
-      o.entryPx, o.entryDate, o.mfePct, o.maePct
+      o.entryPx, o.entryDate, o.mfePct, o.maePct, o.dirtyReason ?? null
     );
     if (info.changes > 0) settled.push(o);
   }
-  return { asOf, scanned: pending.length, revoided, settled, skipped };
+  return { asOf, scanned: pending.length, revoided, redirtied, settled, skipped };
 }

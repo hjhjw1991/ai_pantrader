@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db";
 import type { Action, ErrorType, Verdict } from "@/lib/contracts";
-import { dateOf, NOT_VOID, predWhere, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
+import { dateOf, NOT_DIRTY, NOT_VOID, predWhere, round, type EvalHorizon, type LedgerFilter } from "@/lib/ledger/query";
 import { directionOf, type Direction } from "@/lib/ledger/reconcile";
 import { countsTowardWinRate } from "@/lib/contracts";
 import { ERROR_TYPES, winRate, type LedgerWinRateStats } from "@/lib/ledger/winrate";
@@ -107,7 +107,7 @@ function joinRows(db: Db, filter: LedgerFilter): JoinRow[] {
   return db.prepare(
     `SELECT p.ts, p.code, o.verdict, o.actual_pct
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
-     WHERE 1=1${NOT_VOID}${w.sql} ORDER BY p.ts`
+     WHERE 1=1${NOT_VOID}${NOT_DIRTY}${w.sql} ORDER BY p.ts`
   ).all(...w.params) as JoinRow[];
 }
 
@@ -166,7 +166,7 @@ export function errorTypeBreakdown(db: Db, filter: LedgerFilter = {}): ErrorType
   const rows = db.prepare(
     `SELECT o.error_type et, COUNT(*) n
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
-     WHERE o.error_type IS NOT NULL${w.sql} GROUP BY o.error_type`
+     WHERE o.error_type IS NOT NULL${NOT_DIRTY}${w.sql} GROUP BY o.error_type`
   ).all(...w.params) as Array<{ et: ErrorType; n: number }>;
 
   const counts = new Map(rows.map(r => [r.et, r.n]));

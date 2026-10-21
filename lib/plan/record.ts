@@ -61,6 +61,9 @@ export function planPredictionId(date: string, strategyId: string, code: string,
   return `${date}:${strategyId}:${code}:${action}`;
 }
 
+/** 无账户止损价时，买入/加仓兜底止损比例（8%）。风控底线，避免空止损落台账。 */
+const DEFAULT_STOP_PCT = 0.08;
+
 /**
  * 信号卡 → 台账行。
  *
@@ -75,30 +78,40 @@ export function planPredictions(
   card: SignalCard, date: string, ts: string, horizon: EvalHorizon, validUntil: string,
   strategyVersion: string | null = null
 ): Prediction[] {
-  return [...card.candidates, ...card.holdings].map((c) => ({
-    id: planPredictionId(date, card.strategyId, c.code, c.action),
-    ts,
-    phase: card.phase,
-    code: c.code,
-    strategyId: card.strategyId,
-    // 版本逐条记：买点这类参数要按台账数据反复重调，
-    // 不记版本的话下一次调参就把两代样本混进同一个分母了
-    strategyVersion,
-    action: c.action,
-    account: c.account,
-    triggerPx: c.triggerPx,
-    // 打板 / 半路这类触发价在昨收上方的是触价单，结算按"最高价 ≥ 触发价"撮合（见 EntryType）
-    entryType: entryTypeOf(c.entryType),
-    stopPx: c.stopPx,
-    size: c.size,
-    thesis: c.thesis,
-    gear: card.env.gear,
-    evalHorizon: horizon,
-    validUntil,
-    // 引擎自己声明有没有被 Advisor 改过。这里绝不默认 false ——
-    // 默认值会把"有 Claude 参与"的样本混进对照组，A/B 差值就是假的
-    advisorInfluenced: card.advisorInfluenced,
-  }));
+  return [...card.candidates, ...card.holdings].map((c) => {
+    // 风控兜底：买入/加仓若账户没配止损价（structure-pricing 评估器会因此把这类票排最后），
+    // 不能让它空着落台账 —— 空止损意味着没有纪律底线。用触发价默认 -8% 兜底，并在 thesis 标注。
+    const needsStop = c.action === "买入" || c.action === "加仓";
+    const stopPx = c.stopPx ?? (needsStop && c.triggerPx != null
+      ? Math.round(c.triggerPx * (1 - DEFAULT_STOP_PCT) * 1e4) / 1e4 : null);
+    const thesis = (!c.stopPx && needsStop && c.triggerPx != null)
+      ? `${c.thesis}（无账户止损价，已用默认 -${(DEFAULT_STOP_PCT * 100).toFixed(0)}% 兜底）`
+      : c.thesis;
+    return {
+      id: planPredictionId(date, card.strategyId, c.code, c.action),
+      ts,
+      phase: card.phase,
+      code: c.code,
+      strategyId: card.strategyId,
+      // 版本逐条记：买点这类参数要按台账数据反复重调，
+      // 不记版本的话下一次调参就把两代样本混进同一个分母了
+      strategyVersion,
+      action: c.action,
+      account: c.account,
+      triggerPx: c.triggerPx,
+      // 打板 / 半路这类触发价在昨收上方的是触价单，结算按"最高价 ≥ 触发价"撮合（见 EntryType）
+      entryType: entryTypeOf(c.entryType),
+      stopPx,
+      size: c.size,
+      thesis,
+      gear: card.env.gear,
+      evalHorizon: horizon,
+      validUntil,
+      // 引擎自己声明有没有被 Advisor 改过。这里绝不默认 false ——
+      // 默认值会把"有 Claude 参与"的样本混进对照组，A/B 差值就是假的
+      advisorInfluenced: card.advisorInfluenced,
+    };
+  });
 }
 
 /**
