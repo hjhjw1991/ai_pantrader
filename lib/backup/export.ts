@@ -83,6 +83,11 @@ export const BAK_TABLES = [
   // strategy 另有 .ptstrat 单独导出（spec §9.2），但 .ptbak 也带一份，
   // 否则换机后台账里的 strategy_id 会指向不存在的策略。
   "strategy", "watchpool", "prediction", "outcome", "advisor_output",
+  // 推荐→因子读数绑定。同 prediction 一样不可再生：它记的是"当时那版因子算法
+  // 给出的读数"（FactorResult.version），算法升版后今天重跑给不出同一个值，
+  // 而逐因子 IC / 分位数归因问的正是"当时那个读数预示了什么"。
+  // 体积可以忽略：一条推荐约 7 个个股因子 + 十来个环境因子。
+  "prediction_factor",
   "account", "position", "trade", "ord",
   // 调度台账：哪些时点漏采过是不可再生的覆盖率史，换机后不该丢
   "job_run",

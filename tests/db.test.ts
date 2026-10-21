@@ -93,6 +93,16 @@ describe("db", () => {
     db.close();
   });
 
+  it("032 新增 prediction_factor 表，推荐与因子读数可绑定归因", () => {
+    const db = openDb(path.join(dir, "t.db"));
+    runMigrations(db);
+    const cols = db.prepare(`PRAGMA table_info(prediction_factor)`).all().map((r: any) => r.name);
+    expect(cols).toEqual(expect.arrayContaining([
+      "pred_id", "factor_name", "scope", "version", "value", "label", "confidence", "created_at",
+    ]));
+    db.close();
+  });
+
   it("028 升级老库：live 的 decided_at 回填 created_at，replay 回填基准日 15:05；entry_type 一律 低吸", () => {
     const db = openDb(path.join(dir, "t.db"));
     // 先只跑到 027，模拟升级前的老库

@@ -1,5 +1,6 @@
 import type { Db } from "@/lib/db";
-import { entryTypeOf, type Prediction, type SignalCard } from "@/lib/contracts";
+import { entryTypeOf, type Candidate, type EnvAssessment, type Prediction, type SignalCard } from "@/lib/contracts";
+import type { FactorResult } from "@/lib/contracts/factor";
 import { recordPredictions } from "@/lib/ledger/record";
 import { tradingDayOffset } from "@/lib/ledger/reconcile";
 import { addDays } from "@/lib/data/clock";
@@ -114,6 +115,78 @@ export function planPredictions(
   });
 }
 
+/** prediction_factor 一行：一条推荐在某个因子上的当场读数 */
+export interface PredictionFactorRow {
+  predId: string;
+  factorName: string;
+  scope: "stock" | "env";
+  version: string | null;
+  value: number | null;
+  label: string | null;
+  confidence: number | null;
+  createdAt: string;
+}
+
+function factorToRow(
+  predId: string, scope: "stock" | "env", f: FactorResult<any>, createdAt: string
+): PredictionFactorRow {
+  return {
+    predId,
+    factorName: f.name,
+    scope,
+    version: f.version ?? null,
+    // 定性因子只给 label（value 是字符串或对象），数值列留 NULL ——
+    // 硬转成 0 会让后面的 IC 把"没读数"当成"读数=0"，凭空造出一个假的低分组
+    value: typeof f.value === "number" && Number.isFinite(f.value) ? f.value : null,
+    label: f.label ?? null,
+    confidence: typeof f.confidence === "number" ? f.confidence : null,
+    createdAt,
+  };
+}
+
+/**
+ * 信号卡 → 因子读数行。
+ *
+ * 这是"台账能被逐因子归因"的开关：引擎早就算出了完整因子数组（Candidate.factors），
+ * 但以前只把它们拼进 thesis 字符串就丢了，于是 IC / 分位数分组 / 横截面回归
+ * 全都无从下手 —— 不知道当时每个因子读数是多少，就只能继续拍权重。
+ *
+ * 环境因子（温度、涨停家数、炸板率…）是整张卡共用的，这里摊到每条推荐上：
+ * 归因时要的是"这条推荐发出时的市场环境"，它必须和这条推荐在同一行才算得出来。
+ * 体积可以忽略（一天几十条推荐 × 十来个因子）。
+ */
+export function planFactorRows(
+  date: string, strategyId: string, cands: Candidate[], env: EnvAssessment, createdAt: string
+): PredictionFactorRow[] {
+  const rows: PredictionFactorRow[] = [];
+  for (const c of cands) {
+    const predId = planPredictionId(date, strategyId, c.code, c.action);
+    for (const f of c.factors ?? []) rows.push(factorToRow(predId, "stock", f, createdAt));
+    for (const f of env.factors ?? []) rows.push(factorToRow(predId, "env", f, createdAt));
+  }
+  return rows;
+}
+
+/** 写入因子读数行。幂等：同 (pred_id, factor_name, scope) 已存在就跳过，不改写 */
+export function recordFactorRows(db: Db, rows: PredictionFactorRow[]): number {
+  if (rows.length === 0) return 0;
+  const stmt = db.prepare(
+    `INSERT INTO prediction_factor
+       (pred_id, factor_name, scope, version, value, label, confidence, created_at)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(pred_id, factor_name, scope) DO NOTHING`
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      n += stmt.run(
+        r.predId, r.factorName, r.scope, r.version, r.value, r.label, r.confidence, r.createdAt
+      ).changes;
+    }
+  })();
+  return n;
+}
+
 /**
  * 到期日。
  *
@@ -171,5 +244,10 @@ export function recordPlan(
   if (preds.length === 0) return { recorded: 0, skipped: false, ids: [], validUntil };
 
   recordPredictions(db, preds);
+  // 因子读数与推荐绑定落库：prediction 只留了 thesis 字符串，
+  // 没有逐因子读数就永远算不出 IC，权重只能继续手拍（见 planFactorRows 注释）
+  recordFactorRows(
+    db, planFactorRows(date, card.strategyId, [...card.candidates, ...card.holdings], card.env, ts)
+  );
   return { recorded: preds.length, skipped: false, ids: preds.map((p) => p.id), validUntil };
 }

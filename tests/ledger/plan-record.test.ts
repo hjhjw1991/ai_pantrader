@@ -44,6 +44,44 @@ describe("plan/record 落台账", () => {
     expect(rows.every(x => x.eval_horizon === PLAN_EVAL_HORIZON)).toBe(true);
   });
 
+  /**
+   * 这是"台账能被逐因子归因"的开关：引擎早就算出了完整因子数组，但以前只把它们
+   * 拼进 thesis 字符串就丢了，于是 IC / 分位数分组 / 横截面回归全都无从下手。
+   */
+  it("因子读数与推荐绑定落库：个股 + 环境，定性因子值留 NULL 不硬转 0", () => {
+    const fact = (name: string, value: unknown, label: string) =>
+      ({ name, version: "1.0.0", value, label, confidence: 0.9 }) as any;
+    const c: any = {
+      code: "300502", name: "300502", action: "买入", account: "卫星",
+      triggerPx: 10, stopPx: 9, size: 0.1, thesis: "测试",
+      passedFilters: [], score: 1,
+      factors: [
+        fact("均线方向", 1, "多头"),
+        fact("量能", 1.8, "放量 1.8x"),
+        fact("洗盘vs派发", "洗盘", "洗盘"),   // 定性因子：只有 label，没有数值
+      ],
+    };
+    const r = recordPlan(db, card({
+      candidates: [c], holdings: [],
+      env: { gear: "中性", targetPosition: 0.4, reasons: [], factors: [fact("情绪温度", 62, "偏热")], lowConfidenceFactors: [] },
+    }), "2026-08-04", "2026-08-04T09:15:00+08:00");
+    expect(r.recorded).toBe(1);
+
+    const rows = db.prepare("SELECT * FROM prediction_factor").all() as any[];
+    expect(rows.length).toBe(4);            // 3 个股 + 1 环境
+    const byName = Object.fromEntries(rows.map(x => [x.factor_name, x]));
+
+    expect(byName["均线方向"].value).toBeCloseTo(1, 6);
+    expect(byName["均线方向"].scope).toBe("stock");
+    expect(byName["量能"].value).toBeCloseTo(1.8, 6);
+    expect(byName["情绪温度"].scope).toBe("env");
+    // 定性因子没有数值：必须留 NULL —— 硬转成 0 会在分位数分组里凭空造出一个假的低分组
+    expect(byName["洗盘vs派发"].value).toBeNull();
+    expect(byName["洗盘vs派发"].label).toBe("洗盘");
+    // 绑到正确的那条推荐上
+    expect(rows.every(x => x.pred_id === planPredictionId("2026-08-04", "s1", "300502", "买入"))).toBe(true);
+  });
+
   it("id 由内容推导，一天一批", () => {
     recordPlan(db, card(), "2026-08-04", "2026-08-04T09:15:00+08:00");
     recordPlan(db, card(), "2026-08-04", "2026-08-04T09:15:00+08:00");
