@@ -65,6 +65,14 @@ def is_dirty(actual_pct, horizon):
     cap = DIRTY_CAP.get(horizon, 160)
     return abs(actual_pct) > cap
 
+def dir_of(action):
+    """与 reconcile.directionOf 同源：买入/加仓/持有=看涨，减仓/清仓=看跌，其余中性。"""
+    if action in ("买入", "加仓", "持有"):
+        return "看涨"
+    if action in ("减仓", "清仓"):
+        return "看跌"
+    return "中性"
+
 def analyze(rows):
     """返回与 ReviewStats/WinRateStats 对齐的指标；同时回带脏/作废计数供上下文。
     脏数据 = 库里已标 dirty_reason 的 + 这里按幅度重新判的（B1 尚未部署到线上库时的兜底）。"""
@@ -97,10 +105,15 @@ def analyze(rows):
         decided += 1
         if v == "命中":
             hit += 1
+        # 盈亏分组必须按方向翻转：清仓(看跌)后股价下跌才是盈利。
+        # 按 actual_pct 原始符号分组会把"判断正确的清仓"记成亏损，系统性压低期望。
         ap = r["actual_pct"]
         if ap is not None:
-            if ap > 0: wins.append(ap)
-            elif ap < 0: losses.append(ap)
+            d = dir_of(r["action"])
+            if d != "中性":
+                fav = -ap if d == "看跌" else ap
+                if fav > 0: wins.append(fav)
+                elif fav < 0: losses.append(fav)
     n = len(rows)
     def rnd(x, d=4): return round(x, d)
     trigger_rate = rnd(triggered / triggerable, 6) if triggerable else None

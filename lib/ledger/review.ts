@@ -1,7 +1,9 @@
 import type { Db } from "@/lib/db";
-import type { Verdict } from "@/lib/contracts";
+import type { Action, Verdict } from "@/lib/contracts";
 import { countsTowardWinRate } from "@/lib/contracts";
 import { NOT_DIRTY, NOT_VOID, predWhere, round, type LedgerFilter } from "@/lib/ledger/query";
+// directionOf 与 verdictOf/excursion 同源（reconcile.ts），翻转口径只有这一份
+import { directionOf } from "@/lib/ledger/reconcile";
 
 /**
  * 推荐质量复盘（本文件是"胜率>60%"这个目标的唯一口径来源）。
@@ -77,6 +79,7 @@ export interface ReviewStats {
 
 interface Row {
   verdict: string;
+  action: string;
   actual_pct: number | null;
   triggered: number | null;
   mfe_pct: number | null;
@@ -89,7 +92,7 @@ const avg = (xs: number[]): number | null =>
 export function review(db: Db, filter: LedgerFilter = {}): ReviewStats {
   const w = predWhere(filter);
   const rows = db.prepare(
-    `SELECT o.verdict, o.actual_pct, o.triggered, o.mfe_pct, o.mae_pct
+    `SELECT o.verdict, o.actual_pct, o.triggered, o.mfe_pct, o.mae_pct, p.action
      FROM prediction p JOIN outcome o ON o.pred_id = p.id
      WHERE 1=1${NOT_VOID}${NOT_DIRTY}${w.sql}`
   ).all(...w.params) as Row[];
@@ -114,12 +117,23 @@ export function review(db: Db, filter: LedgerFilter = {}): ReviewStats {
     decided++;
     if (r.verdict === "命中") hit++;
 
-    // 盈亏分组按**实际盈亏的符号**，不按判定 ——
+    // 盈亏分组按**相对推荐方向的有利/不利**，不按判定 ——
     // 判定带中性带，命中的一定赚但偏差的不一定亏到带外那么多，
-    // 用判定分组算出来的盈亏比是在量中性带宽度，不是在量赚赔
+    // 用判定分组算出来的盈亏比是在量中性带宽度，不是在量赚赔。
+    //
+    // 关键：**必须按方向翻转**。directionOf 把 减仓/清仓 定为看跌，verdictOf 也用
+    // `favorable = dir === "看涨" ? ap : -ap`（跌了才算命中）。若照旧的 actual_pct
+    // 原始符号分组，一条清仓后真跌（命中）会被记成亏损、清仓后上涨（偏差）反被记成
+    // 盈利 —— 实测 2026-09 九条已判定清仓里 6 条命中被错划进亏损，期望被压低约
+    // 3.4pp（-0.38% vs 方向修正后 +3.01%）。调用方的 MMef/MMae 早已按方向翻转
+    // （excursion：`dir === "看跌" ? [-down,-up] : [up,down]`），这里补同一套口径。
     if (r.actual_pct != null) {
-      if (r.actual_pct > 0) wins.push(r.actual_pct);
-      else if (r.actual_pct < 0) losses.push(r.actual_pct);
+      const dir = directionOf(r.action as Action);
+      if (dir !== "中性") {
+        const favorable = dir === "看跌" ? -r.actual_pct : r.actual_pct;
+        if (favorable > 0) wins.push(favorable);
+        else if (favorable < 0) losses.push(favorable);
+      }
     }
   }
 

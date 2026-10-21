@@ -152,7 +152,7 @@ describe("ledger/review 三关分开报", () => {
     expect(w.neutral).toBe(0);
   });
 
-  it("盈亏比按实际盈亏的符号分组，不按判定 —— 按判定分组是在量中性带宽度", () => {
+  it("盈亏比按相对方向的有利移动分组，不按判定 —— 按判定分组是在量中性带宽度", () => {
     seedWin(db, "w1", 12);     // +20%
     seedWin(db, "w2", 11);     // +10%
     seedWin(db, "l1", 9);      // -10%
@@ -166,6 +166,32 @@ describe("ledger/review 三关分开报", () => {
     expect(s.expectancyPct).toBeCloseTo(6.6667, 3);
     // 每条发出的推荐期望 = 期望 × 触发率（这里三条全触发）
     expect(s.expectancyPerSignalPct).toBeCloseTo(6.6667, 3);
+  });
+
+  it("看跌方向必须翻转符号再分组：清仓后真跌是盈利，不是亏损", () => {
+    // 清仓 = 看跌：verdictOf 用 `favorable = -actualPct`（跌了才算命中），
+    // excursion 的 mfe/mae 也早已按方向翻转。唯独盈亏分组若照 actual_pct 的
+    // 原始符号走，一条判断正确的清仓（股价真跌）会被记成亏损、清仓后上涨（偏差）
+    // 反被记成盈利 —— 实测 2026-09 九条已判定清仓里 6 条命中被错划进亏损，
+    // 期望被压低约 3.4pp。这条守的是同一套口径在三处都得翻转。
+    seedDaily(db, "Xc1", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-10", c: 8 },        // 跌 20% → 清仓命中
+    ]);
+    seedDaily(db, "Xc2", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-10", c: 11 },       // 涨 10% → 清仓偏差
+    ]);
+    recordPrediction(db, mkPred({ id: "c1", code: "Xc1", action: "清仓", triggerPx: null, evalHorizon: 5, validUntil: "2026-08-10" }));
+    recordPrediction(db, mkPred({ id: "c2", code: "Xc2", action: "清仓", triggerPx: null, evalHorizon: 5, validUntil: "2026-08-10" }));
+    reconcile(db, { asOf: "2026-08-11" });
+
+    const s = review(db);
+    expect(s.decided).toBe(2);
+    expect(s.hit).toBe(1);                     // 只有真跌那条判对
+    expect(s.avgWinPct).toBeCloseTo(20, 4);    // +20% 进"盈"，不再错进"亏"
+    expect(s.avgLossPct).toBeCloseTo(-10, 4);  // 涨上去那条才是亏损
+    expect(s.payoffRatio).toBeCloseTo(2, 4);
   });
 
   it("没有亏损样本时盈亏比给 null，不写 Infinity", () => {
