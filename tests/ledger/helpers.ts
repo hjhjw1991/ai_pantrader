@@ -45,17 +45,18 @@ export function seedCalendar(db: Db, dates: string[]): void {
 export function seedDaily(
   db: Db,
   code: string,
-  bars: Array<{ date: string; c: number; l?: number; h?: number; o?: number }>
+  bars: Array<{ date: string; c: number; l?: number; h?: number; o?: number; f?: number }>
 ): void {
   const stmt = db.prepare(
     `INSERT OR REPLACE INTO kline_daily (code, date, o, h, l, c, vol, amount, adj_factor)
-     VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1.0)`
+     VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`
   );
   db.transaction(() => {
     for (const b of bars) {
       // o 默认等于 c：多数用例只关心收盘。但限价成交取 min(开盘, 触发价)，
       // 要测"高开到触发价再回落"这类场景就必须能单独给开盘价
-      stmt.run(code, b.date, b.o ?? b.c, b.h ?? b.c, b.l ?? b.c, b.c);
+      // f 默认 1.0：复权因子是台阶，只有专门测复权口径的用例才给
+      stmt.run(code, b.date, b.o ?? b.c, b.h ?? b.c, b.l ?? b.c, b.c, b.f ?? 1.0);
     }
   })();
 }

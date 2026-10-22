@@ -42,6 +42,9 @@ export function directionOf(action: Action): Direction {
  * 判据 1（最可靠）：与龙虎榜 dX_chg 标签背离 > 2pp。龙虎榜标签是交易所给的真实后续
  *   涨跌幅，系统算的 actual_pct 和它差这么多，几乎只能是复权/停牌问题
  *   （reconcile 自己的注释也这么写）。覆盖上榜票。
+ *   **只在持有到期满时成立**：dX_chg 量的是"上榜日收盘 → X 个交易日后的收盘"，
+ *   而止损离场是中途下车，两个数根本不是同一段。拿它们比会把每一笔正常止损
+ *   都报成脏数据（实测 000020：止损离场 -2.84% 对上 d5_chg -14.63%，两个数都对）。
  * 判据 2（兜底）：|actual_pct| 超过该 horizon 的连板理论上限。
  *   **按主板 10% 涨停的连板极限 + 余量标定（保守口径）**：宁可把边缘大赢家少算、
  *   绝不让复权跳变把胜率撑虚。实测台账里脏数据绝大多数是主板票 5 日涨 100%+
@@ -59,9 +62,10 @@ export function isDirtyOutcome(
   actualPct: number | null,
   evalHorizon: EvalHorizon,
   lhbLabelPct: number | null,
+  exitKind: ExitKind = "期满",
 ): string | null {
   if (actualPct == null) return null;
-  if (lhbLabelPct != null && Math.abs(actualPct - lhbLabelPct) > 2) {
+  if (exitKind === "期满" && lhbLabelPct != null && Math.abs(actualPct - lhbLabelPct) > 2) {
     return `复权/停牌背离：系统算 ${actualPct.toFixed(2)}% 与龙虎榜 d${evalHorizon}_chg ${lhbLabelPct.toFixed(2)}% 背离 > 2pp`;
   }
   const cap = DIRTY_CAP[evalHorizon];
@@ -136,31 +140,59 @@ export interface ResolvedPx {
 }
 
 /**
- * 某个交易日的收盘价。
+ * date 之前最近的一个「非 1」复权因子。
+ *
+ * 只用于给读侧自愈递一个起始台阶：`repairAdjFactorSeries` 从头扫时 prev 从 1 起，
+ * 若窗口正好从一段非 1 台阶的中间开始，第一根被写坏的 1.0 就认不出来
+ * （prev=1、f=1，看上去像"这票从没除过权"）。
+ */
+function priorAdjFactor(db: Db, code: string, date: string): number {
+  const prior = db.prepare(
+    `SELECT adj_factor f FROM kline_daily
+      WHERE code = ? AND date < ? AND adj_factor IS NOT NULL AND adj_factor != 1
+      ORDER BY date DESC LIMIT 1`
+  ).get(code, date) as { f: number } | undefined;
+  return prior && Number.isFinite(prior.f) && prior.f > 0 ? prior.f : 1;
+}
+
+/**
+ * 某个交易日的复权因子（后复权基准）。
+ *
+ * 全账本**唯一**的取因子入口：收盘价、盘中成交价、止损成交价、MFE/MAE 全走它，
+ * 任何一处自己写 `SELECT adj_factor` 都会在某一边上悄悄换口径 —— 而混口径的涨跌幅
+ * 是按整段除权比例凭空偏一截，实测把 5 日 -8% 记成 +1008%（见下方 resolveEntry）。
+ *
+ * 自愈与 view.dailyBars 同一套：非 1 台阶之后的 1.0 是写坏的，顺延前值。
+ * 该日无日线行时退回之前的最近台阶（快照取价需要），两者都没有才返回 1。
+ */
+export function adjFactorOn(db: Db, code: string, date: string): number {
+  const bar = db.prepare(
+    `SELECT COALESCE(adj_factor, 1.0) f FROM kline_daily WHERE code = ? AND date = ?`
+  ).get(code, date) as { f: number } | undefined;
+  const series = repairAdjFactorSeries([
+    { adjFactor: priorAdjFactor(db, code, date) },
+    { adjFactor: bar && Number.isFinite(bar.f) ? bar.f : 1 },
+  ]);
+  const f = series[series.length - 1].adjFactor;
+  return typeof f === "number" && Number.isFinite(f) && f > 0 ? f : 1;
+}
+
+/**
+ * 某个交易日的收盘价（后复权）。
  *
  * 日线优先；日线还没落库（当日盘后 job 之前）时退回当日最后一笔快照。
  * 快照只认同一天的：拿前一天的快照顶上等于偷偷改了 horizon。
  *
  * 收盘价乘 adj_factor（累计复权因子，见 collectors/adjust-factor），基准日与结算日
- * 才在同一复权口径下比涨跌幅。
+ * 才在同一复权口径下比涨跌幅。快照是原始价，同样要过这一层 —— 否则日线缺席的
+ * 那几天会把整段历史按除权比例错开。
  */
 export function resolvePx(db: Db, code: string, date: string): ResolvedPx | null {
   const bar = db.prepare(
-    `SELECT c, COALESCE(adj_factor, 1.0) f FROM kline_daily WHERE code = ? AND date = ?`
-  ).get(code, date) as { c: number | null; f: number } | undefined;
+    `SELECT c FROM kline_daily WHERE code = ? AND date = ?`
+  ).get(code, date) as { c: number | null } | undefined;
   if (bar && bar.c != null) {
-    // 因子走与 view.dailyBars 同一套读侧自愈：非 1 台阶之后的 1.0 是写坏的，顺延前值。
-    // 不修的话基准日与结算日一个是后复权价、一个是原始价，涨跌幅按除权比例凭空偏一截
-    const prior = db.prepare(
-      `SELECT adj_factor f FROM kline_daily
-        WHERE code = ? AND date < ? AND adj_factor IS NOT NULL AND adj_factor != 1
-        ORDER BY date DESC LIMIT 1`
-    ).get(code, date) as { f: number } | undefined;
-    const series = repairAdjFactorSeries([
-      ...(prior ? [{ adjFactor: prior.f }] : []), { adjFactor: bar.f },
-    ]);
-    const f = series[series.length - 1].adjFactor;
-    return { px: bar.c * f, source: "kline_daily", date };
+    return { px: bar.c * adjFactorOn(db, code, date), source: "kline_daily", date };
   }
 
   // quote_snapshot.ts 存的是 UTC ISO 串。交易时段（北京 09:30–15:00 = UTC 01:30–07:00）
@@ -170,7 +202,9 @@ export function resolvePx(db: Db, code: string, date: string): ResolvedPx | null
     `SELECT price FROM quote_snapshot WHERE code = ? AND substr(ts,1,10) = ? AND price IS NOT NULL
      ORDER BY ts DESC LIMIT 1`
   ).get(code, date) as { price: number } | undefined;
-  if (snap) return { px: snap.price, source: "quote_snapshot", date };
+  if (snap) {
+    return { px: snap.price * adjFactorOn(db, code, date), source: "quote_snapshot", date };
+  }
 
   return null;
 }
@@ -282,9 +316,23 @@ export function resolveEntry(
     return { triggered: false, px: 0, date: end, atClose: false };
   }
   // 开盘价缺失（极少见的脏行）就退回用触发价，不猜
+  // 到价判定用原始价：triggerPx 是决策时点按当时牌面给的原始价，o/h/l 也是原始价，
+  // 两边同一口径才比得出"够没够到"。乘了因子再比，等于把买点按除权比例整体上移。
   const open = row.o;
-  const px = open == null ? p.triggerPx
+  const raw = open == null ? p.triggerPx
     : dir === "看跌" || breakout ? Math.max(open, p.triggerPx) : Math.min(open, p.triggerPx);
+  /**
+   * 但**成交价**必须换到后复权基准，与出场价同一个数轴。
+   *
+   * 这里曾经漏乘，后果不是"偏一点"：入场记原始价、出场记后复权价（resolvePx 一直乘），
+   * 涨跌幅就凭空多出一个完整的复权倍数。实测 002519 入场 6.13（原始）→ 出场 67.93
+   * （5.67×11.98），账上记 +1008%，真实是 -8%。60 条已成交样本里 37 条这样错，
+   * 其中涨得离谱的被 DIRTY_CAP 抓去标脏、剩下的直接把胜率和期望撑虚。
+   *
+   * 影子盘 lib/shadow/exit-slot.ts 把 o/h/l/c 整体乘 adjFactor，口径本来就对；
+   * 两套账本对齐之后这里才补上。
+   */
+  const px = raw * adjFactorOn(db, p.code, row.date);
   // 限价/触价成交发生在当日盘中，当日剩下的走势确实还在持仓期内 → atClose=false
   return { triggered: true, px, date: row.date, atClose: false };
 }
@@ -302,6 +350,7 @@ export interface Excursion {
  */
 export interface RangeTail {
   date: string;
+  /** 后复权基准的最高/最低价，与区间内逐根 K 线换算后的数轴一致 */
   hi: number | null;
   lo: number | null;
 }
@@ -325,13 +374,33 @@ export function excursion(
   if (entryPx <= 0) return { mfePct: null, maePct: null };
   const bound = tail ? tail.date : to;
   const cmp = tail ? "<" : "<=";
-  const r = db.prepare(
-    `SELECT MAX(h) AS hi, MIN(l) AS lo FROM kline_daily
-     WHERE code = ? AND date >= ? AND date ${cmp} ? AND h IS NOT NULL AND l IS NOT NULL`
-  ).get(code, from, bound) as { hi: number | null; lo: number | null } | undefined;
+  /**
+   * 逐根取而不是 `MAX(h)`：极值要乘各自当日的复权因子，
+   * 而因子是台阶 —— 区间内若跨一次除权，便宜那半段的 h 乘完因子可能反而是最高点。
+   * 先取原始极值再统一乘，等于假设整段因子恒定，那正是这里要防的事。
+   *
+   * 因子过与读侧同一套自愈，并给首根递一个起始台阶（见 priorAdjFactor）。
+   * 持仓期最长 30 个交易日，逐根的代价可以忽略。
+   */
+  const rows = db.prepare(
+    `SELECT h, l, COALESCE(adj_factor, 1.0) f FROM kline_daily
+     WHERE code = ? AND date >= ? AND date ${cmp} ? AND h IS NOT NULL AND l IS NOT NULL
+     ORDER BY date`
+  ).all(code, from, bound) as Array<{ h: number; l: number; f: number }>;
+  const fixed = repairAdjFactorSeries([
+    { adjFactor: priorAdjFactor(db, code, from) },
+    ...rows.map(r => ({ adjFactor: Number.isFinite(r.f) ? r.f : 1 })),
+  ]);
 
-  const hi = Math.max(r?.hi ?? Number.NEGATIVE_INFINITY, tail?.hi ?? Number.NEGATIVE_INFINITY);
-  const lo = Math.min(r?.lo ?? Number.POSITIVE_INFINITY, tail?.lo ?? Number.POSITIVE_INFINITY);
+  let hi = Number.NEGATIVE_INFINITY;
+  let lo = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < rows.length; i++) {
+    const f = fixed[i + 1].adjFactor ?? 1;      // fixed[0] 是递进去的起始台阶
+    hi = Math.max(hi, rows[i].h * f);
+    lo = Math.min(lo, rows[i].l * f);
+  }
+  hi = Math.max(hi, tail?.hi ?? Number.NEGATIVE_INFINITY);
+  lo = Math.min(lo, tail?.lo ?? Number.POSITIVE_INFINITY);
   if (!Number.isFinite(hi) || !Number.isFinite(lo)) return { mfePct: null, maePct: null };
 
   const up = ((hi - entryPx) / entryPx) * 100;
@@ -355,11 +424,11 @@ export interface ExitFill {
 
 export interface StopHit {
   date: string;
-  /** 离场成交价：跳空低开到止损之下 → 开盘价；盘中破位 → 挂单在止损价成交 */
+  /** 离场成交价（后复权）：跳空低开到止损之下 → 开盘价；盘中破位 → 挂单在止损价成交 */
   px: number;
   /** 是否跳空（开盘价就已经在止损之下）。跳空时只能按开盘价卖，拿不到止损价那个价 */
   gap: boolean;
-  /** 破位当日开盘价。截断 MFE 用：当天只确知开盘价在破位之前出现过 */
+  /** 破位当日开盘价（后复权）。截断 MFE 用：当天只确知开盘价在破位之前出现过 */
   open: number | null;
 }
 
@@ -382,8 +451,14 @@ export function resolveStop(
        AND l IS NOT NULL AND l <= ? ORDER BY date LIMIT 1`
   ).get(code, from, to, stopPx) as { date: string; o: number | null } | undefined;
   if (!row) return null;
+  // 破位判定（l <= stopPx）用原始价：stopPx 是原始价，两边必须同口径。
+  // 判定完之后成交价与开盘价一律换到后复权基准，与入场价/期满出场价同一个数轴。
   const gap = row.o != null && row.o <= stopPx;
-  return { date: row.date, px: gap ? (row.o as number) : stopPx, gap, open: row.o };
+  const f = adjFactorOn(db, code, row.date);
+  return {
+    date: row.date, px: (gap ? (row.o as number) : stopPx) * f, gap,
+    open: row.o == null ? null : row.o * f,
+  };
 }
 
 export interface SettleFacts {
@@ -529,7 +604,9 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   // 复权/停牌脏数据：actual_pct 因复权因子写坏或长期停牌复牌会失真（典型 5 日涨 1000%+），
   // 进胜率/盈亏比会把它撑到失真。识别出来后隔离 —— 不可信，降级为中性、不进任何统计分母，
   // 但 actual_pct 仍保留真实失真值让人眼核查（见 Outcome.dirtyReason）。
-  const dirtyReason = entry.triggered ? isDirtyOutcome(actualPct, p.evalHorizon, label) : null;
+  const dirtyReason = entry.triggered
+    ? isDirtyOutcome(actualPct, p.evalHorizon, label, exitFill.kind)
+    : null;
 
   const verdict: Verdict = entry.triggered
     ? verdictOf(direction, actualPct as number, bandPct)
@@ -662,7 +739,10 @@ export function markDirtySettled(db: Db, now: string = new Date().toISOString())
       const o = db.prepare("SELECT actual_pct FROM outcome WHERE pred_id = ?").get(p.id) as
         { actual_pct: number | null } | undefined;
       if (!o) continue;
-      const reason = isDirtyOutcome(o.actual_pct, p.evalHorizon, label);
+      // 离场方式决定判据 1 能不能用（止损离场与龙虎榜 dX_chg 不是同一段，见 isDirtyOutcome）。
+      // 重算不出来时退回"期满"：那是最严的一边，宁可多标一条也不放过真跳变
+      const kind = settleOne(db, p, { now }).facts?.exit.kind ?? "期满";
+      const reason = isDirtyOutcome(o.actual_pct, p.evalHorizon, label, kind);
       if (reason == null) continue;
       n += up.run(reason, `；复权脏数据已隔离，不进胜率/盈亏比（${reason}）`, p.id).changes;
     }
@@ -723,12 +803,80 @@ export function resettleStoppedOut(db: Db, now: string = new Date().toISOString(
   return n;
 }
 
+/**
+ * 把已结算、但成交价与离场价不在同一复权基准上的老行全量重结。
+ *
+ * 台账只追加不改写 —— 这是第四个例外，理由比前三个更硬：那些行的涨跌幅里
+ * **凭空多出一个完整的复权倍数**（入场记原始价、出场记后复权价），
+ * 实测 60 条已成交样本里 37 条这样错，5 日 -8% 被记成 +1008%。
+ * 留着旧数，胜率、盈亏比、期望收益三个数从第一天起全是假的。
+ *
+ * 与 resettleStoppedOut 的两个区别：
+ *   1. **包含脏行**。脏行正是被这个 bug 造出来的那批，重结之后 actual_pct 回到
+ *      正常量级、dirty_reason 自然变 null —— 这就是"把样本救回来"，也是修根因
+ *      与打标脏补丁的分界线：标脏是把错的数藏起来，重结是把错的数改对。
+ *   2. 连 entry_px / verdict / dirty_reason 一起改。错的不只是盈亏，连"成交在哪个价"
+ *      都是原始价，下游读它算仓位、算止损距离的都会跟着错。
+ *
+ * 幂等：重结的输入全部来自 prediction 与 kline_daily，重跑必然算出同一组值，
+ * 与库里一致就跳过 —— settled_at 不会每轮跳，错因也不会被反复清空。
+ *
+ * 同样清掉 error_type：错因是对着旧事实归的，事实变了还留着等于给新数配旧解释。
+ */
+export function resettlePriceBasis(db: Db, now: string = new Date().toISOString()): number {
+  const rows = db.prepare(
+    `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
+      WHERE o.verdict != '作废'`
+  ).all() as PredictionRow[];
+  const up = db.prepare(
+    `UPDATE outcome SET verdict = ?, actual_pct = ?, dirty_reason = ?, mfe_pct = ?, mae_pct = ?,
+       entry_px = ?, entry_date = ?, triggered = ?, attribution = ?, error_type = NULL, settled_at = ?
+     WHERE pred_id = ? AND verdict != '作废'`
+  );
+  const cur = db.prepare(
+    `SELECT verdict, actual_pct, dirty_reason, mfe_pct, mae_pct, entry_px, entry_date, triggered
+       FROM outcome WHERE pred_id = ?`
+  );
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) {
+      const p = toPrediction(r);
+      const att = settleOne(db, p, { now });
+      if (!att.ok || !att.outcome) continue;
+      const o = att.outcome;
+      const old = cur.get(p.id) as
+        | { verdict: string; actual_pct: number | null; dirty_reason: string | null;
+            mfe_pct: number | null; mae_pct: number | null; entry_px: number | null;
+            entry_date: string | null; triggered: number | null }
+        | undefined;
+      if (!old) continue;
+      const oldTriggered = old.triggered == null ? null : old.triggered === 1;
+      if (old.verdict === o.verdict
+        && (old.dirty_reason ?? null) === (o.dirtyReason ?? null)
+        && oldTriggered === o.triggered
+        && (old.entry_date ?? null) === (o.entryDate ?? null)
+        && sameNum(old.actual_pct, o.actualPct)
+        && sameNum(old.mfe_pct, o.mfePct)
+        && sameNum(old.mae_pct, o.maePct)
+        && sameNum(old.entry_px, o.entryPx)) continue;
+      n += up.run(
+        o.verdict, o.actualPct, o.dirtyReason ?? null, o.mfePct, o.maePct,
+        o.entryPx, o.entryDate, o.triggered == null ? null : o.triggered ? 1 : 0,
+        o.attribution, o.settledAt, p.id
+      ).changes;
+    }
+  })();
+  return n;
+}
+
 export interface ReconcileReport {
   asOf: string;
   /** 本次扫到的到期未结算条数 */
   scanned: number;
   /** 本次把已结算老行改判作废的条数（新结算出的作废在 settled 里，verdict = 作废） */
   revoided: number;
+  /** 本次把已结算老行按统一复权基准重结的条数（口径错的历史行） */
+  readjusted: number;
   /** 本次把已结算老行标脏（复权/停牌跳变）的条数 */
   redirtied: number;
   /** 本次把已结算老行按止损口径重结的条数 */
@@ -745,6 +893,9 @@ export interface ReconcileReport {
 export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport {
   const asOf = opts.asOf ?? shanghaiToday();
   const revoided = voidLateSettled(db, opts.now);
+  // 复权基准重结放在标脏之前：重结之后原本离谱的数回到正常量级，就不该再被标脏；
+  // 标脏留在后面只做兜底（重结算不出来的行，靠原始 actual_pct 判）
+  const readjusted = resettlePriceBasis(db, opts.now);
   const redirtied = markDirtySettled(db, opts.now);
   const restopped = resettleStoppedOut(db, opts.now);
   const pending = listPendingPredictions(db, asOf, opts.filter ?? {}, opts.limit);
@@ -768,5 +919,7 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
     );
     if (info.changes > 0) settled.push(o);
   }
-  return { asOf, scanned: pending.length, revoided, redirtied, restopped, settled, skipped };
+  return {
+    asOf, scanned: pending.length, revoided, readjusted, redirtied, restopped, settled, skipped,
+  };
 }

@@ -7,6 +7,7 @@ import {
   lhbLabelPct,
   reconcile,
   markDirtySettled,
+  resettlePriceBasis,
   resettleStoppedOut,
   settleOne,
   tradingDayOffset,
@@ -334,5 +335,175 @@ describe("ledger/reconcile 结算", () => {
       `INSERT INTO lhb (date, code, change_type, d5_chg) VALUES ('2026-08-03','300502','t2',9.8)`
     ).run();
     expect(lhbLabelPct(db, "300502", "2026-08-03", 5)).toBeCloseTo(9.8, 6);
+  });
+});
+
+describe("ledger/reconcile 复权口径", () => {
+  /**
+   * 这一组守住的是同一件事：入场价、出场价、止损价、MFE/MAE 必须全在**后复权**
+   * 这一个数轴上。混一个原始价进去，涨跌幅就凭空多出一个完整的复权倍数 ——
+   * 实测 60 条已成交样本里 37 条被这样错记（5 日 -8% 记成 +1008%）。
+   */
+  it("盘中成交价与期满出场价同一复权基准 —— 不能一边原始价一边后复权价", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10, f: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2, f: 10 }, // l=9.5 ≤ 10 → 触发
+      { date: "2026-08-05", c: 10.1, f: 10 },
+      { date: "2026-08-06", c: 9.8, f: 10 },
+      { date: "2026-08-07", c: 9.5, f: 10 },
+      { date: "2026-08-10", c: 9, f: 10 },                            // 期末
+    ]);
+    recordPrediction(db, mkPred({ id: "a1", stopPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    // 入场 10×10=100 → 出场 9×10=90，真实 -10%
+    // 旧口径（入场记原始价 10）会算出 +800%
+    expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
+
+    const row = db.prepare("SELECT * FROM outcome WHERE pred_id='a1'").get() as any;
+    expect(row.entry_px).toBeCloseTo(100, 6);
+  });
+
+  it("跨除权台阶时，止损离场价按破位当日的因子换算", () => {
+    // 08-05 除权（10 送 10）：原始价腰斩、因子翻倍，后复权价连续。
+    // 止损价随除权从 9 调整到 4.5（同一条风控线的两种报价）
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10, f: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2, f: 10 },
+      { date: "2026-08-05", o: 5.1, h: 5.2, l: 4.4, c: 4.5, f: 20 },   // l=4.4 ≤ 4.5 → 破位
+      { date: "2026-08-06", c: 4.3, f: 20 },
+      { date: "2026-08-07", c: 4.0, f: 20 },
+      { date: "2026-08-10", c: 3.8, f: 20 },
+    ]);
+    recordPrediction(db, mkPred({ id: "a2", stopPx: 4.5, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    const o = rep.settled[0];
+    // 入场 100 → 止损成交 4.5×20=90，真实 -10%。
+    // 旧口径（入场原始价 10、止损价原始 4.5）会算出 -55%
+    expect(o.actualPct).toBeCloseTo(-10, 6);
+    expect(o.attribution).toContain("破止损");
+  });
+
+  it("MFE/MAE 逐根按各自当日因子换算 —— 极值可能落在便宜的那半段", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10, f: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2, f: 10 },  // 入场后复权 100
+      { date: "2026-08-05", o: 5.1, h: 5.4, l: 4.6, c: 5.0, f: 20 },   // 除权：后复权高/低 108/92
+      { date: "2026-08-06", o: 5.0, h: 5.2, l: 4.9, c: 5.2, f: 20 },
+      { date: "2026-08-07", o: 5.2, h: 5.3, l: 5.0, c: 5.1, f: 20 },
+      { date: "2026-08-10", o: 5.1, h: 5.4, l: 5.1, c: 5.3, f: 20 },   // 期末后复权 106
+    ]);
+    recordPrediction(db, mkPred({ id: "a3", stopPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    const o = rep.settled[0];
+    expect(o.actualPct).toBeCloseTo(6, 6);
+    // 最高点在后复权数轴上是除权当日的 108（5.4×20），不是原始价最高的 10.5
+    expect(o.mfePct).toBeCloseTo(8, 6);
+    expect(o.maePct).toBeCloseTo(-8, 6);
+  });
+});
+
+describe("ledger/reconcile 快照取价的复权", () => {
+  it("退回 quote_snapshot 时同样乘复权因子 —— 快照是原始价，与日线不是同一个数轴", () => {
+    // 期末那天日线还没落库，只有快照。因子取该日之前最近的非 1 台阶
+    seedDaily(db, "300502", [{ date: "2026-08-03", c: 10, f: 10 }]);
+    seedSnapshot(db, "2026-08-04T07:05:00.000Z", "300502", 9);
+    // triggerPx 留空：判触发需要当日最高/最低价，快照给不出，这里只测收盘价源
+    recordPrediction(db, mkPred({ id: "sn1", triggerPx: null, stopPx: null, evalHorizon: 1, validUntil: "2026-08-04" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-05" });
+    expect(rep.settled).toHaveLength(1);
+    // 基准 10×10=100 → 快照 9×10=90，真实 -10%
+    expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
+    expect(rep.settled[0].attribution).toContain("quote_snapshot");
+  });
+});
+
+describe("ledger/reconcile 复权基准重结", () => {
+  it("盘中标脏的老行按统一复权基准重结后回到正常量级，脏标记自动解除", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10, f: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2, f: 10 },
+      { date: "2026-08-05", c: 10.1, f: 10 },
+      { date: "2026-08-06", c: 9.8, f: 10 },
+      { date: "2026-08-07", c: 9.5, f: 10 },
+      { date: "2026-08-10", c: 9, f: 10 },
+    ]);
+    recordPrediction(db, mkPred({ id: "rp1", stopPx: null, validUntil: "2026-08-10" }));
+    // 旧口径落的一行：入场记原始价 10，出场记后复权 90 → +800%，被 DIRTY_CAP 标脏隔离
+    db.prepare(
+      `INSERT INTO outcome (pred_id, verdict, actual_pct, dirty_reason, error_type, attribution,
+         settled_at, triggered, entry_px, entry_date, mfe_pct, mae_pct)
+       VALUES ('rp1','中性',800,'涨跌幅 800.00% 超 5 日连板理论上限 70%，疑似复权跳变',NULL,
+         'D5 旧口径','2026-08-11T00:00:00.000Z',1,10,'2026-08-04',5,-5)`
+    ).run();
+
+    expect(resettlePriceBasis(db, "2026-08-11T01:00:00.000Z")).toBe(1);
+    const row = db.prepare("SELECT * FROM outcome WHERE pred_id='rp1'").get() as any;
+    // 真实是 -10%（100 → 90），脏标记解除、判定不再是"中性"
+    expect(row.actual_pct).toBeCloseTo(-10, 6);
+    expect(row.entry_px).toBeCloseTo(100, 6);
+    expect(row.dirty_reason).toBeNull();
+    expect(row.verdict).toBe("偏差");
+
+    // 幂等：口径已经一致 → 不重写，settled_at 不跳
+    expect(resettlePriceBasis(db, "2026-08-12T01:00:00.000Z")).toBe(0);
+    const again = db.prepare("SELECT settled_at FROM outcome WHERE pred_id='rp1'").get() as any;
+    expect(again.settled_at).toBe("2026-08-11T01:00:00.000Z");
+  });
+});
+
+describe("ledger/reconcile 脏数据判据与离场方式", () => {
+  /**
+   * 龙虎榜 dX_chg 量的是「上榜日收盘 → X 个交易日后收盘」，止损离场量的是
+   * 「成交价 → 破位价」。两者不是同一段，比大小会把每一笔正常止损报成复权脏数据。
+   */
+  it("止损离场不与龙虎榜标签比大小 —— 两个数都对，只是量的不是同一段", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2 },   // 成交 10
+      { date: "2026-08-05", o: 9.2, h: 9.5, l: 8.5, c: 9.2 },     // 破止损 9
+      { date: "2026-08-06", c: 8.0 },
+      { date: "2026-08-07", c: 7.0 },
+      { date: "2026-08-10", c: 6.0 },
+    ]);
+    // d5_chg -30% 是「08-03 收盘 10 → 08-10 收盘 6」，与止损离场的 -10% 差 20pp
+    db.prepare(
+      "INSERT INTO lhb (date, code, change_type, d5_chg) VALUES ('2026-08-03','300502','t1',-30)"
+    ).run();
+    recordPrediction(db, mkPred({ id: "k1", stopPx: 9, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
+    // 离场方式是止损 → 判据 1 不适用，不该被标脏
+    expect(rep.settled[0].dirtyReason).toBeNull();
+    expect(rep.settled[0].verdict).toBe("偏差");
+  });
+
+  it("持有到期满时判据 1 仍然生效 —— 别把这条修正做成整体失效", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.5, l: 9.5, c: 10.2 },
+      { date: "2026-08-05", c: 9.5 },
+      { date: "2026-08-06", c: 9.0 },
+      { date: "2026-08-07", c: 8.5 },
+      { date: "2026-08-10", c: 6.0 },                              // 期末 -40%
+    ]);
+    // 系统算 -40%，龙虎榜说 -10% → 背离 30pp，期满离场时这就是真可疑
+    db.prepare(
+      "INSERT INTO lhb (date, code, change_type, d5_chg) VALUES ('2026-08-03','300502','t1',-10)"
+    ).run();
+    recordPrediction(db, mkPred({ id: "k2", stopPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    expect(rep.settled[0].dirtyReason).toContain("龙虎榜");
+    expect(rep.settled[0].verdict).toBe("中性");
   });
 });
