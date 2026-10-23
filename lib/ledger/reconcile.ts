@@ -452,7 +452,37 @@ export function excursion(
 }
 
 /** 离场方式：持有到 horizon 末收盘，还是中途被止损打出来 */
-export type ExitKind = "期满" | "止损" | "止盈";
+/** 时限 = 时间止损：持仓满 N 个交易日无条件了结。与"期满"（走完 horizon）是两回事 */
+export type ExitKind = "期满" | "止损" | "止盈" | "时限";
+
+/**
+ * 最长持仓交易日数（时间止损）。null = 不设，一路拿到期满。
+ *
+ * 依据（2026-10-23，影子盘 12,665 条可重放样本）：这个数此前**从来没被寻过优**，
+ * 一直是"horizon = D5"顺带出来的默认值。把它当参数扫一遍之后，结果单调得反常 ——
+ * 持仓越短越好，一直到 T+1 允许的下限（成交次日）为止。
+ * 下列数字均为止盈 5%（未同步改止盈，一次只动一个旋钮）下、按半年分段加权、
+ * 扣 0.15% 双边成本的每信号期望：
+ *
+ *   持仓 1 日 +0.200%（t 5.62）  2 日 +0.177%  3 日 +0.183%  5 日（原状）+0.117%（t 2.49）
+ *
+ * 且资金效率差得更远：每占用一个交易日 0.309% vs 0.078%，约 4 倍。
+ *
+ * 为什么可信（而不是又一次过拟合）：
+ *   1. 6/7 个半年段为正；
+ *   2. 走前验证（只用之前的段选参数）6/6 段为正，且 6 段里 5 段选中同一个参数；
+ *   3. 在每个成本档位（0.05% / 0.15% / 0.3%）都不劣于旧口径。
+ *
+ * 反面（必须记住，别在回看时假装没发生过）：
+ *   1. **最近那段是反的**。2026-09 起 365 条：持仓 1 日 −0.001%、旧口径 +0.381%。
+ *      两边 t 值（−0.00 / 1.30）都不显著，不足以推翻全样本，但"最近两个月更差"
+ *      是事实，台账实盘那 20 条也是同一个方向。上线后要盯，不能只信回测。
+ *   2. **低胜率高赔率**：正收益占比约 32%、中位数 0，去掉最好的 1% 笔后均值
+ *      从 0.200% 掉到 0.035%（尾部贡献 82%）。旧口径更极端 —— 去掉后是 −0.050%
+ *      （尾部贡献 142%），也就是它**全靠 1% 的暴涨撑着**，相比之下这版没那么依赖。
+ *      但"期望为正"和"好过"仍是两件事。
+ */
+export const DEFAULT_MAX_HOLD_DAYS: number | null = 1;
 
 export interface ExitFill {
   kind: ExitKind;
@@ -564,6 +594,11 @@ export interface SettleAttempt {
 export interface ReconcileOptions {
   /** 对账基准日，默认取上海当日 */
   asOf?: string;
+  /**
+   * 时间止损：持仓满 N 个交易日按当日收盘价了结。省略时用 DEFAULT_MAX_HOLD_DAYS。
+   * 显式给 null = 不设时间止损（退回"一路拿到期满"）。
+   */
+  maxHoldDays?: number | null;
   /** 结算时间戳，测试用固定值 */
   now?: string;
   bands?: Partial<Record<EvalHorizon, number>>;
@@ -654,11 +689,44 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
    * （见 migrations/033 的实测代价：不设 T+1 时止盈 2% 看起来最优，那是假的）。
    */
   const exitFrom = tradingDayOffset(db, entry.date, 1);
+
+  /**
+   * 时间止损日：从 exitFrom（成交次日，T+1 的第一天）起第 maxHold 个交易日。
+   * maxHold = 1 → 就是 exitFrom 当日，即成交次日的收盘了结。
+   *
+   * 持仓期右端 = 期满日与时间止损日**孰早**。这一步同时决定两件事：
+   *   ① 止损/止盈只在真正的持仓期内判 —— 时间止损已经把仓位了结了，
+   *      之后再破位与这笔仓位无关，判进去等于给一个不存在的仓位记亏损；
+   *   ② 最后是记"期满"还是"时限"。
+   */
+  const maxHold = opts.maxHoldDays === undefined ? DEFAULT_MAX_HOLD_DAYS : opts.maxHoldDays;
+  /**
+   * 只对**看涨**生效，与止损/止盈同一道闸门。
+   *
+   * 看跌（减仓/清仓）与中性（观察）不形成新仓位，它们的 eval_horizon 量的是
+   * "这个判断在 D5 内对不对"，不是"这个仓位要拿几天"。把它们的区间也截到 1 天，
+   * 等于把"5 天后才兑现的清仓判断"记成一天的表现 —— 而支撑这次改动的扫描
+   * （影子盘 entry_type 几乎全是低吸）压根没覆盖那两个方向，是无据外推。
+   *
+   * exitFrom 本身就是持仓第 1 个交易日，所以 maxHold = 1 时直接取它。
+   * 不能写成 tradingDayOffset(exitFrom, 0)：那个函数用 `OFFSET n-1`，
+   * n=0 变成 OFFSET -1，查出来是 null —— 时间止损整个不生效，而报错只有一句
+   * "结果是期满"，看不出是偏移算错了。
+   */
+  const timeExit = maxHold != null && maxHold > 0 && exitFrom !== null
+    && direction === "看涨"
+    ? (maxHold === 1 ? exitFrom : tradingDayOffset(db, exitFrom, maxHold - 1))
+    : null;
+  const holdTo = timeExit != null && timeExit < horizonEnd ? timeExit : horizonEnd;
+  /** 时间止损日的收盘价取不到（数据缺口）就退回期满口径，不编一个数出来 */
+  const timeExitPx = holdTo === horizonEnd ? null : resolvePx(db, p.code, holdTo);
+  const timedOut = timeExitPx !== null;
+
   const stop = entry.triggered && direction === "看涨" && p.stopPx != null && exitFrom !== null
-    ? resolveStop(db, p.code, p.stopPx, exitFrom, horizonEnd)
+    ? resolveStop(db, p.code, p.stopPx, exitFrom, holdTo)
     : null;
   const takeProfit = entry.triggered && direction === "看涨" && p.takeProfitPx != null && exitFrom !== null
-    ? resolveTakeProfit(db, p.code, p.takeProfitPx, exitFrom, horizonEnd)
+    ? resolveTakeProfit(db, p.code, p.takeProfitPx, exitFrom, holdTo)
     : null;
   const stopBreached = stop !== null;
   const stopBreachDate = stop?.date ?? null;
@@ -673,7 +741,9 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
     ? { kind: "止损", px: stop.px, date: stop.date, source: "kline_daily" }
     : takeProfit !== null && tpFirst
       ? { kind: "止盈", px: takeProfit.px, date: takeProfit.date, source: "kline_daily" }
-      : { kind: "期满", px: exitPx.px, date: horizonEnd, source: exitPx.source };
+      : timedOut
+        ? { kind: "时限", px: timeExitPx!.px, date: holdTo, source: timeExitPx!.source }
+        : { kind: "期满", px: exitPx.px, date: horizonEnd, source: exitPx.source };
 
   // 价格没够到推荐的买点 —— 这笔推荐从未成为一个仓位，没有盈亏可算。
   // 它仍然要结算、要落库：未触发本身就是复盘要统计的结果之一
@@ -683,7 +753,7 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
     : null;
   const excur = entry.triggered && holdFrom !== null
     ? excursion(
-        db, p.code, direction, entry.px, holdFrom, horizonEnd,
+        db, p.code, direction, entry.px, holdFrom, holdTo,
         // 离场当天不取整根 K 线：只确知开盘价在离场前出现过，之后的高低与你无关。
         // 整根算进去等于把"卖掉之后才涨到/跌到的价"记成自己的持仓经历
         stop !== null && exitFill.kind === "止损"
@@ -866,7 +936,9 @@ function sameNum(a: number | null, b: number | null): boolean {
  * 重结会顺带把 error_type 清空、去掉旧的错因后缀：错因是对着旧事实归的，
  * 事实变了还留着它，等于给新数配旧解释。空的错因由随后的 attributeSettled 补回来。
  */
-export function resettleStoppedOut(db: Db, now: string = new Date().toISOString()): number {
+export function resettleStoppedOut(
+  db: Db, now: string = new Date().toISOString(), opts: ReconcileOptions = {}
+): number {
   const rows = db.prepare(
     `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
       WHERE o.verdict != '作废' AND o.dirty_reason IS NULL AND o.entry_px IS NOT NULL`
@@ -883,7 +955,7 @@ export function resettleStoppedOut(db: Db, now: string = new Date().toISOString(
   db.transaction(() => {
     for (const r of rows) {
       const p = toPrediction(r);
-      const att = settleOne(db, p, { now });
+      const att = settleOne(db, p, { ...opts, now });
       if (!att.ok || !att.outcome || att.facts?.stopBreached !== true) continue;
       const o = att.outcome;
       const old = cur.get(p.id) as
@@ -917,7 +989,9 @@ export function resettleStoppedOut(db: Db, now: string = new Date().toISOString(
  *
  * 同样清掉 error_type：错因是对着旧事实归的，事实变了还留着等于给新数配旧解释。
  */
-export function resettlePriceBasis(db: Db, now: string = new Date().toISOString()): number {
+export function resettlePriceBasis(
+  db: Db, now: string = new Date().toISOString(), opts: ReconcileOptions = {}
+): number {
   const rows = db.prepare(
     `SELECT ${PRED_COLS} FROM prediction p JOIN outcome o ON o.pred_id = p.id
       WHERE o.verdict != '作废'`
@@ -935,7 +1009,7 @@ export function resettlePriceBasis(db: Db, now: string = new Date().toISOString(
   db.transaction(() => {
     for (const r of rows) {
       const p = toPrediction(r);
-      const att = settleOne(db, p, { now });
+      const att = settleOne(db, p, { ...opts, now });
       if (!att.ok || !att.outcome) continue;
       const o = att.outcome;
       const old = cur.get(p.id) as
@@ -989,9 +1063,13 @@ export function reconcile(db: Db, opts: ReconcileOptions = {}): ReconcileReport 
   const revoided = voidLateSettled(db, opts.now);
   // 复权基准重结放在标脏之前：重结之后原本离谱的数回到正常量级，就不该再被标脏；
   // 标脏留在后面只做兜底（重结算不出来的行，靠原始 actual_pct 判）
-  const readjusted = resettlePriceBasis(db, opts.now);
+  //
+  // 三个重结函数必须**透传 opts**：它们内部也调 settleOne，口径若与本次结算不同，
+  // 就会出现"用 A 口径刚写完、同一趟里又被 B 口径改写一遍"——幂等性是第一个受害者
+  // （第二次运行的 MFE 与第一次不一样，而库里那条记录根本没动过）。
+  const readjusted = resettlePriceBasis(db, opts.now, opts);
   const redirtied = markDirtySettled(db, opts.now);
-  const restopped = resettleStoppedOut(db, opts.now);
+  const restopped = resettleStoppedOut(db, opts.now, opts);
   const pending = listPendingPredictions(db, asOf, opts.filter ?? {}, opts.limit);
 
   const settled: Outcome[] = [];

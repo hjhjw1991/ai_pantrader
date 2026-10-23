@@ -23,6 +23,16 @@ beforeEach(() => {
 });
 afterEach(() => cleanup(db, dir));
 
+/**
+ * 关掉时间止损，只留期满/止损/止盈那套口径。
+ *
+ * 这一批用例绝大多数写于时间止损存在之前，验证的是"拿到期满会怎样"。
+ * 不显式关掉，它们就会**隐式依赖当前默认策略** —— 默认持仓期一改，
+ * 这些用例验的东西就悄悄变了，而红灯只会说"数字不对"，说不出"是策略变了"。
+ * 口径必须写在用例里，不能靠默认值兜着。时间止损本身另有专门的一组用例。
+ */
+const NO_TIMEOUT = { maxHoldDays: null } as const;
+
 describe("ledger/reconcile 交易日推进", () => {
   it("按交易日而不是自然日推进 —— 跨周末不能多算两天", () => {
     // days[0]=周一 2026-08-03，第 5 个交易日应是次周一 08-10
@@ -54,7 +64,7 @@ describe("ledger/reconcile 结算", () => {
     ]);
     recordPrediction(db, mkPred({ id: "d1", evalHorizon: 5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.skipped).toEqual([]);
     expect(rep.settled).toHaveLength(1);
     expect(rep.settled[0].actualPct).toBeCloseTo(10, 6);
@@ -76,7 +86,7 @@ describe("ledger/reconcile 结算", () => {
     // 这里要测的是**收盘价源**的退化路径，两件事分开测
     recordPrediction(db, mkPred({ id: "s1", triggerPx: null, evalHorizon: 1, validUntil: "2026-08-04" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-05" });
+    const rep = reconcile(db, { asOf: "2026-08-05", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     // 取当日最后一笔快照
     expect(rep.settled[0].actualPct).toBeCloseTo(5, 6);
@@ -87,7 +97,7 @@ describe("ledger/reconcile 结算", () => {
     seedDaily(db, "300502", [{ date: "2026-08-03", c: 10 }]);
     recordPrediction(db, mkPred({ id: "n1", evalHorizon: 1, validUntil: "2026-08-04" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-05" });
+    const rep = reconcile(db, { asOf: "2026-08-05", ...NO_TIMEOUT });
     expect(rep.settled).toEqual([]);
     expect(rep.skipped).toHaveLength(1);
     expect(rep.skipped[0]).toMatchObject({ predId: "n1", reason: "无收盘价" });
@@ -95,13 +105,13 @@ describe("ledger/reconcile 结算", () => {
 
     // 价格补上之后同一条能结算 —— pending 不是丢弃
     seedDaily(db, "300502", [{ date: "2026-08-04", c: 10.3 }]);
-    expect(reconcile(db, { asOf: "2026-08-05" }).settled).toHaveLength(1);
+    expect(reconcile(db, { asOf: "2026-08-05", ...NO_TIMEOUT }).settled).toHaveLength(1);
   });
 
   it("基准日缺价也拒绝结算", () => {
     seedDaily(db, "300502", [{ date: "2026-08-04", c: 10.3 }]);
     recordPrediction(db, mkPred({ id: "n2", evalHorizon: 1, validUntil: "2026-08-04" }));
-    const rep = reconcile(db, { asOf: "2026-08-05" });
+    const rep = reconcile(db, { asOf: "2026-08-05", ...NO_TIMEOUT });
     expect(rep.skipped[0].reason).toBe("无基准价");
   });
 
@@ -110,7 +120,7 @@ describe("ledger/reconcile 结算", () => {
     recordPrediction(db, mkPred({
       id: "c1", ts: `${days[38]}T15:30:00+08:00`, evalHorizon: 30, validUntil: days[39],
     }));
-    const rep = reconcile(db, { asOf: "2099-01-01" });
+    const rep = reconcile(db, { asOf: "2099-01-01", ...NO_TIMEOUT });
     expect(rep.skipped[0]).toMatchObject({ predId: "c1", reason: "日历不足" });
   });
 
@@ -122,11 +132,11 @@ describe("ledger/reconcile 结算", () => {
     ]);
     recordPrediction(db, mkPred({ id: "i1", evalHorizon: 5, validUntil: "2026-08-10" }));
 
-    const first = reconcile(db, { asOf: "2026-08-11", now: "2026-08-11T01:00:00.000Z" });
+    const first = reconcile(db, { asOf: "2026-08-11", now: "2026-08-11T01:00:00.000Z", ...NO_TIMEOUT });
     expect(first.settled).toHaveLength(1);
     const snap = db.prepare("SELECT * FROM outcome").all();
 
-    const second = reconcile(db, { asOf: "2026-08-11", now: "2026-08-12T01:00:00.000Z" });
+    const second = reconcile(db, { asOf: "2026-08-11", now: "2026-08-12T01:00:00.000Z", ...NO_TIMEOUT });
     expect(second.settled).toEqual([]);
     expect(second.scanned).toBe(0);
     expect(db.prepare("SELECT * FROM outcome").all()).toEqual(snap);
@@ -141,7 +151,7 @@ describe("ledger/reconcile 结算", () => {
     ]);
     recordPrediction(db, mkPred({ id: "dirty1", evalHorizon: 5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     expect(rep.settled[0].actualPct).toBeCloseTo(200, 6);
     expect(rep.settled[0].verdict).toBe("中性");
@@ -181,7 +191,7 @@ describe("ledger/reconcile 结算", () => {
       { date: "2026-08-10", c: 9 },
     ]);
     recordPrediction(db, mkPred({ id: "b1", action: "清仓", evalHorizon: 5, validUntil: "2026-08-10" }));
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled[0].verdict).toBe("命中");
     expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
   });
@@ -194,7 +204,7 @@ describe("ledger/reconcile 结算", () => {
     ]);
     recordPrediction(db, mkPred({ id: "z1", evalHorizon: 5, validUntil: "2026-08-10" }));
     recordPrediction(db, mkPred({ id: "z2", action: "观察", evalHorizon: 5, validUntil: "2026-08-10" }));
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled.every(o => o.verdict === "中性")).toBe(true);
     // 中性带按 sqrt(horizon) 放大，D1 最窄
     expect(NEUTRAL_BAND_PCT[1]).toBeLessThan(NEUTRAL_BAND_PCT[30]);
@@ -208,7 +218,7 @@ describe("ledger/reconcile 结算", () => {
       { date: "2026-08-10", c: 9.0, l: 9.0 },
     ]);
     const p = mkPred({ id: "st1", stopPx: 9, evalHorizon: 5, validUntil: "2026-08-10" });
-    const att = settleOne(db, p, {});
+    const att = settleOne(db, p, NO_TIMEOUT);
     expect(att.ok).toBe(true);
     expect(att.facts!.stopBreached).toBe(true);
     expect(att.facts!.stopBreachDate).toBe("2026-08-05");
@@ -224,7 +234,7 @@ describe("ledger/reconcile 结算", () => {
       { date: "2026-08-10", c: 6.0 },                         // horizon 末：一路跌到 6
     ]);
     const p = mkPred({ id: "st2", stopPx: 9, evalHorizon: 5, validUntil: "2026-08-10" });
-    const att = settleOne(db, p, {});
+    const att = settleOne(db, p, NO_TIMEOUT);
     expect(att.ok).toBe(true);
     // 止损口径：-10%（9 离场）；硬扛口径：-40%（6 离场）。账本必须记前者
     expect(att.facts!.exit).toMatchObject({ kind: "止损", px: 9, date: "2026-08-05" });
@@ -240,7 +250,7 @@ describe("ledger/reconcile 结算", () => {
       { date: "2026-08-05", c: 8.8, o: 8.5, h: 9.0, l: 8.4 }, // 开盘 8.5 已在止损 9 之下
       { date: "2026-08-10", c: 8.0 },
     ]);
-    const att = settleOne(db, mkPred({ id: "st3", stopPx: 9, validUntil: "2026-08-10" }), {});
+    const att = settleOne(db, mkPred({ id: "st3", stopPx: 9, validUntil: "2026-08-10" }), NO_TIMEOUT);
     expect(att.facts!.exit).toMatchObject({ kind: "止损", px: 8.5, date: "2026-08-05" });
     expect(att.outcome!.actualPct).toBeCloseTo(-15, 6);
     expect(att.outcome!.attribution).toContain("跳空低开");
@@ -254,7 +264,7 @@ describe("ledger/reconcile 结算", () => {
       { date: "2026-08-05", c: 11.5, o: 9.8, h: 12, l: 8.5 },
       { date: "2026-08-10", c: 11 },
     ]);
-    const att = settleOne(db, mkPred({ id: "st4", stopPx: 9, validUntil: "2026-08-10" }), {});
+    const att = settleOne(db, mkPred({ id: "st4", stopPx: 9, validUntil: "2026-08-10" }), NO_TIMEOUT);
     expect(att.facts!.exit.px).toBe(9);
     // 当天最高 12 是止损打出来之后的事。算进去就是 +20%，纯属虚构
     expect(att.outcome!.mfePct).toBeCloseTo(1, 6);
@@ -270,7 +280,7 @@ describe("ledger/reconcile 结算", () => {
     const p = mkPred({
       id: "sd1", action: "清仓", triggerPx: null, stopPx: 9, validUntil: "2026-08-10",
     });
-    const att = settleOne(db, p, {});
+    const att = settleOne(db, p, NO_TIMEOUT);
     expect(att.facts!.stopBreached).toBe(false);
     // 无条件动作按基准收盘成交，跌到 6 对看跌判断是 +40% 的大对
     expect(att.outcome!.actualPct).toBeCloseTo(-40, 6);
@@ -288,7 +298,7 @@ describe("ledger/reconcile 结算", () => {
     // triggerPx 留空 → 无条件按基准日收盘 10 成交，成交日 = 基准日 08-03
     const att = settleOne(db, mkPred({
       id: "st5", triggerPx: null, stopPx: 9, validUntil: "2026-08-10",
-    }), {});
+    }), NO_TIMEOUT);
     // 建仓前的 8.0 既不是"破止损"（那时还没仓位）也不是"持仓期回撤"
     expect(att.facts!.stopBreached).toBe(false);
     expect(att.facts!.exit).toMatchObject({ kind: "期满", px: 11 });
@@ -355,7 +365,7 @@ describe("ledger/reconcile 复权口径", () => {
     ]);
     recordPrediction(db, mkPred({ id: "a1", stopPx: null, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     // 入场 10×10=100 → 出场 9×10=90，真实 -10%
     // 旧口径（入场记原始价 10）会算出 +800%
@@ -378,7 +388,7 @@ describe("ledger/reconcile 复权口径", () => {
     ]);
     recordPrediction(db, mkPred({ id: "a2", stopPx: 4.5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     const o = rep.settled[0];
     // 入场 100 → 止损成交 4.5×20=90，真实 -10%。
@@ -398,7 +408,7 @@ describe("ledger/reconcile 复权口径", () => {
     ]);
     recordPrediction(db, mkPred({ id: "a3", stopPx: null, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     const o = rep.settled[0];
     expect(o.actualPct).toBeCloseTo(6, 6);
@@ -416,7 +426,7 @@ describe("ledger/reconcile 快照取价的复权", () => {
     // triggerPx 留空：判触发需要当日最高/最低价，快照给不出，这里只测收盘价源
     recordPrediction(db, mkPred({ id: "sn1", triggerPx: null, stopPx: null, evalHorizon: 1, validUntil: "2026-08-04" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-05" });
+    const rep = reconcile(db, { asOf: "2026-08-05", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     // 基准 10×10=100 → 快照 9×10=90，真实 -10%
     expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
@@ -443,7 +453,9 @@ describe("ledger/reconcile 复权基准重结", () => {
          'D5 旧口径','2026-08-11T00:00:00.000Z',1,10,'2026-08-04',5,-5)`
     ).run();
 
-    expect(resettlePriceBasis(db, "2026-08-11T01:00:00.000Z")).toBe(1);
+    // 这一条验的是复权基准（B4），不是持仓期 —— 显式关掉时间止损，
+    // 否则它测的就是两个改动叠在一起的结果，坏了分不清是谁坏的
+    expect(resettlePriceBasis(db, "2026-08-11T01:00:00.000Z", NO_TIMEOUT)).toBe(1);
     const row = db.prepare("SELECT * FROM outcome WHERE pred_id='rp1'").get() as any;
     // 真实是 -10%（100 → 90），脏标记解除、判定不再是"中性"
     expect(row.actual_pct).toBeCloseTo(-10, 6);
@@ -452,7 +464,7 @@ describe("ledger/reconcile 复权基准重结", () => {
     expect(row.verdict).toBe("偏差");
 
     // 幂等：口径已经一致 → 不重写，settled_at 不跳
-    expect(resettlePriceBasis(db, "2026-08-12T01:00:00.000Z")).toBe(0);
+    expect(resettlePriceBasis(db, "2026-08-12T01:00:00.000Z", NO_TIMEOUT)).toBe(0);
     const again = db.prepare("SELECT settled_at FROM outcome WHERE pred_id='rp1'").get() as any;
     expect(again.settled_at).toBe("2026-08-11T01:00:00.000Z");
   });
@@ -478,7 +490,7 @@ describe("ledger/reconcile 脏数据判据与离场方式", () => {
     ).run();
     recordPrediction(db, mkPred({ id: "k1", stopPx: 9, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
     // 离场方式是止损 → 判据 1 不适用，不该被标脏
@@ -501,7 +513,7 @@ describe("ledger/reconcile 脏数据判据与离场方式", () => {
     ).run();
     recordPrediction(db, mkPred({ id: "k2", stopPx: null, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     expect(rep.settled[0].dirtyReason).toContain("龙虎榜");
     expect(rep.settled[0].verdict).toBe("中性");
@@ -524,7 +536,7 @@ describe("ledger/reconcile 止盈与 T+1", () => {
     ]);
     recordPrediction(db, mkPred({ id: "tp1", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled).toHaveLength(1);
     expect(rep.settled[0].actualPct).toBeCloseTo(5, 6);
     expect(rep.settled[0].attribution).toContain("止盈");
@@ -539,7 +551,7 @@ describe("ledger/reconcile 止盈与 T+1", () => {
     ]);
     recordPrediction(db, mkPred({ id: "tp2", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     expect(rep.settled[0].actualPct).toBeCloseTo(8, 6);
   });
 
@@ -555,7 +567,7 @@ describe("ledger/reconcile 止盈与 T+1", () => {
     ]);
     recordPrediction(db, mkPred({ id: "tp3", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     // 次日 08-05 开盘 11 就在止盈价之上（跳空）→ 次日以 11 卖，+10%
     // 关键是**不是**在 08-04 当天卖（那天也够了价，但 T+1 不允许）
     expect(rep.settled[0].actualPct).toBeCloseTo(10, 6);
@@ -574,9 +586,151 @@ describe("ledger/reconcile 止盈与 T+1", () => {
       id: "tp4", stopPx: 9, takeProfitPx: 10.5, validUntil: "2026-08-10",
     }));
 
-    const rep = reconcile(db, { asOf: "2026-08-11" });
+    const rep = reconcile(db, { asOf: "2026-08-11", ...NO_TIMEOUT });
     // 按止损 9 算 = -10%；若按止盈算会是 +5%
     expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
     expect(rep.settled[0].attribution).toContain("破止损");
+  });
+});
+
+/**
+ * 时间止损（maxHoldDays）。
+ *
+ * 这一组是 2026-10-23 把"持仓多久"从拍脑袋常数改成可寻优参数之后的产物：
+ * 12,665 条影子盘样本显示持仓越短越好，一直到 T+1 允许的下限（成交次日）。
+ * 它同时改了两条旧路径，所以两组都得钉住：
+ *   1. 到点了结（时限离场，按当日收盘价）；
+ *   2. **止损/止盈只在真正的持仓期内判** —— 时间止损日之后破位的是别人的仓位，
+ *      判进来等于给一个已经不存在的仓位记亏损。这条最容易漏，也最容易做成
+ *      "看起来更保守所以没人反对"的伪正确。
+ */
+describe("ledger/reconcile 时间止损", () => {
+  it("持仓满 N 个交易日按当日收盘价了结，不等期满", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.2, l: 9.8, c: 10 },        // 成交日
+      { date: "2026-08-05", o: 10, h: 10.4, l: 9.9, c: 10.3 },      // 成交次日 → 这里了结
+      { date: "2026-08-06", c: 11 },
+      { date: "2026-08-07", c: 11.5 },
+      { date: "2026-08-10", c: 12 },                                 // 期满日，够不着了
+    ]);
+    recordPrediction(db, mkPred({ id: "tm1", stopPx: null, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    expect(rep.settled[0].actualPct).toBeCloseTo(3, 6);              // 10 → 10.3
+    expect(rep.settled[0].attribution).toContain("时限");
+    // 期满日的 12 不该出现在结果里
+    expect(rep.settled[0].attribution).not.toContain("2026-08-10");
+  });
+
+  it("maxHoldDays = 1 时了结日就是成交次日 —— T+1 的下限，不能再往前", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.9, l: 9.9, c: 10.9 },       // 成交当日（盘中）
+      { date: "2026-08-05", o: 11, h: 11, l: 10.8, c: 10.8 },        // 次日 → 了结
+      { date: "2026-08-10", c: 10 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tm2", stopPx: null, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    // 成交在 08-04（触发价成交），最早只能 08-05 卖，按 08-05 收盘 10.8
+    expect(rep.settled[0].attribution).toContain("2026-08-05");
+    expect(rep.settled[0].actualPct).toBeCloseTo(8, 6);
+  });
+
+  it("时间止损日之后破的位不算在这笔上 —— 那时仓位已经没了", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },         // 成交日
+      { date: "2026-08-05", o: 10, h: 10.2, l: 9.7, c: 10 },         // 时间止损日，还在止损 9 之上
+      { date: "2026-08-06", o: 10, h: 10, l: 8.5, c: 8.6 },          // 破位 —— 但已经没仓位了
+      { date: "2026-08-10", c: 8.0 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tm3", stopPx: 9, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    expect(rep.settled[0].actualPct).toBeCloseTo(0, 6);              // 10 → 10，不是 -10%
+    expect(rep.settled[0].attribution).toContain("时限");
+    expect(rep.settled[0].attribution).not.toContain("破止损");
+  });
+
+  it("持仓期内先破止损的仍然按止损走 —— 时间止损不覆盖风控", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },         // 成交日
+      { date: "2026-08-05", o: 10, h: 10.1, l: 8.9, c: 9.0 },        // 时间止损日，但先破了 9
+      { date: "2026-08-10", c: 12 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tm4", stopPx: 9, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
+    expect(rep.settled[0].attribution).toContain("破止损");
+  });
+
+  it("时间止损日超出期满日时不生效 —— 期满在前，时限退让", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },
+      { date: "2026-08-05", c: 10.5 },
+      { date: "2026-08-10", c: 11 },                                 // 期满日
+    ]);
+    recordPrediction(db, mkPred({ id: "tm5", stopPx: null, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    // 期满日只到 08-10，maxHoldDays=20 排到 08-28 也够不着 → 仍是期满
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 20 });
+    expect(rep.settled[0].attribution).toContain("期满");
+    expect(rep.settled[0].actualPct).toBeCloseTo(10, 6);
+  });
+
+  it("缺省时跟随 DEFAULT_MAX_HOLD_DAYS —— 口径不能散落在调用方", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },
+      { date: "2026-08-05", c: 10.3 },
+      { date: "2026-08-10", c: 12 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tm6", stopPx: null, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    // 不传 maxHoldDays 就用默认（1 天）：10 → 10.3，不是期满的 12
+    expect(rep.settled[0].actualPct).toBeCloseTo(3, 6);
+    expect(rep.settled[0].attribution).toContain("时限");
+  });
+
+  it("看跌与中性方向不适用时间止损 —— 它们量的是判断期，不是持仓期", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },
+      { date: "2026-08-05", c: 10.3 },                               // 时限会在这一天了结
+      { date: "2026-08-06", c: 11 },
+      { date: "2026-08-10", c: 8 },                                  // 期满日：清仓判断对了
+    ]);
+    recordPrediction(db, mkPred({ id: "tm8", action: "清仓", triggerPx: null, stopPx: null, validUntil: "2026-08-10" }));
+    recordPrediction(db, mkPred({ id: "tm9", action: "观察", triggerPx: null, stopPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    for (const o of rep.settled) {
+      // 两个方向都仍按期满日 08-10 的收盘 8 计（-20%），不是 08-05 的 10.3
+      expect(o.actualPct).toBeCloseTo(-20, 6);
+      expect(o.attribution).toContain("期满");
+      expect(o.attribution).not.toContain("时限");
+    }
+  });
+
+  it("MFE/MAE 只统计到实际了结日 —— 卖掉之后的涨跌不是持仓经历", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },         // 成交日
+      { date: "2026-08-05", o: 10, h: 10.2, l: 9.9, c: 10.1 },       // 了结日：最高 10.2
+      { date: "2026-08-06", o: 10, h: 15, l: 10, c: 14 },            // 卖掉之后才暴涨
+      { date: "2026-08-10", c: 14 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tm7", stopPx: null, takeProfitPx: null, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11", maxHoldDays: 1 });
+    expect(rep.settled[0].actualPct).toBeCloseTo(1, 6);
+    // MFE 只到 +2%（08-05 的最高 10.2），不是 +40%
+    expect(rep.settled[0].mfePct).toBeCloseTo(2, 6);
   });
 });

@@ -55,6 +55,36 @@ describe("ledger/policy-lab 离场模拟", () => {
     expect(r!.reason).toBe("期满");
     expect(r!.pct).toBeCloseTo(3, 6);
   });
+
+  /**
+   * 时间止损（maxHoldDays）。
+   *
+   * 持仓期在这个系统里长期是个拍出来的常数（D5），2026-10-23 才被当成参数扫了一遍，
+   * 结果落在 T+1 允许的下限。这两个用例钉住它的两条边界：
+   * 截断后按当日收盘走、且**截断之后的价格不再参与任何判定**。
+   */
+  it("maxHoldDays 到了就按当日收盘走，记「时限」而不是「期满」", () => {
+    const bars = [bar("d1", 10, 10.2, 9.8, 10), bar("d2", 10, 13, 9.9, 10.3), bar("d3", 10, 20, 10, 20)];
+    const r = simulateExit(bars, 10, { takeProfitPct: null, stopPct: null, trailPct: null, maxHoldDays: 2 });
+    expect(r!.reason).toBe("时限");
+    expect(r!.date).toBe("d2");
+    expect(r!.pct).toBeCloseTo(3, 6);
+    // 占用天数要记准：资金效率靠它算，差一天就差一个比率
+    expect(r!.holdDays).toBe(2);
+  });
+
+  it("持仓期被截断之后的价格既不触发离场也不进 MFE —— 那时仓位已经没了", () => {
+    const bars = [
+      bar("d1", 10, 10.2, 9.8, 10),
+      bar("d2", 10, 10.3, 9.9, 10.1),   // 时间止损日：最高 10.3
+      bar("d3", 10, 15, 9.9, 14),       // 卖掉之后的暴涨与暴跌
+    ];
+    const r = simulateExit(bars, 10, { takeProfitPct: 12, stopPct: null, trailPct: null, maxHoldDays: 2 });
+    // d3 最高 15 已越过止盈 11.2，但那是离场之后的事 → 仍按 d2 收盘了结
+    expect(r!.reason).toBe("时限");
+    expect(r!.date).toBe("d2");
+    expect(r!.pct).toBeCloseTo(1, 6);
+  });
 });
 
 describe("ledger/policy-lab 入场重放", () => {

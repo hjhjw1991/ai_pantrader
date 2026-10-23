@@ -38,9 +38,19 @@ export interface ExitRule {
    * 所以它是固定止损的收紧，不是替换。
    */
   trailPct: number | null;
+  /**
+   * 最长持仓交易日数（时间止损）。到点无条件按当日收盘价走。
+   * 省略 / null = 一直拿到持仓期末。
+   *
+   * 为什么要有这一条：持仓期长度在这套系统里一直是个**拍出来的常数**（D5），
+   * 从来没被当成可寻优的参数问过。而它直接决定资金周转 —— 同样的每信号
+   * 期望，占 3 天和占 20 天完全是两笔生意。有了这个轴才能在同一批信号上
+   * 把"持有几天最划算"量出来，而不是拿默认值继续跑。
+   */
+  maxHoldDays?: number | null;
 }
 
-export type ExitReason = "止盈" | "止损" | "移动止损" | "期满";
+export type ExitReason = "止盈" | "止损" | "移动止损" | "期满" | "时限";
 
 export interface SimulatedExit {
   /** 离场成交价（后复权基准，与 entryPx 同一数轴） */
@@ -49,6 +59,15 @@ export interface SimulatedExit {
   reason: ExitReason;
   /** 相对成交价的收益，百分点 */
   pct: number;
+  /**
+   * 实际占用的持仓交易日数（离场日在持仓期里的序号，从 1 起）。
+   *
+   * 报它是因为**每信号期望不是可以直接比较的量**：同样 +0.2%，占 3 天和占
+   * 20 天是两笔完全不同的生意。槽位有限时真正要最大化的是单位占用时间的
+   * 收益，而那需要知道每笔实际占了多少天 —— 止盈提前离场的笔数占得少，
+   * 光看期望看不出来。
+   */
+  holdDays: number;
 }
 
 /**
@@ -117,18 +136,24 @@ export interface EntryRule {
 export function simulateExit(bars: readonly AdjBar[], entryPx: number, rule: ExitRule): SimulatedExit | null {
   if (!(entryPx > 0) || bars.length === 0) return null;
 
+  /** 时间止损先把持仓期切短。切到 1 根是底线：当天买次日卖已经是 T+1 的下限 */
+  const truncated = rule.maxHoldDays != null && rule.maxHoldDays < bars.length;
+  const hold = rule.maxHoldDays == null ? bars : bars.slice(0, Math.max(1, rule.maxHoldDays));
+
   const tpPx = rule.takeProfitPct == null ? null : entryPx * (1 + rule.takeProfitPct / 100);
   const slPx = rule.stopPct == null ? null : entryPx * (1 - rule.stopPct / 100);
 
   let peak = entryPx;
-  for (const b of bars) {
+  for (let i = 0; i < hold.length; i++) {
+    const b = hold[i];
+    const d = i + 1;   // 持仓第几个交易日
     // 跳空：开盘就在线的另一边，只能按开盘价成交
-    if (slPx != null && b.o != null && b.o <= slPx) return mk(b.o, b.date, "止损", entryPx);
-    if (tpPx != null && b.o != null && b.o >= tpPx) return mk(b.o, b.date, "止盈", entryPx);
+    if (slPx != null && b.o != null && b.o <= slPx) return mk(b.o, b.date, "止损", entryPx, d);
+    if (tpPx != null && b.o != null && b.o >= tpPx) return mk(b.o, b.date, "止盈", entryPx, d);
 
     // 盘中：止损先判
-    if (slPx != null && b.l != null && b.l <= slPx) return mk(slPx, b.date, "止损", entryPx);
-    if (tpPx != null && b.h != null && b.h >= tpPx) return mk(tpPx, b.date, "止盈", entryPx);
+    if (slPx != null && b.l != null && b.l <= slPx) return mk(slPx, b.date, "止损", entryPx, d);
+    if (tpPx != null && b.h != null && b.h >= tpPx) return mk(tpPx, b.date, "止盈", entryPx, d);
 
     if (b.h != null && b.h > peak) peak = b.h;
     if (rule.trailPct != null && b.l != null) {
@@ -136,18 +161,20 @@ export function simulateExit(bars: readonly AdjBar[], entryPx: number, rule: Exi
       if (b.l <= level) {
         // 跳空低开直接穿过移动止损线时同样拿开盘价
         const px = b.o != null && b.o <= level ? b.o : level;
-        return mk(px, b.date, "移动止损", entryPx);
+        return mk(px, b.date, "移动止损", entryPx, d);
       }
     }
   }
 
-  const last = bars[bars.length - 1];
+  const last = hold[hold.length - 1];
   if (last.c == null) return null;
-  return mk(last.c, last.date, "期满", entryPx);
+  /** 被 maxHoldDays 截断的叫"时限"，走完整个持仓期的才叫"期满" —— 两者都得记清楚，
+   *  否则看离场原因分布时无法区分"规则触发"和"时间到"。 */
+  return mk(last.c, last.date, truncated ? "时限" : "期满", entryPx, hold.length);
 }
 
-function mk(px: number, date: string, reason: ExitReason, entryPx: number): SimulatedExit {
-  return { px, date, reason, pct: ((px - entryPx) / entryPx) * 100 };
+function mk(px: number, date: string, reason: ExitReason, entryPx: number, holdDays: number): SimulatedExit {
+  return { px, date, reason, pct: ((px - entryPx) / entryPx) * 100, holdDays };
 }
 
 /**
@@ -272,6 +299,8 @@ export interface ReplayResult {
   exit: SimulatedExit | null;
   entryPx: number | null;
   entryDate: string | null;
+  /** 占用的持仓交易日数。未成交为 0 —— 没建仓就不占资金 */
+  holdDays: number;
 }
 
 /**
@@ -291,7 +320,7 @@ export function replayTrade(
     : sb.basePx * (1 - entry.discountPct / 100);
   const win = sb.bars.slice(0, Math.max(0, entry.windowDays));
   const idx = win.findIndex(b => b.l != null && b.l <= trigger);
-  if (idx < 0) return { triggered: false, pct: 0, exit: null, entryPx: null, entryDate: null };
+  if (idx < 0) return { triggered: false, pct: 0, exit: null, entryPx: null, entryDate: null, holdDays: 0 };
 
   const hit = win[idx];
   const entryPx = hit.o == null ? trigger : Math.min(hit.o, trigger);
@@ -307,7 +336,7 @@ export function replayTrade(
   const rest = sb.bars.slice(idx + 1);
   const ex = simulateExit(rest.length > 0 ? rest : sb.bars.slice(sb.bars.length - 1), entryPx, exit);
   if (!ex) return null;
-  return { triggered: true, pct: ex.pct, exit: ex, entryPx, entryDate: hit.date };
+  return { triggered: true, pct: ex.pct, exit: ex, entryPx, entryDate: hit.date, holdDays: ex.holdDays };
 }
 
 export interface PolicyScore {
@@ -322,6 +351,16 @@ export interface PolicyScore {
   meanPctFilled: number;
   winRate: number;
   fillRate: number;
+  /**
+   * 每占用一个交易日的平均收益 = 总收益 / 总占用天数（百分点）。
+   *
+   * 槽位有限时这个量比 meanPct 更接近真实产能：一笔占 20 天赚 0.4% 和
+   * 一笔占 3 天赚 0.25%，后者每天赚 3 倍。只看 meanPct 会选错。
+   * 未成交既不贡献收益也不占天数，所以不影响这个比值。
+   */
+  pctPerDay: number;
+  /** 平均占用交易日数（只算成交的笔） */
+  avgHoldDays: number;
 }
 
 /** 对一批样本跑一套完整策略（入场 + 离场） */
@@ -333,6 +372,7 @@ export function scorePolicy(
   let wins = 0;
   let filled = 0;
   let n = 0;
+  let days = 0;
   for (const sb of all) {
     const r = replayTrade(sb, entry, exit);
     if (!r) continue;
@@ -342,6 +382,7 @@ export function scorePolicy(
     if (r.triggered) {
       filled++;
       sumFilled += r.pct;
+      days += r.holdDays;
     }
   }
   return {
@@ -350,6 +391,8 @@ export function scorePolicy(
     meanPctFilled: filled === 0 ? Number.NaN : sumFilled / filled,
     winRate: n === 0 ? Number.NaN : wins / n,
     fillRate: n === 0 ? Number.NaN : filled / n,
+    pctPerDay: days === 0 ? Number.NaN : sum / days,
+    avgHoldDays: filled === 0 ? Number.NaN : days / filled,
   };
 }
 
@@ -368,7 +411,7 @@ export interface RuleScore {
 /** 对一批样本跑一条规则 */
 export function scoreRule(db: Db, samples: readonly ClosedSample[], rule: ExitRule): RuleScore {
   const perSample: RuleScore["perSample"] = [];
-  const reasons: Record<ExitReason, number> = { 止盈: 0, 止损: 0, 移动止损: 0, 期满: 0 };
+  const reasons: Record<ExitReason, number> = { 止盈: 0, 止损: 0, 移动止损: 0, 期满: 0, 时限: 0 };
   for (const s of samples) {
     if (s.entryPx == null || s.holdFrom == null) continue;   // 未成交的没有仓位可重放
     const bars = adjBars(db, s.code, s.holdFrom, s.horizonEnd);
@@ -477,7 +520,7 @@ export function loocv(
 
   const tally = new Map<string, { entry: EntryRule; exit: ExitRule; times: number }>();
   for (const f of folds) {
-    const k = `${f.entry.discountPct}|${f.entry.windowDays}|${f.exit.takeProfitPct}|${f.exit.stopPct}|${f.exit.trailPct}`;
+    const k = `${f.entry.discountPct}|${f.entry.windowDays}|${f.exit.takeProfitPct}|${f.exit.stopPct}|${f.exit.trailPct}|${f.exit.maxHoldDays ?? "-"}`;
     const hit = tally.get(k);
     if (hit) hit.times++;
     else tally.set(k, { entry: f.entry, exit: f.exit, times: 1 });
