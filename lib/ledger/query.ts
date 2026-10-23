@@ -65,6 +65,8 @@ export interface PredictionRow {
   id: string; ts: string; phase: string; code: string; strategy_id: string;
   strategy_ver: string | null;
   action: string; account: string | null; trigger_px: number | null; stop_px: number | null;
+  /** 033 加的止盈价；绕过迁移直接建的测试表可能没有，读侧按 null 处理 */
+  take_profit_px?: number | null;
   size: number | null; thesis: string | null; gear: string | null;
   eval_horizon: number; valid_until: string; advisor_influenced: number;
   /** 028 迁移加的，NOT NULL DEFAULT '低吸'；绕过迁移直接建的测试表可能没有，读侧按缺省处理 */
@@ -73,7 +75,8 @@ export interface PredictionRow {
 
 export const PRED_COLS =
   `p.id, p.ts, p.phase, p.code, p.strategy_id, p.strategy_ver, p.action, p.account, p.trigger_px,
-   p.stop_px, p.size, p.thesis, p.gear, p.eval_horizon, p.valid_until, p.advisor_influenced, p.entry_type`;
+   p.stop_px, p.take_profit_px, p.size, p.thesis, p.gear, p.eval_horizon, p.valid_until,
+   p.advisor_influenced, p.entry_type`;
 
 /**
  * 统计口径：作废的结算（决策晚于成交日 09:25，见 Verdict）当它不存在。
@@ -109,6 +112,7 @@ export function toPrediction(r: PredictionRow): Prediction {
     triggerPx: r.trigger_px,
     entryType: entryTypeOf(r.entry_type),
     stopPx: r.stop_px,
+    takeProfitPx: r.take_profit_px ?? null,
     size: r.size as number,
     thesis: r.thesis as string,
     gear: r.gear as Prediction["gear"],

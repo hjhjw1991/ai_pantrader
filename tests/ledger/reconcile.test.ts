@@ -507,3 +507,76 @@ describe("ledger/reconcile 脏数据判据与离场方式", () => {
     expect(rep.settled[0].verdict).toBe("中性");
   });
 });
+
+describe("ledger/reconcile 止盈与 T+1", () => {
+  /**
+   * 止盈此前根本不存在：成交后一路拿到 horizon 期满。
+   * 12,665 条影子盘样本的样本外净期望：纯期满 +0.097% → 止盈 4~8% 约 +0.18~0.21%。
+   */
+  it("持仓期内最高价够到止盈价 → 按止盈价离场，不等期满", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },   // 限价 10 成交
+      { date: "2026-08-05", o: 10.1, h: 10.6, l: 10, c: 10.4 }, // h≥10.5 → 止盈
+      { date: "2026-08-06", c: 9.9 },
+      { date: "2026-08-07", c: 9.9 },
+      { date: "2026-08-10", c: 9.9 },                            // 期满会记 -1%
+    ]);
+    recordPrediction(db, mkPred({ id: "tp1", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled).toHaveLength(1);
+    expect(rep.settled[0].actualPct).toBeCloseTo(5, 6);
+    expect(rep.settled[0].attribution).toContain("止盈");
+  });
+
+  it("跳空高开越过止盈价 → 按开盘价卖，不是按挂单价", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },
+      { date: "2026-08-05", o: 10.8, h: 11, l: 10.7, c: 10.9 },  // 开盘 10.8 ≥ 10.5
+      { date: "2026-08-10", c: 10.9 },
+    ]);
+    recordPrediction(db, mkPred({ id: "tp2", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    expect(rep.settled[0].actualPct).toBeCloseTo(8, 6);
+  });
+
+  it("T+1：成交当日就算够到止盈也不卖 —— 当日买入当日卖出这条路径不存在", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      // 成交当日冲到 11（远超止盈 10.5），但 T+1 不能卖
+      { date: "2026-08-04", o: 10, h: 11, l: 9.8, c: 11 },
+      { date: "2026-08-05", o: 11, h: 11, l: 10.9, c: 11 },
+      { date: "2026-08-06", c: 11 },
+      { date: "2026-08-07", c: 11 },
+      { date: "2026-08-10", c: 10.2 },                            // 期末回落到 10.2
+    ]);
+    recordPrediction(db, mkPred({ id: "tp3", stopPx: null, takeProfitPx: 10.5, validUntil: "2026-08-10" }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    // 次日 08-05 开盘 11 就在止盈价之上（跳空）→ 次日以 11 卖，+10%
+    // 关键是**不是**在 08-04 当天卖（那天也够了价，但 T+1 不允许）
+    expect(rep.settled[0].actualPct).toBeCloseTo(10, 6);
+    const row = db.prepare("SELECT attribution FROM outcome WHERE pred_id='tp3'").get() as any;
+    expect(row.attribution).toContain("2026-08-05");
+  });
+
+  it("同一天既够到止盈又够到止损 → 按止损算（保守）", () => {
+    seedDaily(db, "300502", [
+      { date: "2026-08-03", c: 10 },
+      { date: "2026-08-04", o: 10, h: 10.1, l: 9.8, c: 10 },
+      { date: "2026-08-05", o: 10, h: 10.6, l: 8.9, c: 9.5 },     // 同时够到 10.5 与 9
+      { date: "2026-08-10", c: 9.5 },
+    ]);
+    recordPrediction(db, mkPred({
+      id: "tp4", stopPx: 9, takeProfitPx: 10.5, validUntil: "2026-08-10",
+    }));
+
+    const rep = reconcile(db, { asOf: "2026-08-11" });
+    // 按止损 9 算 = -10%；若按止盈算会是 +5%
+    expect(rep.settled[0].actualPct).toBeCloseTo(-10, 6);
+    expect(rep.settled[0].attribution).toContain("破止损");
+  });
+});

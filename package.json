@@ -49,6 +49,8 @@
     "shadow:resettle": "tsx scripts/shadow-resettle.ts",
     "parity": "tsx scripts/parity.ts",
     "factor:eval": "tsx scripts/factor-eval.ts",
+    "policy:lab": "tsx scripts/policy_lab.ts",
+    "shadow:sweep": "tsx scripts/shadow_sweep.ts",
     "bootstrap": "tsx scripts/bootstrap.ts",
     "seed-strategies": "tsx scripts/seed-strategies.ts",
     "migrate": "tsx scripts/migrate-cli.ts",

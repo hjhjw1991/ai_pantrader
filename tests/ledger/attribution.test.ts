@@ -119,18 +119,24 @@ describe("ledger/attribution 取事实", () => {
     const d = weekdays("2026-07-01", 30);
     const base = d[22];
     // d[3] 是 20 日窗口内的最低点 7.0，基准日收 10.0 → 买前已涨 42.8%
-    const bars = d.slice(0, 23).map((day, i) => ({
-      date: day, c: i === 3 ? 7 : 9.5, l: i === 3 ? 7 : 9.4,
-    }));
+    const bars: Array<{ date: string; c: number; l?: number; h?: number; o?: number }> =
+      d.slice(0, 23).map((day, i) => ({
+        date: day, c: i === 3 ? 7 : 9.5, l: i === 3 ? 7 : 9.4,
+      }));
     bars[22] = { date: base, c: 10, l: 10 };
-    bars.push({ date: d[23], c: 8.9, l: 8.5 });   // horizon 末日，盘中破了 9 的止损
+    // T+1：成交当日不能卖，止损只能发生在次日。d[23] 成交、d[24] 破位、d[27] 期满
+    bars.push({ date: d[23], o: 9.8, h: 9.9, c: 9.0, l: 8.5 });   // 限价 10 成交于 9.8
+    bars.push({ date: d[24], o: 8.9, h: 9.0, c: 8.6, l: 8.4 });   // 跳空低开穿过止损 9
+    bars.push({ date: d[25], c: 8.7, l: 8.6 });
+    bars.push({ date: d[26], c: 8.6, l: 8.5 });
+    bars.push({ date: d[27], c: 8.5, l: 8.4 });                   // horizon 末日
     seedDaily(db, "300502", bars);
     // 决策时刻前 30 分钟的快照 —— 用来算报价陈旧度
     seedSnapshot(db, `${base}T06:30:00.000Z`, "300502", 10);
 
     const p = mkPred({
       id: "f1", ts: `${base}T07:00:00.000Z`, phase: "盘后",
-      stopPx: 9, evalHorizon: 1, validUntil: d[23],
+      stopPx: 9, evalHorizon: 5, validUntil: d[27],
     });
     const att = settleOne(db, p, {});
     expect(att.ok).toBe(true);
@@ -143,16 +149,20 @@ describe("ledger/attribution 取事实", () => {
   });
 
   it("attributeOutcome 把错因写回已结算的 outcome 行", () => {
-    // 次日开在触发价 10（限价成交于 10），盘中跌破止损 9，收 8.5
+    // 次日开在触发价 10（限价成交于 10）；T+1 下当日不能卖，第三日跌破止损 9
     seedDaily(db, "300502", [
       { date: "2026-07-01", c: 10 },
-      { date: "2026-07-02", o: 10, c: 8.5, l: 8.4 },
+      { date: "2026-07-02", o: 10, h: 10.2, c: 9.6, l: 9.5 },
+      { date: "2026-07-03", o: 9.9, h: 9.9, c: 8.5, l: 8.4 },
+      { date: "2026-07-06", c: 8.6, l: 8.5 },
+      { date: "2026-07-07", c: 8.6, l: 8.5 },
+      { date: "2026-07-08", c: 8.5, l: 8.4 },
     ]);
     recordPrediction(db, mkPred({
       id: "w1", ts: "2026-07-01T15:30:00+08:00", stopPx: 9,
-      evalHorizon: 1, validUntil: "2026-07-02",
+      evalHorizon: 5, validUntil: "2026-07-08",
     }));
-    reconcile(db, { asOf: "2026-07-03" });
+    reconcile(db, { asOf: "2026-07-10" });
 
     const r = attributeOutcome(db, "w1");
     expect(r!.errorType).toBe("逆势扛");
@@ -164,17 +174,21 @@ describe("ledger/attribution 取事实", () => {
   });
 
   it("reconcile 传入 attribute 钩子时可以一次落地错因", () => {
-    // 次日开在触发价 10（限价成交于 10），盘中跌破止损 9，收 8.5
+    // 次日开在触发价 10（限价成交于 10）；T+1 下当日不能卖，第三日跌破止损 9
     seedDaily(db, "300502", [
       { date: "2026-07-01", c: 10 },
-      { date: "2026-07-02", o: 10, c: 8.5, l: 8.4 },
+      { date: "2026-07-02", o: 10, h: 10.2, c: 9.6, l: 9.5 },
+      { date: "2026-07-03", o: 9.9, h: 9.9, c: 8.5, l: 8.4 },
+      { date: "2026-07-06", c: 8.6, l: 8.5 },
+      { date: "2026-07-07", c: 8.6, l: 8.5 },
+      { date: "2026-07-08", c: 8.5, l: 8.4 },
     ]);
     recordPrediction(db, mkPred({
       id: "h1", ts: "2026-07-01T15:30:00+08:00", stopPx: 9,
-      evalHorizon: 1, validUntil: "2026-07-02",
+      evalHorizon: 5, validUntil: "2026-07-08",
     }));
     const rep = reconcile(db, {
-      asOf: "2026-07-03",
+      asOf: "2026-07-10",
       attribute: (pred, facts, verdict) =>
         classifyError(buildAttributionInput(db, pred, facts, verdict)),
     });

@@ -355,6 +355,57 @@ export interface RangeTail {
   lo: number | null;
 }
 
+/** 后复权基准的一根 K 线。o/h/l/c 各自可能为 null —— 原始行是 null 就还是 null，不补 */
+export interface AdjBar {
+  date: string;
+  o: number | null;
+  h: number | null;
+  l: number | null;
+  c: number | null;
+}
+
+/**
+ * 区间内的日线，o/h/l/c **整体**换到后复权基准。
+ *
+ * 这是账本里第二处（也是最后一处）把原始价换成后复权价的地方，另一处是 `adjFactorOn`
+ * 供单点取价。两者必须走同一套自愈，否则又会出现"一边一个基准"。
+ *
+ * 为什么整体换而不是让调用方各自乘：调用方拿到的这根 K 线要拿来比价、算极值、
+ * 模拟离场，任一步漏乘就回到 B4 那个 bug（入场原始价 vs 出场后复权价，实测把
+ * 5 日 -8% 记成 +1008%）。给出去的就是成品，调用方没有乘错的机会。
+ */
+export function adjBars(
+  db: Db, code: string, from: string, to: string, opts: { endExclusive?: boolean } = {}
+): AdjBar[] {
+  const cmp = opts.endExclusive ? "<" : "<=";
+  const rows = db.prepare(
+    `SELECT date, o, h, l, c, COALESCE(adj_factor, 1.0) f FROM kline_daily
+     WHERE code = ? AND date >= ? AND date ${cmp} ? AND h IS NOT NULL AND l IS NOT NULL
+     ORDER BY date`
+  ).all(code, from, to) as Array<{
+    date: string; o: number | null; h: number | null; l: number | null;
+    c: number | null; f: number;
+  }>;
+  if (rows.length === 0) return [];
+  const fixed = repairAdjFactorSeries([
+    { adjFactor: priorAdjFactor(db, code, from) },
+    ...rows.map(r => ({ adjFactor: Number.isFinite(r.f) ? r.f : 1 })),
+  ]);
+  const out: AdjBar[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const f = fixed[i + 1].adjFactor ?? 1;       // fixed[0] 是递进去的起始台阶
+    const r = rows[i];
+    out.push({
+      date: r.date,
+      o: r.o == null ? null : r.o * f,
+      h: r.h == null ? null : r.h * f,
+      l: r.l == null ? null : r.l * f,
+      c: r.c == null ? null : r.c * f,
+    });
+  }
+  return out;
+}
+
 /**
  * 区间内最大有利 / 不利偏移，相对成交价。
  *
@@ -373,31 +424,19 @@ export function excursion(
 ): Excursion {
   if (entryPx <= 0) return { mfePct: null, maePct: null };
   const bound = tail ? tail.date : to;
-  const cmp = tail ? "<" : "<=";
   /**
    * 逐根取而不是 `MAX(h)`：极值要乘各自当日的复权因子，
    * 而因子是台阶 —— 区间内若跨一次除权，便宜那半段的 h 乘完因子可能反而是最高点。
    * 先取原始极值再统一乘，等于假设整段因子恒定，那正是这里要防的事。
-   *
-   * 因子过与读侧同一套自愈，并给首根递一个起始台阶（见 priorAdjFactor）。
-   * 持仓期最长 30 个交易日，逐根的代价可以忽略。
+   * 换算由 adjBars 一次做完（尾部当日要排除，故 endExclusive）。
    */
-  const rows = db.prepare(
-    `SELECT h, l, COALESCE(adj_factor, 1.0) f FROM kline_daily
-     WHERE code = ? AND date >= ? AND date ${cmp} ? AND h IS NOT NULL AND l IS NOT NULL
-     ORDER BY date`
-  ).all(code, from, bound) as Array<{ h: number; l: number; f: number }>;
-  const fixed = repairAdjFactorSeries([
-    { adjFactor: priorAdjFactor(db, code, from) },
-    ...rows.map(r => ({ adjFactor: Number.isFinite(r.f) ? r.f : 1 })),
-  ]);
+  const bars = adjBars(db, code, from, bound, { endExclusive: tail != null });
 
   let hi = Number.NEGATIVE_INFINITY;
   let lo = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < rows.length; i++) {
-    const f = fixed[i + 1].adjFactor ?? 1;      // fixed[0] 是递进去的起始台阶
-    hi = Math.max(hi, rows[i].h * f);
-    lo = Math.min(lo, rows[i].l * f);
+  for (const b of bars) {
+    if (b.h != null) hi = Math.max(hi, b.h);
+    if (b.l != null) lo = Math.min(lo, b.l);
   }
   hi = Math.max(hi, tail?.hi ?? Number.NEGATIVE_INFINITY);
   lo = Math.min(lo, tail?.lo ?? Number.POSITIVE_INFINITY);
@@ -413,7 +452,7 @@ export function excursion(
 }
 
 /** 离场方式：持有到 horizon 末收盘，还是中途被止损打出来 */
-export type ExitKind = "期满" | "止损";
+export type ExitKind = "期满" | "止损" | "止盈";
 
 export interface ExitFill {
   kind: ExitKind;
@@ -459,6 +498,36 @@ export function resolveStop(
     date: row.date, px: (gap ? (row.o as number) : stopPx) * f, gap,
     open: row.o == null ? null : row.o * f,
   };
+}
+
+export interface TakeProfitHit {
+  date: string;
+  /** 离场成交价（后复权基准，与入场价同一数轴） */
+  px: number;
+  /** 是否跳空高开直接越过止盈价（成交价取开盘价，比挂单价更好） */
+  gap: boolean;
+}
+
+/**
+ * 止盈：持仓期内第一根「最高价够到止盈价」的 K 线。
+ *
+ * 与 resolveStop 完全对称、方向相反：止损判低位、成交在止损价或更差的开盘价；
+ * 止盈判高位、成交在止盈价或**更好**的开盘价（跳空高开时按开盘价卖，不是按挂单价）。
+ *
+ * 止盈价存的是原始价口径（与 triggerPx / stopPx 同源），所以比价用原始 h，
+ * 算出的成交价再换到后复权基准 —— 与止损那一段同一套，混口径就是 B4 那个 bug。
+ */
+export function resolveTakeProfit(
+  db: Db, code: string, tpPx: number, from: string, to: string
+): TakeProfitHit | null {
+  const row = db.prepare(
+    `SELECT date, o FROM kline_daily WHERE code = ? AND date >= ? AND date <= ?
+       AND h IS NOT NULL AND h >= ? ORDER BY date LIMIT 1`
+  ).get(code, from, to, tpPx) as { date: string; o: number | null } | undefined;
+  if (!row) return null;
+  const gap = row.o != null && row.o >= tpPx;
+  const f = adjFactorOn(db, code, row.date);
+  return { date: row.date, px: (gap ? (row.o as number) : tpPx) * f, gap };
 }
 
 export interface SettleFacts {
@@ -576,15 +645,35 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
    *     这是偏严的一边，而偏严只是少算一点盈利，偏松会把没发生的亏损记成纪律失效。
    */
   const holdFrom = entry.atClose ? tradingDayOffset(db, entry.date, 1) : entry.date;
-  const stop = entry.triggered && direction === "看涨" && p.stopPx != null && holdFrom !== null
-    ? resolveStop(db, p.code, p.stopPx, holdFrom, horizonEnd)
+  /**
+   * 离场最早从成交**次日**起 —— A 股 T+1，当日买的不能当日卖。
+   *
+   * 与 holdFrom 分开是必须的：MFE/MAE 量的是「持仓期间出现过什么价」，当日买入后
+   * 隔夜那段波动确实是这笔仓位经历过的；但止损/止盈是**可执行路径**，当日离场那条路
+   * 现实里不存在。此前两个用途共用一个起点，盘中成交时等于允许当日买入当日止损离场
+   * （见 migrations/033 的实测代价：不设 T+1 时止盈 2% 看起来最优，那是假的）。
+   */
+  const exitFrom = tradingDayOffset(db, entry.date, 1);
+  const stop = entry.triggered && direction === "看涨" && p.stopPx != null && exitFrom !== null
+    ? resolveStop(db, p.code, p.stopPx, exitFrom, horizonEnd)
+    : null;
+  const takeProfit = entry.triggered && direction === "看涨" && p.takeProfitPx != null && exitFrom !== null
+    ? resolveTakeProfit(db, p.code, p.takeProfitPx, exitFrom, horizonEnd)
     : null;
   const stopBreached = stop !== null;
   const stopBreachDate = stop?.date ?? null;
 
-  const exitFill: ExitFill = stop
+  /**
+   * 同一天既够到止盈又够到止损时按**止损**算（保守）。
+   * 日线给不出当日先后，两种猜法里选对我们不利的那一种 —— 往好了猜会把结算
+   * 系统性做高，而"往好了猜"正是这类回测最常见的自我欺骗。
+   */
+  const tpFirst = takeProfit !== null && (stop === null || takeProfit.date < stop.date);
+  const exitFill: ExitFill = stop !== null && !tpFirst
     ? { kind: "止损", px: stop.px, date: stop.date, source: "kline_daily" }
-    : { kind: "期满", px: exitPx.px, date: horizonEnd, source: exitPx.source };
+    : takeProfit !== null && tpFirst
+      ? { kind: "止盈", px: takeProfit.px, date: takeProfit.date, source: "kline_daily" }
+      : { kind: "期满", px: exitPx.px, date: horizonEnd, source: exitPx.source };
 
   // 价格没够到推荐的买点 —— 这笔推荐从未成为一个仓位，没有盈亏可算。
   // 它仍然要结算、要落库：未触发本身就是复盘要统计的结果之一
@@ -595,8 +684,13 @@ export function settleOne(db: Db, p: Prediction, opts: ReconcileOptions = {}): S
   const excur = entry.triggered && holdFrom !== null
     ? excursion(
         db, p.code, direction, entry.px, holdFrom, horizonEnd,
-        // 止损当天不取整根 K 线：只确知开盘价在破位前出现过，之后的高低与你无关
-        stop ? { date: stop.date, hi: stop.open, lo: stop.px } : undefined
+        // 离场当天不取整根 K 线：只确知开盘价在离场前出现过，之后的高低与你无关。
+        // 整根算进去等于把"卖掉之后才涨到/跌到的价"记成自己的持仓经历
+        stop !== null && exitFill.kind === "止损"
+          ? { date: stop.date, hi: stop.open, lo: stop.px }
+          : takeProfit !== null && exitFill.kind === "止盈"
+            ? { date: takeProfit.date, hi: takeProfit.px, lo: null }
+            : undefined
       )
     : { mfePct: null, maePct: null };
 

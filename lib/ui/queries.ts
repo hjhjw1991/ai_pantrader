@@ -621,6 +621,7 @@ export interface WatchpoolRow {
   account: AccountType | null;
   triggerPx: number | null;
   stopPx: number | null;
+  takeProfitPx: number | null;
   thesis: string | null;
   addedAt: string;
   active: boolean;
@@ -637,6 +638,7 @@ export function watchpool(db: Db, includeInactive = false): WatchpoolRow[] {
     account: (r.account as AccountType) ?? null,
     triggerPx: r.trigger_px === null ? null : Number(r.trigger_px),
     stopPx: r.stop_px === null ? null : Number(r.stop_px),
+    takeProfitPx: r.take_profit_px == null ? null : Number(r.take_profit_px),
     thesis: (r.thesis as string) ?? null,
     addedAt: r.added_at as string,
     active: Number(r.active) === 1,
@@ -719,6 +721,7 @@ export function positions(db: Db): PositionRow[] {
     cost: Number(r.cost),
     openDate: r.open_date as string,
     stopPx: r.stop_px === null ? null : Number(r.stop_px),
+    takeProfitPx: r.take_profit_px == null ? null : Number(r.take_profit_px),
     thesis: (r.thesis as string) ?? "",
   }));
 }
@@ -778,6 +781,7 @@ export function predictions(db: Db, limit = 200): Prediction[] {
     account: r.account as AccountType,
     triggerPx: r.trigger_px === null ? null : Number(r.trigger_px),
     stopPx: r.stop_px === null ? null : Number(r.stop_px),
+    takeProfitPx: r.take_profit_px == null ? null : Number(r.take_profit_px),
     size: Number(r.size ?? 0),
     thesis: (r.thesis as string) ?? "",
     gear: r.gear as EnvGear,

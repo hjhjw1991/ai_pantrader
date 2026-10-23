@@ -81,6 +81,7 @@ export function mkPred(over: Partial<Prediction> = {}): Prediction {
     account: "卫星",
     triggerPx: 10,
     stopPx: 9,
+    takeProfitPx: null,
     size: 0.1,
     thesis: "测试用",
     gear: "中性",

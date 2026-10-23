@@ -67,6 +67,23 @@ export function planPredictionId(date: string, strategyId: string, code: string,
 const DEFAULT_STOP_PCT = 0.08;
 
 /**
+ * 止盈比例（+5%）。此前系统只有止损没有止盈，成交后一路拿到期满。
+ *
+ * 依据（2026-10-23，影子盘 12,665 条可重放样本，按基准日 7:3 时间切分，
+ * 扣 0.15% 双边成本后的样本外每信号净期望）：
+ *
+ *   纯期满    +0.097%
+ *   止盈 4%   +0.209%   ← 最高
+ *   止盈 5%   +0.195%
+ *   止盈 8%   +0.182%
+ *
+ * 取 5% 而不是最高的 4%：4/5/8 是一片平台，差在噪音里，取中间一档两边都有邻档支撑；
+ * 而 4% 是网格里的最优点，本身带着"挑过"的运气（selectionBias 已在报）。
+ * 止损那条轴实测无效，不在这里动它。
+ */
+const DEFAULT_TAKE_PROFIT_PCT = 0.05;
+
+/**
  * 信号卡 → 台账行。
  *
  * 整卡都记（candidates + holdings），不只记买入：
@@ -89,6 +106,9 @@ export function planPredictions(
     const thesis = (!c.stopPx && needsStop && c.triggerPx != null)
       ? `${c.thesis}（无账户止损价，已用默认 -${(DEFAULT_STOP_PCT * 100).toFixed(0)}% 兜底）`
       : c.thesis;
+    // 止盈只对"会形成仓位"的动作有意义：清仓/减仓是减持仓，观察没有方向承诺
+    const takeProfitPx = (c.action === "买入" || c.action === "加仓") && c.triggerPx != null
+      ? Math.round(c.triggerPx * (1 + DEFAULT_TAKE_PROFIT_PCT) * 1e4) / 1e4 : null;
     return {
       id: planPredictionId(date, card.strategyId, c.code, c.action),
       ts,
@@ -104,6 +124,7 @@ export function planPredictions(
       // 打板 / 半路这类触发价在昨收上方的是触价单，结算按"最高价 ≥ 触发价"撮合（见 EntryType）
       entryType: entryTypeOf(c.entryType),
       stopPx,
+      takeProfitPx,
       size: c.size,
       thesis,
       gear: card.env.gear,

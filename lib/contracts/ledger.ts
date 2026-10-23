@@ -30,6 +30,14 @@ export interface Prediction {
    */
   entryType?: EntryType;
   stopPx: number | null;
+  /**
+   * 止盈价（原始价口径，与 stopPx 同源）。null = 不止盈，一路拿到 horizon 期满。
+   *
+   * 实测依据见 migrations/033：影子盘 12,665 条样本样本外净期望
+   * 纯期满 +0.097% → 止盈 4% +0.209% / 5% +0.195% / 8% +0.182%（4~8% 是平台）。
+   * 老行一律 null（当时确实没设），不回填。
+   */
+  takeProfitPx: number | null;
   size: number;
   thesis: string;
   gear: EnvGear;

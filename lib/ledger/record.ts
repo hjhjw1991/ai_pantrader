@@ -84,11 +84,12 @@ export function recordPrediction(db: Db, p: Prediction): void {
 
   db.prepare(
     `INSERT INTO prediction (id, ts, phase, code, strategy_id, strategy_ver, action, account,
-       trigger_px, stop_px, size, thesis, gear, eval_horizon, valid_until, advisor_influenced, entry_type)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       trigger_px, stop_px, take_profit_px, size, thesis, gear, eval_horizon, valid_until,
+       advisor_influenced, entry_type)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(p.id, p.ts, p.phase, p.code, p.strategyId, p.strategyVersion, p.action, p.account,
-        p.triggerPx, p.stopPx, p.size, p.thesis, p.gear, p.evalHorizon, p.validUntil,
-        p.advisorInfluenced ? 1 : 0, entryTypeOf(p.entryType));
+        p.triggerPx, p.stopPx, p.takeProfitPx, p.size, p.thesis, p.gear, p.evalHorizon,
+        p.validUntil, p.advisorInfluenced ? 1 : 0, entryTypeOf(p.entryType));
 }
 
 /** 整卡信号一起落库：一条非法就整批回滚，避免半张信号卡进台账 */
