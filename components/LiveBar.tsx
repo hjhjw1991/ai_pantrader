@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { fmtNoticeTs } from "@/lib/ui/format";
 import { toShanghaiWall } from "@/lib/ui/time";
-import { shanghaiDay } from "@/lib/data/clock";
+import { shanghaiDay, shanghaiTs } from "@/lib/data/clock";
 import { intradayIntervalMin } from "@/lib/data/schedule";
 import { useCollectScan, CollectProgress } from "@/components/CollectScan";
 import { dedupeMerge, liveCap, olderCursor } from "@/lib/ui/notice-list";
@@ -40,6 +40,8 @@ type Notice = {
   id: number; ts: string; kind: string;
   severity: "critical" | "warn" | "info";
   title: string; body: string | null;
+  /** 已读时间；null = 未读。用于"未读"标记与小红点计数 */
+  readAt: string | null;
 };
 
 export function LiveBar() {
@@ -107,6 +109,20 @@ export function LiveBar() {
       }
     });
 
+    /**
+     * 历史回填（连接时一次性推下来，供铃铛与顶栏硬线展示）。
+     * 关键：**不弹桌面通知、不触发 router.refresh**。
+     * 它和 live 的 notify 分开，正是为了避免每次刷新都把历史重弹一遍 ——
+     * 桌面弹窗只在 notify 分支发生，而 notify 现在只承载连接之后新产生的通知。
+     */
+    es.addEventListener("history", e => {
+      const arr: Notice[] = JSON.parse((e as MessageEvent).data);
+      setNotices(prev => dedupeMerge(prev, arr, null));
+      let max = 0;
+      for (const n of arr) if (n.id > max) max = n.id;
+      lastIdRef.current = Math.max(lastIdRef.current, max);
+    });
+
     return () => es.close();
   }, [router, notifyOn]);
 
@@ -138,7 +154,14 @@ export function LiveBar() {
    * 期间漏掉的新通知由 SSE 兜住，不会丢。
    */
   const historyLoadedRef = useRef(false);
-  const unseen = notices.filter(n => n.id > seen).length;
+  /**
+   * 未读数 = 持久化未读（readAt 仍为空）且本会话还没"看到"的。
+   *
+   * 用 readAt 而不是只靠本会话的 seen：标记已读会写库，刷新后 loadOlder 拉回来的
+   * 历史带上了 read_at，于是不会又算成未读把红点支起来；而连接期间新来的 notify
+   * 是 readAt=null 的，自然计入未读。
+   */
+  const unseen = notices.filter(n => n.readAt === null && n.id > seen).length;
   const btn = "border border-line-2 rounded-sm px-2 py-0.5 text-[11px] hover:bg-panel-2 disabled:opacity-50";
 
   /** 拉一页更旧的通知。before=0 表示第一页（最新的 PAGE_SIZE 条） */
@@ -179,6 +202,27 @@ export function LiveBar() {
       setSeen(s => Math.max(s, items[0]?.id ?? 0));
     });
   }, [open, notices, loadOlder]);
+
+  /** 把当前已加载的通知全部标记为已读（写库持久化，刷新后不会又变未读） */
+  const markAllRead = useCallback(async () => {
+    const maxId = notices.reduce((m, n) => Math.max(m, n.id), 0);
+    if (maxId === 0) return;
+    try {
+      const res = await fetch("/api/notifications/read", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upToId: maxId }),
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const now = shanghaiTs();
+      // 本地也标上，立刻消除红点，不必等下次刷新
+      setNotices(prev => prev.map(n => (n.id <= maxId ? { ...n, readAt: now } : n)));
+      setSeen(maxId);
+    } catch {
+      setLoadErr("标记已读失败，重试一下");
+    }
+  }, [notices]);
 
   /**
    * 还有几条没显示。展示的永远是最新的 revealed 条，所以"没显示"就等于"比它们旧"的
@@ -244,6 +288,9 @@ export function LiveBar() {
               通知
               {unseen > 0 ? <span className="ml-2 text-ink-3">{unseen} 条新</span> : null}
               {loadErr ? <span className="ml-2 text-danger">{loadErr}</span> : null}
+              {unseen > 0 ? (
+                <button className={`${btn} ml-2`} onClick={markAllRead} type="button">全部已读</button>
+              ) : null}
               {!notifyOn ? (
                 <button className={`${btn} ml-auto`} onClick={enableNotify} type="button">开启桌面通知</button>
               ) : <span className="ml-auto text-down">桌面通知已开</span>}
@@ -260,6 +307,8 @@ export function LiveBar() {
                   {visible.map(n => (
                     <li key={n.id} className="px-3 py-2 border-b border-line/60">
                       <div className={n.severity === "critical" ? "text-danger" : n.severity === "warn" ? "text-warn" : "text-ink-2"}>
+                        {/* 未读项前面加个红点，一眼区分看没看过；已读的勿扰 */}
+                        {n.readAt === null ? <span className="inline-block w-1.5 h-1.5 rounded-full bg-danger mr-1 align-middle" /> : null}
                         {/* 带日期：只看 HH:MM:SS 分不清"今天早上"和"上周二"，
                             而这条通知还作不作数，多半就取决于它多老了 */}
                         <span className="num text-ink-3 mr-1" title={n.ts}>{fmtNoticeTs(n.ts)}</span>{n.title}

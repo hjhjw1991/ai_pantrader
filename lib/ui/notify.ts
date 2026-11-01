@@ -83,6 +83,51 @@ export function countNotifications(db: Db): number {
   return Number(r?.n ?? 0);
 }
 
+/**
+ * 当前最大通知 id。
+ *
+ * 给 SSE 用的"连接时刻水位"：一个通知连接建立时记下这个值，之后只推送 id 比它大的
+ * （即连接之后才产生的）通知，连接之前的历史走单独的 history 事件回填，避免每次刷新
+ * 把全部历史当新消息弹一遍桌面通知。
+ */
+export function maxNotificationId(db: Db): number {
+  const r = db.prepare(`SELECT MAX(id) m FROM notification`).get() as any;
+  return Number(r?.m ?? 0);
+}
+
+/**
+ * SSE 连接建立时该回填的「历史」与「水位」。
+ *
+ * 历史（最新的 limit 条）走 `history` 事件一次性推给铃铛与顶栏硬线展示；
+ * 水位 = max(sinceId, 当前最大 id) 之后的通知，才在后续轮询里作为 `notify` 事件推送 ——
+ * 客户端只对 `notify` 弹桌面通知，于是历史不会在每次刷新时被重弹一遍。
+ *
+ * 把这段逻辑从 SSE 路由里抽出来，是因为它既是这次 bug 修复的核心（历史/实时的分界），
+ * 又必须能被纯函数测试覆盖而不用把整个 next 路由拉进测试（后者会触发 SSR 转译缓存写入，
+ * 在受限环境里偶发 EPERM，把整文件测试拖垮）。
+ */
+export interface ConnectionFeed {
+  history: Notification[];
+  waterMark: number;
+}
+
+export function connectionBackfill(db: Db, sinceId: number, limit = 50): ConnectionFeed {
+  const history = recentNotifications(db, 0, limit);
+  const waterMark = Math.max(sinceId, maxNotificationId(db));
+  return { history, waterMark };
+}
+
+/**
+ * 校验「标记已读」的 upToId。非法（非 number / 非整数 / 负数 / null / undefined / 字符串）返回 null。
+ *
+ * 用 typeof 先拦：Number(null) === 0、Number(undefined) === NaN，单独用 Number() 会把
+ * null 误判进非负整数分支（当成"标 0 条"），必须显式拒绝非 number。
+ */
+export function parseReadUpToId(raw: unknown): number | null {
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) return null;
+  return raw;
+}
+
 export function markRead(db: Db, upToId: number): number {
   const r = db.prepare(
     `UPDATE notification SET read_at = ? WHERE id <= ? AND read_at IS NULL`

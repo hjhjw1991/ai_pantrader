@@ -6,7 +6,8 @@ import { openDb } from "@/lib/db";
 import { runMigrations } from "@/lib/db/migrate";
 import {
   pushNotification, recentNotifications, notificationsPage, countNotifications,
-  markRead, diffAndNotify, readSignalState,
+  markRead, diffAndNotify, readSignalState, maxNotificationId,
+  connectionBackfill, parseReadUpToId,
 } from "@/lib/ui/notify";
 import type { SignalCard, Candidate } from "@/lib/contracts";
 
@@ -58,6 +59,33 @@ describe("通知去重", () => {
     const all = recentNotifications(db);
     expect(markRead(db, all[0].id)).toBe(2);
     expect(markRead(db, all[0].id)).toBe(0);
+  });
+
+  it("markRead 之后 read_at 被回填，客户端据此判未读", () => {
+    pushNotification(db, { kind: "k", severity: "info", title: "1" });
+    const all = recentNotifications(db);
+    expect(all[0].readAt).toBeNull();
+    markRead(db, all[0].id);
+    const after = recentNotifications(db);
+    expect(after[0].readAt).not.toBeNull();
+  });
+
+  it("maxNotificationId 返回当前最大 id，空表为 0", () => {
+    expect(maxNotificationId(db)).toBe(0);
+    pushNotification(db, { kind: "k", severity: "info", title: "1" });
+    pushNotification(db, { kind: "k", severity: "info", title: "2" });
+    expect(maxNotificationId(db)).toBe(2);
+  });
+
+  it("waterMark 语义：id > maxNotificationId 的才是连接后新通知", () => {
+    pushNotification(db, { kind: "k", severity: "info", title: "历史" });
+    const wm = maxNotificationId(db);
+    // 水位之内的，再查一次应该查不到（recentNotifications 用 > 而非 >=）
+    expect(recentNotifications(db, wm)).toHaveLength(0);
+    pushNotification(db, { kind: "k", severity: "info", title: "新" });
+    const inc = recentNotifications(db, wm);
+    expect(inc).toHaveLength(1);
+    expect(inc[0].title).toBe("新");
   });
 });
 
@@ -175,5 +203,51 @@ describe("通知历史翻页", () => {
   it("空表不炸", () => {
     expect(notificationsPage(db, 0, 10)).toEqual([]);
     expect(countNotifications(db)).toBe(0);
+  });
+});
+
+describe("connectionBackfill：历史回填与水位（修复：历史不再走 notify 被当新消息重弹）", () => {
+  it("返回最新的 limit 条作为历史，水位 = max(sinceId, 当前最大 id)", () => {
+    for (let i = 1; i <= 5; i++) pushNotification(db, { kind: "k", severity: "info", title: `n${i}` });
+    const feed = connectionBackfill(db, 0, 50);
+    expect(feed.history.map(n => n.title)).toEqual(["n5", "n4", "n3", "n2", "n1"]);
+    expect(feed.waterMark).toBe(5);
+  });
+
+  it("sinceId 参与水位：客户端已持有的不回退", () => {
+    for (let i = 1; i <= 5; i++) pushNotification(db, { kind: "k", severity: "info", title: `n${i}` });
+    const feed = connectionBackfill(db, 3, 50);
+    expect(feed.waterMark).toBe(5); // max(3, 5)
+  });
+
+  it("水位之内的不再走 notify：recentNotifications(waterMark) 为空", () => {
+    for (let i = 1; i <= 5; i++) pushNotification(db, { kind: "k", severity: "info", title: `n${i}` });
+    const { waterMark } = connectionBackfill(db, 0, 50);
+    expect(recentNotifications(db, waterMark)).toHaveLength(0);
+  });
+
+  it("水位之后新产生的才走 notify：连接后插入的被 recentNotifications(waterMark) 捞到", () => {
+    for (let i = 1; i <= 3; i++) pushNotification(db, { kind: "k", severity: "info", title: `old${i}` });
+    const { waterMark } = connectionBackfill(db, 0, 50); // 此刻水位 = 3
+    pushNotification(db, { kind: "k", severity: "warn", title: "new" }); // 连接后新通知
+    const live = recentNotifications(db, waterMark);
+    expect(live).toHaveLength(1);
+    expect(live[0].title).toBe("new");
+  });
+});
+
+describe("parseReadUpToId：标记已读入参校验", () => {
+  it("合法非负整数原样返回", () => {
+    expect(parseReadUpToId(0)).toBe(0);
+    expect(parseReadUpToId(1)).toBe(1);
+    expect(parseReadUpToId(42)).toBe(42);
+  });
+  it("null / undefined / 负数 / 小数 / 字符串 一律判非法", () => {
+    expect(parseReadUpToId(null)).toBeNull();
+    expect(parseReadUpToId(undefined)).toBeNull();
+    expect(parseReadUpToId(-1)).toBeNull();
+    expect(parseReadUpToId(1.5)).toBeNull();
+    expect(parseReadUpToId("5")).toBeNull();
+    expect(parseReadUpToId([])).toBeNull();
   });
 });

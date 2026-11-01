@@ -1,5 +1,5 @@
 import { readDb } from "@/lib/ui/db";
-import { recentNotifications } from "@/lib/ui/notify";
+import { recentNotifications, connectionBackfill } from "@/lib/ui/notify";
 import { latestQuoteTs } from "@/lib/ui/queries";
 import { shanghaiTs } from "@/lib/data/clock";
 
@@ -21,6 +21,8 @@ export const runtime = "nodejs";
  */
 const POLL_MS = 3_000;
 const HEARTBEAT_MS = 25_000;
+/** 连接时回填到铃铛的历史条数，与 /api/notifications 的默认页一致 */
+const HISTORY_LIMIT = 50;
 
 export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -33,6 +35,15 @@ export async function GET(req: Request): Promise<Response> {
       let lastQuoteTs: string | null = null;
       let lastBeat = Date.now();
       let closed = false;
+      /**
+       * 连接时刻的水位：此刻之前的通知都算"历史"，单独走 history 事件回填到铃铛，
+       * 客户端不会把它当新消息弹桌面通知。notify 事件只承载水位之后新产生的通知。
+       *
+       * 修复前：每次刷新都把最近 50 条历史一并走 notify 推下来，客户端每条都
+       * `new Notification(...)`，于是"已经看过、确认过的"通知被一遍遍重弹。
+       */
+      let waterMark = sinceId;
+      let backfilled = false;
 
       const send = (event: string, data: unknown) => {
         if (closed) return;
@@ -55,6 +66,17 @@ export async function GET(req: Request): Promise<Response> {
           send("data", { latestQuoteTs: ts, at: shanghaiTs() });
         }
 
+        // 首次连接只回填历史（铃铛与顶栏硬线展示用），不弹桌面通知。
+        // backfilled 守卫保证历史只在连接时推一次；之后水位之后的新通知才走 notify。
+        if (!backfilled) {
+          const { history, waterMark: wm } = connectionBackfill(db, sinceId, HISTORY_LIMIT);
+          waterMark = wm;
+          lastId = wm;
+          backfilled = true;
+          send("history", history);
+        }
+
+        // 只推连接时刻水位之后新产生的通知
         const fresh = recentNotifications(db, lastId).reverse();
         for (const n of fresh) {
           lastId = Math.max(lastId, n.id);
